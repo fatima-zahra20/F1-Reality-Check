@@ -134,6 +134,9 @@ data/
 *.xlsx
 *.xls
 *.tsv
+*.db
+*.db-shm
+*.db-wal
 
 
 # Environments
