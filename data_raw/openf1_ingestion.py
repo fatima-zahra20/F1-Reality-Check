@@ -14,7 +14,7 @@ from pathlib import Path
 
 BASE_URL = "https://api.openf1.org/v1"
 DB_PATH = Path(__file__).parent / "f1.db"
-REQUEST_DELAY = 0.4  # seconds between API calls
+REQUEST_DELAY = 1.0  # seconds between API calls
 
 logging.basicConfig(
     level=logging.INFO,
