@@ -1,3 +1,4 @@
+--THIS IS DATA QUALITY CHECK PHASE 1
 --P-keys
 SELECT COUNT(*) AS c , meeting_key
 FROM meetings
@@ -41,11 +42,13 @@ HAVING c>1 --  session_key , driver_number , lap_number is the composite p-key f
 
 -------------------------------------
 
-SELECT COUNT(*) AS c, session_key, "date", overtaking_driver_number
-FROM overtakes
-GROUP BY session_key, "date", overtaking_driver_number
-HAVING c > 1 -- session_key, date, overtaking_driver_number is the composite PK.
--- Note: overtaken_driver_number is just an attribute of the event, not part of the key.
+SELECT COUNT(*) FROM (
+    SELECT session_key, "date", overtaking_driver_number, overtaken_driver_number
+    FROM overtakes
+    GROUP BY session_key, "date", overtaking_driver_number, overtaken_driver_number
+    HAVING COUNT(*) > 1
+); -- session_key, "date", overtaking_driver_number, overtaken_driver_number is the composite PK.
+
 
 -------------------------------------
 
