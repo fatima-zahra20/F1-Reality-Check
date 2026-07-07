@@ -1,31 +1,4 @@
---THIS IS DATA PROFILING PHASE 2
---===========================================================================
---MEETINGS TABLE
---===========================================================================
-PRAGMA table_info('meetings')
-
--- 1) Row count + null rate per column
-SELECT
-    COUNT(*) AS total_rows,
-    SUM(meeting_key           IS NULL) AS null_meeting_key,
-    SUM(meeting_name          IS NULL) AS null_meeting_name,
-    SUM(meeting_official_name IS NULL) AS null_meeting_official_name,
-    SUM("location"            IS NULL) AS null_location,
-    SUM(country_key           IS NULL) AS null_country_key,
-    SUM(country_code          IS NULL) AS null_country_code,
-    SUM(country_name          IS NULL) AS null_country_name,
-    SUM(country_flag          IS NULL) AS null_country_flag,
-    SUM(circuit_key           IS NULL) AS null_circuit_key,
-    SUM(circuit_short_name    IS NULL) AS null_circuit_short_name,
-    SUM(circuit_type          IS NULL) AS null_circuit_type,
-    SUM(circuit_info_url      IS NULL) AS null_circuit_info_url,
-    SUM(circuit_image         IS NULL) AS null_circuit_image,
-    SUM(gmt_offset            IS NULL) AS null_gmt_offset,
-    SUM(date_start            IS NULL) AS null_date_start,
-    SUM(date_end              IS NULL) AS null_date_end,
-    SUM(year                  IS NULL) AS null_year,
-    SUM(is_cancelled          IS NULL) AS null_is_cancelled
-FROM meetings
+--DATA PROFILING PHASE 2
 
 
 -- 2) Should-be-INTEGER columns: what's actually stored?
@@ -38,7 +11,6 @@ SELECT typeof(year)        AS t, COUNT(*) FROM meetings GROUP BY t;
 -- 3) Should-be-BOOLEAN
 SELECT is_cancelled, COUNT(*) FROM meetings GROUP BY is_cancelled;
 
-
 -- 4) Should-be-DATETIME: do they parse as ISO 8601?
 SELECT
     SUM(datetime(date_start) IS NULL AND date_start IS NOT NULL) AS unparseable_starts,
@@ -48,8 +20,17 @@ SELECT
 FROM meetings;
 
 
+SELECT date_start , date_end 
+FROM meetings
+WHERE date_start > date_end
+
+
 -- 5) gmt_offset format check — is it "HH:MM:SS", seconds, or mixed?
 SELECT gmt_offset, COUNT(*) FROM meetings GROUP BY gmt_offset ORDER BY 2 DESC;
+
+SELECT DISTINCT meeting_name , meeting_official_name , "location" , country_code, country_name
+FROM meetings
+
 
 
 -- 6) Sample a few full rows to eyeball
@@ -60,30 +41,6 @@ SELECT * FROM meetings LIMIT 5
 --===========================================================================
 --SESSIONS TABLE
 --===========================================================================
-
-PRAGMA table_info('sessions')
-
-
--- 1) Row count + null rates
-SELECT
-    COUNT(*) AS total_rows,
-    SUM(session_key         IS NULL) AS null_session_key,
-    SUM(session_type        IS NULL) AS null_session_type,
-    SUM(session_name        IS NULL) AS null_session_name,
-    SUM(date_start          IS NULL) AS null_date_start,
-    SUM(date_end            IS NULL) AS null_date_end,
-    SUM(meeting_key         IS NULL) AS null_meeting_key,
-    SUM(circuit_key         IS NULL) AS null_circuit_key,
-    SUM(circuit_short_name  IS NULL) AS null_circuit_short_name,
-    SUM(country_key         IS NULL) AS null_country_key,
-    SUM(country_code        IS NULL) AS null_country_code,
-    SUM(country_name        IS NULL) AS null_country_name,
-    SUM("location"           IS NULL) AS null_location,
-    SUM(gmt_offset          IS NULL) AS null_gmt_offset,
-    SUM(year                IS NULL) AS null_year,
-    SUM(is_cancelled        IS NULL) AS null_is_cancelled
-FROM sessions
-
 
 -- 2) Should-be-INTEGER: verify actual stored types
 SELECT typeof(session_key) AS t, COUNT(*) FROM sessions GROUP BY t;
@@ -101,7 +58,6 @@ SELECT session_name, COUNT(*) FROM sessions GROUP BY session_name ORDER BY 2 DES
 -- 4) Boolean check
 SELECT is_cancelled, COUNT(*) FROM sessions GROUP BY is_cancelled;
 
-
 -- 5) Dates parse cleanly?
 SELECT
     SUM(datetime(date_start) IS NULL AND date_start IS NOT NULL) AS unparseable_starts,
@@ -110,36 +66,16 @@ SELECT
     MAX(date_end)   AS latest
 FROM sessions;
 
-
+SELECT DISTINCT session_type , session_name FROM sessions 
+SELECT * FROM sessions LIMIT 5
 --===========================================================================
 --DRIVERS TABLE
 --===========================================================================
-
-PRAGMA table_info('drivers')
-
--- 1) Row count + null rates
-SELECT
-    COUNT(*) AS total_rows,
-    SUM(meeting_key     IS NULL) AS null_meeting_key,
-    SUM(session_key     IS NULL) AS null_session_key,
-    SUM(driver_number   IS NULL) AS null_driver_number,
-    SUM(broadcast_name  IS NULL) AS null_broadcast_name,
-    SUM(full_name       IS NULL) AS null_full_name,
-    SUM(name_acronym    IS NULL) AS null_name_acronym,
-    SUM(team_name       IS NULL) AS null_team_name,
-    SUM(team_colour     IS NULL) AS null_team_colour,
-    SUM(first_name      IS NULL) AS null_first_name,
-    SUM(last_name       IS NULL) AS null_last_name,
-    SUM(headshot_url    IS NULL) AS null_headshot_url,
-    SUM(country_code    IS NULL) AS null_country_code
-FROM drivers;
-
 
 -- 2) Should-be-INTEGER
 SELECT typeof(meeting_key)   AS t, COUNT(*) FROM drivers GROUP BY t;
 SELECT typeof(session_key)   AS t, COUNT(*) FROM drivers GROUP BY t;
 SELECT typeof(driver_number) AS t, COUNT(*) FROM drivers GROUP BY t;
-
 
 -- 3) Enum-ish check: how many distinct teams, how many distinct drivers?
 SELECT COUNT(DISTINCT team_name) AS distinct_teams ,COUNT(DISTINCT driver_number) AS distinct_driver_numbers  ,COUNT(DISTINCT full_name) AS distinct_full_names 
@@ -170,29 +106,6 @@ GROUP BY team_name;
 --LAPS TABLE
 --===========================================================================
 
-PRAGMA table_info('laps')
-
--- 1) Row count + null rates
-SELECT
-    COUNT(*) AS total_rows,
-    SUM(meeting_key       IS NULL) AS null_meeting_key,
-    SUM(session_key       IS NULL) AS null_session_key,
-    SUM(driver_number     IS NULL) AS null_driver_number,
-    SUM(lap_number        IS NULL) AS null_lap_number,
-    SUM(date_start        IS NULL) AS null_date_start,
-    SUM(duration_sector_1 IS NULL) AS null_s1,
-    SUM(duration_sector_2 IS NULL) AS null_s2,
-    SUM(duration_sector_3 IS NULL) AS null_s3,
-    SUM(i1_speed          IS NULL) AS null_i1_speed,
-    SUM(i2_speed          IS NULL) AS null_i2_speed,
-    SUM(is_pit_out_lap    IS NULL) AS null_pit_out,
-    SUM(lap_duration      IS NULL) AS null_lap_duration,
-    SUM(segments_sector_1 IS NULL) AS null_seg1,
-    SUM(segments_sector_2 IS NULL) AS null_seg2,
-    SUM(segments_sector_3 IS NULL) AS null_seg3,
-    SUM(st_speed          IS NULL) AS null_st_speed
-FROM laps;
-
 
 -- 2) Should-be-INTEGER
 SELECT typeof(session_key)   AS t, COUNT(*) FROM laps GROUP BY t;
@@ -206,7 +119,6 @@ SELECT typeof(lap_duration)      AS t, COUNT(*) FROM laps WHERE lap_duration IS 
 SELECT typeof(duration_sector_1) AS t, COUNT(*) FROM laps WHERE duration_sector_1 IS NOT NULL GROUP BY t;
 SELECT typeof(i1_speed)          AS t, COUNT(*) FROM laps WHERE i1_speed IS NOT NULL GROUP BY t;
 
-
 -- 4) Boolean check
 SELECT is_pit_out_lap, COUNT(*) FROM laps GROUP BY is_pit_out_lap;
 
@@ -219,7 +131,6 @@ SELECT
     MAX(CAST(st_speed AS REAL))     AS max_speed
 FROM laps
 WHERE lap_duration IS NOT NULL;
-
 
 -- 6) date_start parseable?
 SELECT
@@ -240,21 +151,6 @@ SELECT segments_sector_1 FROM laps WHERE segments_sector_1 IS NOT NULL LIMIT 3;
 --===========================================================================
 
 
-PRAGMA table_info('stints')
-
-
--- 1) Row count + nulls
-SELECT
-    COUNT(*) AS total_rows,
-    SUM(meeting_key        IS NULL) AS null_meeting_key,
-    SUM(session_key        IS NULL) AS null_session_key,
-    SUM(stint_number       IS NULL) AS null_stint_number,
-    SUM(driver_number      IS NULL) AS null_driver_number,
-    SUM(lap_start          IS NULL) AS null_lap_start,
-    SUM(lap_end            IS NULL) AS null_lap_end,
-    SUM(compound           IS NULL) AS null_compound,
-    SUM(tyre_age_at_start  IS NULL) AS null_tyre_age
-FROM stints;
 
 
 -- 2) Integer casts
@@ -291,20 +187,6 @@ WHERE CAST(lap_end AS INTEGER) < CAST(lap_start AS INTEGER);
 --===========================================================================
 
 
-PRAGMA table_info('pit')
-
--- 1) Row count + nulls
-SELECT
-    COUNT(*) AS total_rows,
-    SUM("date"        IS NULL) AS null_date,
-    SUM(session_key   IS NULL) AS null_session_key,
-    SUM(meeting_key   IS NULL) AS null_meeting_key,
-    SUM(driver_number IS NULL) AS null_driver_number,
-    SUM(lap_number    IS NULL) AS null_lap_number,
-    SUM(stop_duration IS NULL) AS null_stop_duration,
-    SUM(lane_duration IS NULL) AS null_lane_duration,
-    SUM(pit_duration  IS NULL) AS null_pit_duration
-FROM pit;
 
 
 -- 2) Integer casts
@@ -343,17 +225,6 @@ WHERE "date" IS NOT NULL;
 --POSITION TABLE
 --===========================================================================
 
-PRAGMA table_info('position')
-
--- 1) Row count + nulls
-SELECT
-    COUNT(*) AS total_rows,
-    SUM("date"        IS NULL) AS null_date,
-    SUM(session_key   IS NULL) AS null_session_key,
-    SUM(meeting_key   IS NULL) AS null_meeting_key,
-    SUM(driver_number IS NULL) AS null_driver_number,
-    SUM("position"    IS NULL) AS null_position
-FROM position;
 
 
 -- 2) Integer casts
@@ -396,19 +267,6 @@ SELECT * FROM position LIMIT 5;
 --===========================================================================
 --INTERVALS TABLE
 --===========================================================================
-
-PRAGMA table_info('intervals')
-
--- 1) Row count + nulls
-SELECT
-    COUNT(*) AS total_rows,
-    SUM("date"        IS NULL) AS null_date,
-    SUM(session_key   IS NULL) AS null_session_key,
-    SUM(meeting_key   IS NULL) AS null_meeting_key,
-    SUM(driver_number IS NULL) AS null_driver_number,
-    SUM("interval"    IS NULL) AS null_interval,
-    SUM(gap_to_leader IS NULL) AS null_gap_to_leader
-FROM intervals;
 
 
 -- 2) Integer casts
@@ -457,19 +315,6 @@ WHERE "date" IS NOT NULL;
 --OVERTAKES TABLE
 --===========================================================================
 
-PRAGMA table_info('overtakes')
-
--- 1) Row count + nulls
-SELECT
-    COUNT(*) AS total_rows,
-    SUM(session_key              IS NULL) AS null_session_key,
-    SUM(meeting_key              IS NULL) AS null_meeting_key,
-    SUM(overtaking_driver_number IS NULL) AS null_overtaking,
-    SUM(overtaken_driver_number  IS NULL) AS null_overtaken,
-    SUM("date"                   IS NULL) AS null_date,
-    SUM("position"               IS NULL) AS null_position
-FROM overtakes;
-
 
 -- 2) Integer casts
 SELECT typeof(session_key)              AS t, COUNT(*) FROM overtakes GROUP BY t;
@@ -504,24 +349,6 @@ WHERE "date" IS NOT NULL;
 --RACE_CONTROL TABLE
 --===========================================================================
 
-PRAGMA table_info('race_control')
-
-
--- 1) Row count + nulls
-SELECT
-    COUNT(*) AS total_rows,
-    SUM("date"           IS NULL) AS null_date,
-    SUM(session_key      IS NULL) AS null_session_key,
-    SUM(meeting_key      IS NULL) AS null_meeting_key,
-    SUM(driver_number    IS NULL) AS null_driver_number,
-    SUM(lap_number       IS NULL) AS null_lap_number,
-    SUM(category         IS NULL) AS null_category,
-    SUM(flag             IS NULL) AS null_flag,
-    SUM(scope            IS NULL) AS null_scope,
-    SUM(sector           IS NULL) AS null_sector,
-    SUM(qualifying_phase IS NULL) AS null_qualifying_phase,
-    SUM(message          IS NULL) AS null_message
-FROM race_control;
 
 
 -- 2) Integer casts (keys + lap/sector/driver)
@@ -560,24 +387,6 @@ WHERE "date" IS NOT NULL;
 --SESSION_RESULT TABLE
 --=================================================================
 
-PRAGMA table_info('session_result')
-
--- 1) Row count + nulls
-SELECT
-    COUNT(*) AS total_rows,
-    SUM(session_key    IS NULL) AS null_session_key,
-    SUM(meeting_key    IS NULL) AS null_meeting_key,
-    SUM(driver_number  IS NULL) AS null_driver_number,
-    SUM("position"     IS NULL) AS null_position,
-    SUM(number_of_laps IS NULL) AS null_number_of_laps,
-    SUM(dnf            IS NULL) AS null_dnf,
-    SUM(dns            IS NULL) AS null_dns,
-    SUM(dsq            IS NULL) AS null_dsq,
-    SUM(duration       IS NULL) AS null_duration,
-    SUM(gap_to_leader  IS NULL) AS null_gap_to_leader,
-    SUM(points         IS NULL) AS null_points
-FROM session_result;
-
 
 -- 2) Boolean check
 SELECT dnf, COUNT(*) FROM session_result GROUP BY dnf;
@@ -613,18 +422,6 @@ SELECT typeof(points) AS t, COUNT(*) FROM session_result WHERE points IS NOT NUL
 --STARTING_GRID TABLE
 --=================================================================
 
-PRAGMA table_info('starting_grid')
-
-
--- 1) Row count + nulls
-SELECT
-    COUNT(*) AS total_rows,
-    SUM(session_key   IS NULL) AS null_session_key,
-    SUM(meeting_key   IS NULL) AS null_meeting_key,
-    SUM(driver_number IS NULL) AS null_driver_number,
-    SUM("position"    IS NULL) AS null_position,
-    SUM(lap_duration  IS NULL) AS null_lap_duration
-FROM starting_grid;
 
 
 -- 2) Integer casts
@@ -651,18 +448,6 @@ FROM starting_grid;
 --=================================================================
 
 
-PRAGMA table_info('team_radio')
-
--- 1) Row count + nulls
-SELECT
-    COUNT(*) AS total_rows,
-    SUM(session_key   IS NULL) AS null_session_key,
-    SUM(meeting_key   IS NULL) AS null_meeting_key,
-    SUM(driver_number IS NULL) AS null_driver_number,
-    SUM("date"        IS NULL) AS null_date,
-    SUM(recording_url IS NULL) AS null_recording_url
-FROM team_radio;
-
 
 -- 2) Integer casts
 SELECT typeof(session_key)   AS t, COUNT(*) FROM team_radio GROUP BY t;
@@ -687,22 +472,6 @@ SELECT COUNT(*) - COUNT(DISTINCT recording_url) AS duplicate_urls FROM team_radi
 --WEATHER TABLE
 --=================================================================
 
-PRAGMA table_info('weather')
-
--- 1) Row count + nulls
-SELECT
-    COUNT(*) AS total_rows,
-    SUM("date"            IS NULL) AS null_date,
-    SUM(session_key       IS NULL) AS null_session_key,
-    SUM(meeting_key       IS NULL) AS null_meeting_key,
-    SUM(humidity          IS NULL) AS null_humidity,
-    SUM(pressure          IS NULL) AS null_pressure,
-    SUM(rainfall          IS NULL) AS null_rainfall,
-    SUM(track_temperature IS NULL) AS null_track_temp,
-    SUM(air_temperature   IS NULL) AS null_air_temp,
-    SUM(wind_speed        IS NULL) AS null_wind_speed,
-    SUM(wind_direction    IS NULL) AS null_wind_direction
-FROM weather;
 
 
 -- 2) Integer + REAL casts
@@ -740,19 +509,6 @@ FROM weather;
 --CHAMPIONSHIP_DRIVERS TABLE
 --=================================================================
 
-PRAGMA table_info('championship_drivers')
-
--- 1) Row count + nulls
-SELECT
-    COUNT(*) AS total_rows,
-    SUM(session_key      IS NULL) AS null_session_key,
-    SUM(meeting_key      IS NULL) AS null_meeting_key,
-    SUM(driver_number    IS NULL) AS null_driver_number,
-    SUM(position_current IS NULL) AS null_pos_current,
-    SUM(position_start   IS NULL) AS null_pos_start,
-    SUM(points_current   IS NULL) AS null_pts_current,
-    SUM(points_start     IS NULL) AS null_pts_start
-FROM championship_drivers;
 
 
 -- 2) Integer casts
@@ -791,23 +547,6 @@ SELECT * FROM championship_drivers LIMIT 5;
 --=================================================================
 
 
-
-PRAGMA table_info('championship_teams')
-
-
--- 1) Row count + nulls
-SELECT
-    COUNT(*) AS total_rows,
-    SUM(session_key      IS NULL) AS null_session_key,
-    SUM(meeting_key      IS NULL) AS null_meeting_key,
-    SUM(team_name        IS NULL) AS null_team_name,
-    SUM(position_start   IS NULL) AS null_pos_start,
-    SUM(position_current IS NULL) AS null_pos_current,
-    SUM(points_start     IS NULL) AS null_pts_start,
-    SUM(points_current   IS NULL) AS null_pts_current
-FROM championship_teams;
-
-
 -- 2) Integer/REAL casts
 SELECT typeof(session_key) AS t, COUNT(*) FROM championship_teams GROUP BY t;
 SELECT typeof(position_current) AS t, COUNT(*) FROM championship_teams WHERE position_current IS NOT NULL GROUP BY t;
@@ -840,23 +579,6 @@ SELECT COUNT(DISTINCT team_name) FROM championship_teams;
 --=================================================================
 
 
-PRAGMA table_info('car_data')
-
-
--- 1) Row count + nulls (this will take a moment)
-SELECT
-    COUNT(*) AS total_rows,
-    SUM("date"        IS NULL) AS null_date,
-    SUM(session_key   IS NULL) AS null_session_key,
-    SUM(meeting_key   IS NULL) AS null_meeting_key,
-    SUM(driver_number IS NULL) AS null_driver_number,
-    SUM(throttle      IS NULL) AS null_throttle,
-    SUM(brake         IS NULL) AS null_brake,
-    SUM(rpm           IS NULL) AS null_rpm,
-    SUM(speed         IS NULL) AS null_speed,
-    SUM(n_gear        IS NULL) AS null_n_gear,
-    SUM(drs           IS NULL) AS null_drs
-FROM car_data;
 
 
 -- 2) Sanity ranges on a sample (LIMIT keeps this fast)
@@ -897,21 +619,6 @@ SELECT throttle, COUNT(*) FROM car_data WHERE throttle > 100 GROUP BY throttle O
 --LOCATION TABLE
 --=================================================================
 
-
-PRAGMA table_info('location')
-
-
--- 1) Row count + nulls
-SELECT
-    COUNT(*) AS total_rows,
-    SUM("date"        IS NULL) AS null_date,
-    SUM(session_key   IS NULL) AS null_session_key,
-    SUM(meeting_key   IS NULL) AS null_meeting_key,
-    SUM(driver_number IS NULL) AS null_driver_number,
-    SUM(x IS NULL) AS null_x,
-    SUM(y IS NULL) AS null_y,
-    SUM(z IS NULL) AS null_z
-FROM location;
 
 
 -- 2) Coordinate ranges

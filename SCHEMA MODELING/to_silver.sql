@@ -431,7 +431,6 @@ SELECT COUNT(*) FROM silver_race_control;
 --=================================================================
 --SESSION_RESULT  
 --=================================================================
-
 DROP TABLE IF EXISTS silver_session_result;
 
 CREATE TABLE silver_session_result (
@@ -443,9 +442,11 @@ CREATE TABLE silver_session_result (
     dnf                    INTEGER NOT NULL CHECK (dnf IN (0, 1)),
     dns                    INTEGER NOT NULL CHECK (dns IN (0, 1)),
     dsq                    INTEGER NOT NULL CHECK (dsq IN (0, 1)),
-    duration               REAL,
-    gap_to_leader_seconds  REAL,
-    gap_to_leader_laps     INTEGER,
+    duration_race_seconds  REAL,   -- scalar duration for Race/Sprint sessions
+    duration_quali_json    TEXT,   -- JSON array [Q1, Q2, Q3] for Qualifying sessions
+    gap_to_leader_seconds  REAL,   -- scalar gap for Race/Sprint
+    gap_to_leader_laps     INTEGER,-- lap deficit for lapped drivers in Race
+    gap_to_leader_quali_json TEXT, -- JSON array for Qualifying
     points                 REAL,
     PRIMARY KEY (session_key, driver_number)
 );
@@ -460,23 +461,28 @@ SELECT
     CASE dnf WHEN 'True' THEN 1 WHEN 'False' THEN 0 END,
     CASE dns WHEN 'True' THEN 1 WHEN 'False' THEN 0 END,
     CASE dsq WHEN 'True' THEN 1 WHEN 'False' THEN 0 END,
-    CAST(duration AS REAL),
-    CASE
+    -- duration: scalar if no '['; NULL if array
+    CASE WHEN duration LIKE '[%' THEN NULL ELSE CAST(duration AS REAL) END,
+    -- duration_quali: JSON string if array; NULL if scalar
+    CASE WHEN duration LIKE '[%' THEN duration ELSE NULL END,
+    -- gap_to_leader_seconds: scalar (numeric, not "+N LAP", not array)
+    CASE 
+        WHEN gap_to_leader LIKE '[%' THEN NULL
         WHEN gap_to_leader LIKE '%LAP%' THEN NULL
-        ELSE CAST(gap_to_leader AS REAL)
+        ELSE CAST(gap_to_leader AS REAL) 
     END,
+    -- gap_to_leader_laps: parsed from "+N LAP"
     CASE
         WHEN gap_to_leader LIKE '%LAP%'
         THEN CAST(REPLACE(REPLACE(REPLACE(gap_to_leader, '+', ''), ' LAPS', ''), ' LAP', '') AS INTEGER)
         ELSE NULL
     END,
+    -- gap_to_leader_quali_json: JSON string if array
+    CASE WHEN gap_to_leader LIKE '[%' THEN gap_to_leader ELSE NULL END,
     CAST(points AS REAL)
 FROM session_result;
 
--- 7660
-SELECT COUNT(*) FROM silver_session_result;
-
-
+SELECT COUNT(*) FROM silver_session_result;  -- 7660
 
 --=================================================================
 --STARTING_GRID

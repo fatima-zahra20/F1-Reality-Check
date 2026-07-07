@@ -1,4 +1,6 @@
---THIS IS DATA PROFILING PHASE 1
+--DATA PROFILING PHASE 1
+--Provernance : where os the data coming from? : https://openf1.org/docs/#api-endpoints - not official - fan page.
+--Grain : What does one row represent? 
 --P-keys
 SELECT COUNT(*) AS c , meeting_key
 FROM meetings
