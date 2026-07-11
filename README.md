@@ -12,10 +12,10 @@ Goal: reconstruct the full chronological story of a race, once at the **driver**
  
 ### Pre-race, grid & setup
 - [ ] What grid position did the driver start from, and what lap time earned it?
-- [ ] Did the driver set no qualifying time at all (DNS-type grid entries)?
+- [ ] Which drivers have a grid position but no recorded qualifying lap time, and how many of those are genuine DNS cases vs. started-but-crashed/red-flagged/deleted-lap cases?
 - [ ] Team-level: what was the combined grid position of both cars (front-row lockout vs split across the field)?
 ### The start, lap 1
-- [ ] What position did the driver hold after lap 1 vs their grid slot (gained/lost how many places)?
+- [ ] How did each driver's position change from their qualifying grid slot to the end of lap 1, and how many places did they gain or lose?
 - [ ] Was the driver involved in any lap-1 overtakes (as overtaker or overtaken)?
 - [ ] Did any race control flag/incident fire in the opening laps involving this driver?
 ### Race pace, lap by lap
