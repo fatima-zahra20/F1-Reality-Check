@@ -69,30 +69,30 @@ Goal: reconstruct the full chronological story of a **race** , once at the **dri
 Built primarily in Jupyter (pandas + scipy/statsmodels + matplotlib/seaborn), pulling from the same silver tables via SQL, then layering statistical tests and regressions on top. Each question below builds directly on its descriptive counterpart.
  
 ### Data prep checklist (before any correlation/regression)
-- [ ] Exclude or explicitly flag Safety Car / Red Flag / Yellow-flag-affected laps before using raw `lap_duration` in any pace model (confirmed distortion: 2023 Azerbaijan Sprint, laps 2–5).
-- [ ] Use `duration_race_seconds`, not `duration` (doesn't exist as a plain column  split during silver build; see earlier finding).
-- [ ] Remember `stop_duration` has zero coverage in 2023, partial from 2024  scope any `stop_duration`-based diagnostic to 2024+, or substitute `lane_duration`.
-- [ ] Remember the 7 confirmed 2023 ingestion gaps in `silver_session_result` (Bahrain Race, Azerbaijan Sprint, Hungarian/Belgian Qualifying, Mexico City Practice 3, Las Vegas Practice 1, Austrian/Qatar Sprint Qualifying)  these will show as missing rows, not zeros, in any join.
-- [ ] Team name drift year-over-year (e.g. AlphaTauri → RB → Racing Bulls)  apply a manual mapping before any multi-year team-level model.
+- [X] Exclude or explicitly flag Safety Car / Red Flag / Yellow-flag-affected laps before using raw `lap_duration` in any pace model (confirmed distortion: 2023 Azerbaijan Sprint, laps 2–5).
+- [X] Use `duration_race_seconds`, not `duration` (doesn't exist as a plain column  split during silver build; see earlier finding).
+- [X] Remember `stop_duration` has zero coverage in 2023, partial from 2024  scope any `stop_duration`-based diagnostic to 2024+, or substitute `lane_duration`.
+- [X] Remember the 7 confirmed 2023 ingestion gaps in `silver_session_result` (Bahrain Race, Azerbaijan Sprint, Hungarian/Belgian Qualifying, Mexico City Practice 3, Las Vegas Practice 1, Austrian/Qatar Sprint Qualifying)  these will show as missing rows, not zeros, in any join.
+- [X] Team name drift year-over-year (e.g. AlphaTauri → RB → Racing Bulls)  apply a manual mapping before any multi-year team-level model.
 ### Pre-race, grid & setup
-- [ ] Why do some drivers/teams consistently qualify better than others is it car pace or driver skill? (compare teammates' qualifying deltas across a season  same car, isolates driver effect)
-- [ ] How strongly does grid position actually predict finishing position? (simple linear regression, R², correlation coefficient)
-- [ ] Does grid position's predictive power vary by circuit type (street vs. permanent, high-overtaking vs. processional)? (subgroup regression / interaction term)
+- [X] Why do some drivers/teams consistently qualify better than others is it car pace or driver skill? (compare teammates' qualifying deltas across a season  same car, isolates driver effect)
+- [X] How strongly does grid position actually predict finishing position? (simple linear regression, R², correlation coefficient)
+- [X] Does grid position's predictive power vary by circuit type (street vs. permanent, high-overtaking vs. processional)? (subgroup regression / interaction term)
 ### The start, lap 1
-- [ ] Do certain grid positions systematically gain or lose more places on lap 1? (regression: lap1_swing ~ grid_position)
-- [ ] Is lap-1 chaos (overtakes, incidents) more frequent at certain circuits? (grouped counts by circuit, chi-square)
+- [X] Do certain grid positions systematically gain or lose more places on lap 1? (regression: lap1_swing ~ grid_position)
+- [X] Is lap-1 chaos (overtakes, incidents) more frequent at certain circuits? (grouped counts by circuit, chi-square)
 ### Race pace, lap by lap
-- [ ] What factors explain lap-time variation within a stint  tyre age, compound, track temperature, lap number (fuel-load proxy)? (multiple regression: lap_time ~ tyre_age + compound + track_temp + lap_number)
-- [ ] Does tyre degradation rate (slope of lap time vs. tyre age) differ by compound or by team? (compare regression slopes across groups / ANOVA)
-- [ ] Do anomalous laps cluster around a specific cause (Safety Car vs. genuine mistake) more for some drivers/teams than others? (categorize causes, chi-square)
-- [ ] Is a driver's sector strength consistent across multiple races (a real skill signal), or does it vary too much to be meaningful? (variance/consistency check across sessions)
+- [X] What factors explain lap-time variation within a stint  tyre age, compound, track temperature, lap number (fuel-load proxy)? (multiple regression: lap_time ~ tyre_age + compound + track_temp + lap_number)
+- [X] Does tyre degradation rate (slope of lap time vs. tyre age) differ by compound or by team? (compare regression slopes across groups / ANOVA)
+- [X] Do anomalous laps cluster around a specific cause (Safety Car vs. genuine mistake) more for some drivers/teams than others? (categorize causes, chi-square)
+- [X] Is a driver's sector strength consistent across multiple races (a real skill signal), or does it vary too much to be meaningful? (variance/consistency check across sessions)
 ### Tyre strategy
-- [ ] When teammates' strategies diverge, what predicts which one pays off  pit timing, track position at the stop, or pure pace? (logistic regression: better-finisher ~ predictors)
-- [ ] Is there a statistically real advantage to a specific strategy (fewer stops, a particular compound order) at a given circuit, or does it wash out once you control for starting position? (t-test / ANOVA comparing outcomes by strategy group)
+- [X] When teammates' strategies diverge, what predicts which one pays off  pit timing, track position at the stop, or pure pace? (logistic regression: better-finisher ~ predictors)
+- [X] Is there a statistically real advantage to a specific strategy (fewer stops, a particular compound order) at a given circuit, or does it wash out once you control for starting position? (t-test / ANOVA comparing outcomes by strategy group)
 ### Pit stops
-- [ ] Is pit stop duration genuinely different by team (a crew-skill effect), or does it wash out once accounting for stop count/race chaos? (ANOVA across teams, or team as a regression dummy variable)
-- [ ] Does a slow pit stop reliably cost track position, or does pack density/traffic matter more? (correlate stop_duration against the position-swing data)
-- [ ] Are disaster stops (Tukey-fence outliers) random, or concentrated in specific teams or circuits? (chi-square)
+- [X] Is pit stop duration genuinely different by team (a crew-skill effect), or does it wash out once accounting for stop count/race chaos? (ANOVA across teams, or team as a regression dummy variable)
+- [X] Does a slow pit stop reliably cost track position, or does pack density/traffic matter more? (correlate stop_duration against the position-swing data)
+- [X] Are disaster stops (Tukey-fence outliers) random, or concentrated in specific teams or circuits? (chi-square)
 ### Position dynamics across the race
 - [ ] What predicts overtakes made  starting position, pace delta vs. the car ahead, tyre delta? (multiple regression)
 - [ ] Are the biggest position swings mostly explained by pit cycles and Safety Cars (as suspected from the Norris case), or is there a residual, unexplained portion once those are controlled for? (regression with pit-stop/Safety-Car dummy variables, examine residuals)
