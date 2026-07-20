@@ -94,8 +94,8 @@ Built primarily in Jupyter (pandas + scipy/statsmodels + matplotlib/seaborn), pu
 - [X] Does a slow pit stop reliably cost track position, or does pack density/traffic matter more? (correlate stop_duration against the position-swing data)
 - [X] Are disaster stops (Tukey-fence outliers) random, or concentrated in specific teams or circuits? (chi-square)
 ### Position dynamics across the race
-- [ ] What predicts overtakes made  starting position, pace delta vs. the car ahead, tyre delta? (multiple regression)
-- [ ] Are the biggest position swings mostly explained by pit cycles and Safety Cars (as suspected from the Norris case), or is there a residual, unexplained portion once those are controlled for? (regression with pit-stop/Safety-Car dummy variables, examine residuals)
+- [X] What predicts overtakes made  starting position, pace delta vs. the car ahead, tyre delta? (multiple regression)
+- [X] Are the biggest position swings mostly explained by pit cycles and Safety Cars (as suspected from the Norris case), or is there a residual, unexplained portion once those are controlled for? (regression with pit-stop/Safety-Car dummy variables, examine residuals)
 ### Gaps & race context
 - [ ] Does spending more time "fighting" (within the 1.0s DRS zone) correlate with more overtakes attempted or made? (correlation)
 - [ ] Does being lapped correlate more with reliability issues (damage, mechanical) or a pure pace deficit? (compare group differences lapped vs. not, by cause)
