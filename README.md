@@ -97,13 +97,13 @@ Built primarily in Jupyter (pandas + scipy/statsmodels + matplotlib/seaborn), pu
 - [X] What predicts overtakes made  starting position, pace delta vs. the car ahead, tyre delta? (multiple regression)
 - [X] Are the biggest position swings mostly explained by pit cycles and Safety Cars (as suspected from the Norris case), or is there a residual, unexplained portion once those are controlled for? (regression with pit-stop/Safety-Car dummy variables, examine residuals)
 ### Gaps & race context
-- [ ] Does spending more time "fighting" (within the 1.0s DRS zone) correlate with more overtakes attempted or made? (correlation)
-- [ ] Does being lapped correlate more with reliability issues (damage, mechanical) or a pure pace deficit? (compare group differences lapped vs. not, by cause)
+- [X] Does spending more time "fighting" (within the 1.0s DRS zone) correlate with more overtakes attempted or made? (correlation)
+- [X] Does being lapped correlate more with reliability issues (damage, mechanical) or a pure pace deficit? (compare group differences lapped vs. not, by cause)
 ### Incidents & external context
-- [ ] Does DNF/incident rate correlate with circuit type, team, or weather conditions? (chi-square: DNF vs. circuit type / team / rainfall)
-- [ ] Are certain teams' cars statistically more fragile, or is it concentrated in specific drivers? (compare DNF rate by team vs. by driver)
-- [ ] Does rain increase the *variance* of finishing positions across the field, not just average pace? (compare position variance in wet vs. dry races F-test / Levene's test)
-- [ ] Do specific teams or drivers statistically outperform their own dry-weather baseline in wet races? (paired comparison, same driver/team, wet vs. dry)
+- [X] Does DNF/incident rate correlate with circuit type, team, or weather conditions? (chi-square: DNF vs. circuit type / team / rainfall)
+- [X] Are certain teams' cars statistically more fragile, or is it concentrated in specific drivers? (compare DNF rate by team vs. by driver)
+- [X] Does rain increase the *variance* of finishing positions across the field, not just average pace? (compare position variance in wet vs. dry races F-test / Levene's test)
+- [X] Do specific teams or drivers statistically outperform their own dry-weather baseline in wet races? (paired comparison, same driver/team, wet vs. dry)
 ### Team radio
 - [ ] Does radio message frequency or clustering correlate with race outcome (incidents, position swings, points)? (correlation between message clustering and same-window events)
 ### Finish & outcome
