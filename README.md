@@ -105,13 +105,13 @@ Built primarily in Jupyter (pandas + scipy/statsmodels + matplotlib/seaborn), pu
 - [X] Does rain increase the *variance* of finishing positions across the field, not just average pace? (compare position variance in wet vs. dry races F-test / Levene's test)
 - [X] Do specific teams or drivers statistically outperform their own dry-weather baseline in wet races? (paired comparison, same driver/team, wet vs. dry)
 ### Team radio
-- [ ] Does radio message frequency or clustering correlate with race outcome (incidents, position swings, points)? (correlation between message clustering and same-window events)
+- [X] Does radio message frequency or clustering correlate with race outcome (incidents, position swings, points)? (correlation between message clustering and same-window events)
 ### Finish & outcome
-- [ ] Decompose a team's championship position: how much is explained by pace, how much by reliability, how much by strategy execution? (multiple regression: season points ~ pace_metric + dnf_rate + strategy_metric  direct bridge into the predictive/feature-engineering phase)
-- [ ] Is grid-to-finish net gain/loss statistically different by team (some teams race better than they qualify, or vice versa)? (ANOVA / regression)
+- [X] Decompose a team's championship position: how much is explained by pace, how much by reliability, how much by strategy execution? (multiple regression: season points ~ pace_metric + dnf_rate + strategy_metric  direct bridge into the predictive/feature-engineering phase)
+- [X] Is grid-to-finish net gain/loss statistically different by team (some teams race better than they qualify, or vice versa)? (ANOVA / regression)
 ### Driver vs teammate
-- [ ] Is a driver's advantage over their teammate (qualifying, race pace, points) statistically significant across a full season, or within normal race-to-race noise? (paired t-test across all races in a season)
-- [ ] Which factor  qualifying pace, race pace, reliability, or strategy execution  explains the most of the points gap between teammates? (regression decomposition)
+- [X] Is a driver's advantage over their teammate (qualifying, race pace, points) statistically significant across a full season, or within normal race-to-race noise? (paired t-test across all races in a season)
+- [X] Which factor  qualifying pace, race pace, reliability, or strategy execution  explains the most of the points gap between teammates? (regression decomposition)
 
 
  
