@@ -191,3 +191,26 @@ cython_debug/
 #  refer to https://docs.cursor.com/context/ignore-files
 .cursorignore
 .cursorindexingignore
+
+
+
+# --- F1 Reality Check: project-specific ---
+
+# Database backups (the *.db rule above does NOT catch these)
+*.db.backup*
+*.sqlite
+*.sqlite3
+
+# Local tool config
+.claude/
+
+# Pipeline logs
+logs/
+
+# Scratch
+tree.txt
+
+# Pipeline outputs ARE tracked — they are the deliverable.
+# The blanket *.csv rule above would otherwise exclude them.
+!outputs/
+!outputs/**/*.csv
