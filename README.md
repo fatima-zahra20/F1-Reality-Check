@@ -1,135 +1,457 @@
-# F1 Reality Check: Question Bank
- 
-## Data Maturity Model
- 
-This project's analysis follows the four stages of the analytics maturity model:
- 
-The descriptive layer is pure facts about what happened in a race,no explanations. 
-The diagnostic layer below reuses that same "story of a race" structure, but every question now asks *why*, and leans on statistics (correlation, regression, t-tests, ANOVA, chi-square) rather than a single query returning a fact. Parenthetical notes mark which statistical tool a question is expected to need  kept in as a memory aid, not a rigid prescription.
- 
- 
-## Scope: The Story of a Race, Driver & Team Level
- 
-Goal: reconstruct the full chronological story of a **race** , once at the **driver** level and once at the **team** level (comparing teammates).
- 
-### Pre-race, grid & setup
-- [x] What grid position did the driver start from, and what lap time earned it?
-- [x] Which drivers have a grid position but no recorded qualifying lap time, and how many of those are genuine DNS cases vs. started-but-crashed/red-flagged/deleted-lap cases?
-- [x] Team-level: what was the combined grid position of both cars (front-row lockout vs split across the field)?
-### The start, lap 1
-- [x] How did each driver's position change from their qualifying grid slot to the end of lap 1, and how many places did they gain or lose?
-- [x] Was the driver involved in any lap-1 overtakes (as overtaker or overtaken)?
-- [x] Did any race control flag/incident fire in the opening laps involving this driver?
-### Race pace, lap by lap
-- [x] What was the driver's lap time trend across the race (improving, degrading, flat)?
-- [x] How does the driver's pace compare to their teammate, lap by lap?
-- [x] Were there specific laps with anomalous times (red flag, traffic, mistake), and where do they fall in the race?
-- [x] What were the driver's sector strengths/weaknesses (which sector were they consistently fastest/slowest in)?
-- [x] What was the driver's fastest lap of the race, and on which lap number/tyre compound did it occur?
-### Tyre strategy
-- [x] How many stints did the driver run, on which compounds, and for how many laps each?
-- [x] What was the driver's tyre age at the start of each stint?
-- [x] Team-level: did both cars run the same strategy (compound sequence) or diverge?
-### Pit stops
-- [x] How many pit stops did the driver make, on which laps?
-- [x] What was the stop duration and total lane duration for each stop?
-- [x] Did any stop go unusually long (a "disaster stop")?
-- [x] Team-level: how does average pit stop duration compare between the two drivers/cars?
-### Position dynamics across the race
-- [x] How did the driver's position evolve over the full race distance (a position-vs-lap trace)?
-- [x] How many total overtakes did the driver make, and how many suffered?
-- [x] At what points in the race did the biggest position swings happen (start, pit cycles, restarts)?
-### Gaps & race context
-- [x] How did the driver's gap to the leader evolve over the race?
-- [x] How did the driver's gap to the car ahead/behind (interval) evolve, fighting, isolated, or lapped?
-- [x] Was the driver lapped by the leader at any point, and when?
-### Incidents & external context
-- [x] What race control events (flags, safety car, DRS status) occurred during the driver's race, and did any coincide with their pit stops or position changes?
-- [x] Was the driver specifically named in any race control message (penalty, investigation, warning)?
-- [x] What were the weather conditions during the race, and did they change mid-race (rain arriving, track drying)?
-### Team radio
-- [x] How many radio messages were sent for this driver during the race, and at what points do they cluster (may signal key moments even without transcription)?
-### Finish & outcome
-- [x] What was the final classified position, and how does it compare to grid position (net gain/loss)?
-- [x] Did the driver finish, DNF, DNS, or get DSQ'd, and if DNF, at what lap?
-- [x] How many points did the driver score?
-- [x] What was the gap to the winner at the finish?
-- [x] Team-level: combined points haul for the race, and how it moved the constructor standings (`points_start` -> `points_current`).
-### Driver vs teammate (team-level lens)
-- [x] Who out-qualified whom, and by how much?
-- [x] Who scored more points, and by how much?
-- [x] Whose race had more incidents/pit stops/lost time?
-- [x] Did the two cars' strategies converge or split, and which paid off?
+# F1 Reality Check
 
+An end-to-end Formula 1 analytics project: from raw API ingestion through statistical
+diagnosis to a calibrated race-winner prediction model, published as an interactive
+dashboard.
 
+Built with SQL, Python, and a deliberate constraint — the project began with **no prior
+F1 domain knowledge**, which forced every assumption to be verified empirically against
+the data rather than assumed from familiarity with the sport.
 
- 
-## Diagnostic Analysis Why did it happen?
- 
-Built primarily in Jupyter (pandas + scipy/statsmodels + matplotlib/seaborn), pulling from the same silver tables via SQL, then layering statistical tests and regressions on top. Each question below builds directly on its descriptive counterpart.
- 
-### Data prep checklist (before any correlation/regression)
-- [X] Exclude or explicitly flag Safety Car / Red Flag / Yellow-flag-affected laps before using raw `lap_duration` in any pace model (confirmed distortion: 2023 Azerbaijan Sprint, laps 2–5).
-- [X] Use `duration_race_seconds`, not `duration` (doesn't exist as a plain column  split during silver build; see earlier finding).
-- [X] Remember `stop_duration` has zero coverage in 2023, partial from 2024  scope any `stop_duration`-based diagnostic to 2024+, or substitute `lane_duration`.
-- [X] Remember the 7 confirmed 2023 ingestion gaps in `silver_session_result` (Bahrain Race, Azerbaijan Sprint, Hungarian/Belgian Qualifying, Mexico City Practice 3, Las Vegas Practice 1, Austrian/Qatar Sprint Qualifying)  these will show as missing rows, not zeros, in any join.
-- [X] Team name drift year-over-year (e.g. AlphaTauri → RB → Racing Bulls)  apply a manual mapping before any multi-year team-level model.
-### Pre-race, grid & setup
-- [X] Why do some drivers/teams consistently qualify better than others is it car pace or driver skill? (compare teammates' qualifying deltas across a season  same car, isolates driver effect)
-- [X] How strongly does grid position actually predict finishing position? (simple linear regression, R², correlation coefficient)
-- [X] Does grid position's predictive power vary by circuit type (street vs. permanent, high-overtaking vs. processional)? (subgroup regression / interaction term)
-### The start, lap 1
-- [X] Do certain grid positions systematically gain or lose more places on lap 1? (regression: lap1_swing ~ grid_position)
-- [X] Is lap-1 chaos (overtakes, incidents) more frequent at certain circuits? (grouped counts by circuit, chi-square)
-### Race pace, lap by lap
-- [X] What factors explain lap-time variation within a stint  tyre age, compound, track temperature, lap number (fuel-load proxy)? (multiple regression: lap_time ~ tyre_age + compound + track_temp + lap_number)
-- [X] Does tyre degradation rate (slope of lap time vs. tyre age) differ by compound or by team? (compare regression slopes across groups / ANOVA)
-- [X] Do anomalous laps cluster around a specific cause (Safety Car vs. genuine mistake) more for some drivers/teams than others? (categorize causes, chi-square)
-- [X] Is a driver's sector strength consistent across multiple races (a real skill signal), or does it vary too much to be meaningful? (variance/consistency check across sessions)
-### Tyre strategy
-- [X] When teammates' strategies diverge, what predicts which one pays off  pit timing, track position at the stop, or pure pace? (logistic regression: better-finisher ~ predictors)
-- [X] Is there a statistically real advantage to a specific strategy (fewer stops, a particular compound order) at a given circuit, or does it wash out once you control for starting position? (t-test / ANOVA comparing outcomes by strategy group)
-### Pit stops
-- [X] Is pit stop duration genuinely different by team (a crew-skill effect), or does it wash out once accounting for stop count/race chaos? (ANOVA across teams, or team as a regression dummy variable)
-- [X] Does a slow pit stop reliably cost track position, or does pack density/traffic matter more? (correlate stop_duration against the position-swing data)
-- [X] Are disaster stops (Tukey-fence outliers) random, or concentrated in specific teams or circuits? (chi-square)
-### Position dynamics across the race
-- [X] What predicts overtakes made  starting position, pace delta vs. the car ahead, tyre delta? (multiple regression)
-- [X] Are the biggest position swings mostly explained by pit cycles and Safety Cars (as suspected from the Norris case), or is there a residual, unexplained portion once those are controlled for? (regression with pit-stop/Safety-Car dummy variables, examine residuals)
-### Gaps & race context
-- [X] Does spending more time "fighting" (within the 1.0s DRS zone) correlate with more overtakes attempted or made? (correlation)
-- [X] Does being lapped correlate more with reliability issues (damage, mechanical) or a pure pace deficit? (compare group differences lapped vs. not, by cause)
-### Incidents & external context
-- [X] Does DNF/incident rate correlate with circuit type, team, or weather conditions? (chi-square: DNF vs. circuit type / team / rainfall)
-- [X] Are certain teams' cars statistically more fragile, or is it concentrated in specific drivers? (compare DNF rate by team vs. by driver)
-- [X] Does rain increase the *variance* of finishing positions across the field, not just average pace? (compare position variance in wet vs. dry races F-test / Levene's test)
-- [X] Do specific teams or drivers statistically outperform their own dry-weather baseline in wet races? (paired comparison, same driver/team, wet vs. dry)
-### Team radio
-- [X] Does radio message frequency or clustering correlate with race outcome (incidents, position swings, points)? (correlation between message clustering and same-window events)
-### Finish & outcome
-- [X] Decompose a team's championship position: how much is explained by pace, how much by reliability, how much by strategy execution? (multiple regression: season points ~ pace_metric + dnf_rate + strategy_metric  direct bridge into the predictive/feature-engineering phase)
-- [X] Is grid-to-finish net gain/loss statistically different by team (some teams race better than they qualify, or vice versa)? (ANOVA / regression)
-### Driver vs teammate
-- [X] Is a driver's advantage over their teammate (qualifying, race pace, points) statistically significant across a full season, or within normal race-to-race noise? (paired t-test across all races in a season)
-- [X] Which factor  qualifying pace, race pace, reliability, or strategy execution  explains the most of the points gap between teammates? (regression decomposition)
+> **Status:** descriptive and diagnostic phases complete. Predictive phase in progress.
+> Dashboard not yet published.
 
+---
 
- 
-## Notes & Decisions Log
- 
-*Track filter/scope decisions, data quality findings, and reusable patterns here as they come up.*
- 
-1. **`silver_starting_grid` scope ,data dictionary is wrong.** Scoped to `session_name IN ('Qualifying', 'Sprint Qualifying')`, not Race/Sprint as documented.
-2. **Composite-key join rule.** Any table keyed on `(session_key, driver_number)` must be joined on both columns `session_key` alone silently fans out (SQLite won't error).
-3. **`session_name`, not `session_type`, for grid↔race pairing.** Pair on `('Race', 'Qualifying')` or `('Sprint', 'Sprint Qualifying')`  `session_type` groups both qualifying types together and will fan out a grid join.
-4. **Non-driver-keyed tables also fan out.** `silver_race_control` has many rows per session with no `driver_number` requirement  use a correlated subquery, not a direct join, when pulling it into a per-driver query.
-5. **`silver_overtakes.position` is one-sided** "position gained by the overtaker" only, not a general resulting position for both drivers.
-6. **DNS logic.** `dns = 1` -> `lap_duration IS NULL` always holds; the reverse doesn't (crashes/red flags/deleted laps also produce nulls without being DNS).
-7. **`stop_duration` coverage gap.** Zero coverage in 2023 across all session types; partial coverage from 2024 onward. Use `lane_duration`/`pit_duration` for anything spanning 2023.
-8. **`lane_duration` and `pit_duration` are identical in every row where both are populated** (confirmed: 20,745/20,745)  cause unconfirmed, kept as separate columns anyway.
-9. **Tukey fence for disaster stops**: `Q3 + 1.5 × IQR` on `stop_duration` ≈ 4.9 seconds, derived from the full-distribution stats, not a guessed round number.
-10. **Race control glimpse has two confirmed causes for a blank result**: (1) an event was happening but the message wasn't tagged to that exact lap number (Safety Car spanning multiple laps confirmed via Albon, 2023 Azerbaijan Sprint lap 4), or (2) nothing needed logging because the issue was a private mechanical problem with no track-wide flag warranted (confirmed via Stroll, 2023 US GP Sprint lap 16, brake failure/DNF).
-11. **DRS "fighting" threshold** = ≤1.0s gap to the car ahead  the official F1 DRS detection zone, borrowed from the sport's own rules rather than a statistically derived cutoff.
-12. **Position-swing threshold** = ≥3 places in one lap a reasoned cutoff, not statistical (position deltas are small bounded integers, so Tukey/IQR fences don't fit well; 1–2 place changes are normal racing, 3+ is almost always tied to a specific event).
-13. **`silver_session_result` has zero rows for 7 specific, non-cancelled 2023 sessions**: Bahrain Race, Azerbaijan Sprint, Hungarian Qualifying, Belgian Qualifying, Mexico City Practice 3, Las Vegas Practice 1, Austrian Sprint Qualifying, Qatar Sprint Qualifying confirmed via `is_cancelled = 0` that these sessions genuinely took place. This is a real ingestion gap, not a data-model artifact. (Separately, Emilia Romagna's full 5-session zero-count is *not* a gap  that meeting has `is_cancelled = 1`, correctly reflecting the real-world flood cancellation.)
-14. **`silver_session_result.duration` doesn't exist as a plain column.** Silver build split it into `duration_race_seconds` (REAL) and `duration_quali_json` (TEXT) to resolve the ambiguity the data dictionary flagged. Use `duration_race_seconds` for Race-session total time.
+## Table of contents
+
+- [What this project does](#what-this-project-does)
+- [The question it answers](#the-question-it-answers)
+- [Data](#data)
+- [Architecture](#architecture)
+- [Analytical phases](#analytical-phases)
+- [Key findings](#key-findings)
+- [Modeling approach](#modeling-approach)
+- [Repository structure](#repository-structure)
+- [Running the pipeline](#running-the-pipeline)
+- [Data quality register](#data-quality-register)
+- [Methodological principles](#methodological-principles)
+- [Roadmap](#roadmap)
+
+---
+
+## What this project does
+
+Formula 1 produces an enormous amount of public telemetry and timing data. This project
+takes that raw data and works through the full analytics maturity model — **descriptive
+→ diagnostic → predictive** — with each stage building on the evidence established by
+the last.
+
+The output is twofold:
+
+1. **A win-probability model** that produces a calibrated probability distribution over
+   the driver field for an upcoming race, in two variants: one usable before the
+   weekend starts, and a sharper one available once qualifying has set the grid.
+2. **A published analytical record** showing not just the predictions but the diagnostic
+   work behind them, and — importantly — an honest track record of how the model has
+   performed on races it had never seen.
+
+---
+
+## The question it answers
+
+> *Who is going to win the next race, and how confident should we actually be?*
+
+The naive approach trains twenty independent "will this driver win?" classifiers and
+produces impossible outputs — probabilities that sum to well over 100%. Exactly one
+driver wins a race, so the model must output a **probability distribution over the
+field**, summing to 1.0. That constraint dictates the model class (multinomial /
+conditional logit rather than independent binary classifiers) and is treated as a
+first-order design decision rather than a detail.
+
+---
+
+## Data
+
+| | |
+|---|---|
+| **Source** | [OpenF1 API](https://openf1.org) — unofficial public F1 data |
+| **Coverage** | 2023 – 2026 |
+| **Store** | SQLite (`DATA INGESTION/f1.db`, ~6.5 GB) |
+| **Layers** | Bronze (raw ingested tables) → Silver (18 typed, PK-enforced tables) |
+| **Grain** | Per driver, per lap, per session — down to ~3.7 Hz telemetry where available |
+
+Scale of the silver layer:
+
+| Table | Rows |
+|---|---:|
+| `silver_location` | 25,849,231 |
+| `silver_car_data` | 9,365,942 |
+| `silver_intervals` | 1,875,432 |
+| `silver_position` | 281,801 |
+| `silver_laps` | 217,692 |
+| `silver_weather` | 42,915 |
+| `silver_stints` | 31,033 |
+| `silver_pit` | 26,791 |
+| `silver_overtakes` | 20,065 |
+| `silver_race_control` | 19,807 |
+| `silver_team_radio` | 15,575 |
+| `silver_drivers` | 9,949 |
+| `silver_session_result` | 7,660 |
+| `silver_championship_drivers` | 2,098 |
+| `silver_starting_grid` | 1,814 |
+| `silver_championship_teams` | 1,001 |
+| `silver_sessions` | 490 |
+| `silver_meetings` | 100 |
+
+Full column-level documentation, including null counts, type decisions, and per-table
+quirks, is in **[DATA_DICTIONARY.md](DATA_DICTIONARY.md)**.
+
+### Effective sample size
+
+A point worth stating plainly, because it constrains everything downstream:
+
+| | Races with results |
+|---|---:|
+| 2023 | 21 |
+| 2024 | 23 |
+| 2025 | 22 |
+| **Training total (2023–25)** | **66** |
+| 2026 (in progress) | 8 |
+
+At ~20 drivers per race this is ~1,320 driver-race rows — but the target is *who won*,
+and there is one winner per race. So the **effective sample is 66 events, not 1,320**.
+That supports roughly 4–6 predictors, not fifteen, and rules out high-variance models
+like gradient boosting as a primary approach. The feature set was kept small
+deliberately, and the diagnostic phase is what justified which features earned a place.
+
+---
+
+## Architecture
+
+```
+OpenF1 API
+    │
+    ▼
+[ s01_ingest ]  ──▶  bronze tables
+    │
+    ▼
+[ s02_build_silver ]  ──▶  18 typed, PK-enforced silver tables
+    │
+    ▼
+[ s03_verify ]  ──▶  invariant gate: FAIL halts the run
+    │
+    ├──▶ [ s04_descriptive ]  ──▶  aggregate output tables
+    ├──▶ [ s05_diagnostic ]   ──▶  recomputed statistics
+    │
+    ▼
+[ s06_features ]  ──▶  training table (strictly trailing features)
+    │
+    ▼
+[ s07_train ]  ──▶  model + metrics, versioned
+    │
+    ▼
+[ s08_predict ]  ──▶  win probabilities for the next race
+    │
+    ▼
+[ s09_export ]  ──▶  outputs/*.csv  ──▶  Tableau dashboard
+```
+
+Each step is an independent, idempotent Python entry point. `run_pipeline.py` sequences
+them and exits non-zero on failure. The orchestrator is therefore a swappable detail —
+currently Windows Task Scheduler, trivially replaceable with Airflow, Prefect, or
+Dagster because the task boundaries are already clean.
+
+**Scheduling is calendar-driven, not fixed-weekday.** A race weekend is bursty, not a
+steady drip: results land early in the week, and grid position — the single strongest
+individual predictor — does not exist until Saturday. Runs are therefore triggered off
+the session calendar in `silver_sessions`.
+
+**Telemetry is excluded from the scheduled run.** `silver_car_data` and
+`silver_location` account for ~35M of the database's rows but cover only 32 of 490
+sessions, making them unusable as model features. They are refreshed manually on
+demand.
+
+---
+
+## Analytical phases
+
+| Phase | Question | Status |
+|---|---|---|
+| **IDA / profiling** | Is the data trustworthy? | Complete |
+| **Descriptive** | What happened? | Complete |
+| **Diagnostic** | Why did it happen? | Complete |
+| **Predictive** | What will happen? | In progress |
+| **Prescriptive** | What should be done? | Out of scope |
+
+The descriptive and diagnostic layers are both organised around the same spine — the
+chronological *story of a race*, examined once at driver level and once at team level:
+grid and setup → lap 1 → race pace → tyre strategy → pit stops → position dynamics →
+gaps and race context → incidents → team radio → finish and outcome → driver vs
+teammate.
+
+The descriptive layer answers each stage factually. The diagnostic layer revisits every
+stage asking *why*, using regression, ANOVA/ANCOVA, logistic regression, chi-square,
+paired t-tests, correlation, and variance tests.
+
+The full question bank, with completion status and the running notes log, is in
+**[EDA_descriptive_questions.md](EDA_descriptive_questions.md)**.
+
+---
+
+## Key findings
+
+These are the diagnostic results that shaped the feature set.
+
+**Pace dominates everything.** Session-normalized mean race pace (driver mean lap minus
+session median) explains ~40–52% of team race-points variance on its own. Adding
+reliability or strategy metrics contributes essentially nothing once pace is controlled
+— all three are highly correlated because all three measure the same latent variable:
+car quality.
+
+**Grid position is the strongest single race-level predictor** (R² = 0.590, slope
+0.682), and this relationship does *not* vary significantly by circuit type (p = 0.612)
+— contradicting the intuition that street circuits should punish a poor grid slot more
+heavily.
+
+**Reliability is a car effect, not a driver effect.** DNF rate is team-specific
+(Williams 22.2% worst, McLaren 5.5% best). Williams fragility held across three
+different drivers. The cleanest evidence is a natural experiment: Carlos Sainz, the same
+driver, recorded an 11.9% DNF rate at Ferrari and 20.7% at Williams.
+
+**At driver level, qualifying pace outranks race pace.** Ranking predictors of the
+points gap between teammates by standardized coefficient: qualifying pace (2.194) >
+race pace (1.565) > reliability (1.366) > pit strategy (0.368, p = 0.250, not
+significant).
+
+**One-stop strategies beat two-stop by ~0.68 places** at the same starting position
+(ANCOVA, p = 0.006), confirmed by two independent methods.
+
+**Overtakes are gap-driven.** Conversion rate is ~16.7%; gap to the car ahead is the
+dominant predictor (logistic coefficient −1.32), with tyre delta also significant
+(−0.054).
+
+**Being lapped is pure pace deficit, not unreliability.** Team is the strongest
+predictor of lapping rate — Ferrari 0.8% versus Sauber 53.2%.
+
+**Wet-weather advantage exists but is not yet statistically demonstrable.** Ferrari,
+McLaren, Mercedes and the RB lineage show positive `wet_advantage`; Alpine and Sauber
+negative. This remains **descriptive only**: a maximum of 15 wet races per entity against
+the ~30 required for 80% power at a two-position effect size. Reported as a candidate
+feature with its limitation stated, not as a result.
+
+---
+
+## Modeling approach
+
+**Target.** A probability distribution over the driver field for a single race.
+Constructor-level win probability is derived from the driver distribution.
+
+**Two prediction stages, defined by feature availability.** This distinction is
+deliberate and central:
+
+| Stage | When | Features available |
+|---|---|---|
+| Pre-weekend | Mon–Thu | Rolling form only — no grid, no practice |
+| Post-qualifying | Sat evening | Adds grid position |
+
+Publishing both, and showing how the distribution shifts once the grid is set,
+demonstrates handling of the most common silent failure in prediction projects:
+**leakage** — training on features that would not have existed at the moment of
+prediction.
+
+**Features** (kept deliberately small given 66 events):
+
+1. `session_normalized_team_pace` — trailing, the dominant predictor
+2. `grid_position` — post-qualifying stage only
+3. `wet_advantage × race_had_rain` — interaction term
+4. `rolling_dnf_rate` — trailing reliability, capturing trend rather than season average
+5. `circuit_type` — categorical
+
+**Validation is rolling-origin, not a random split.** Eight held-out 2026 races is far
+too few to distinguish skill from luck. Instead the model trains on 2023 and predicts
+2024 race by race, then trains on 2023–24 and predicts 2025, and so on — always
+predicting forward, never using future information. This yields ~45–50 genuinely
+out-of-sample predictions while respecting time order.
+
+**Evaluation uses Brier score and calibration curves, not accuracy.** With 20 classes
+and a favourite who wins roughly 40% of the time, accuracy is close to meaningless. The
+question that matters is whether a stated 30% happens about 30% of the time.
+
+**Baseline first.** A well-specified multinomial logit is the primary model. Anything
+more complex must beat it on out-of-sample Brier score to earn inclusion — and with 66
+events, it very likely will not.
+
+---
+
+## Repository structure
+
+```
+F1-Reality-Check/
+├── DATA INGESTION/
+│   ├── f1.db                      SQLite store (gitignored)
+│   └── openf1_ingestion.py        API ingestion
+├── SCHEMA MODELING/
+│   └── to_silver.sql              bronze → silver build
+├── DATA PROFILING/
+│   ├── EDA_01–07.sql              PK verification, column profiling,
+│   │                              completeness, domain integrity,
+│   │                              consistency, cardinality, temporal coverage
+│   └── EDA_08.ipynb
+├── DESCRIPTIVE ANALYTICS/         10 SQL files, one per story-of-a-race theme
+├── DIAGNOSTIC ANALYTICS/          7 notebooks (statistical tests + regressions)
+├── pipeline/
+│   ├── config.py                  single source of truth for all paths
+│   └── s03_verify.py              invariant gate
+├── outputs/                       pipeline outputs consumed by Tableau
+├── models/                        serialized models + metrics, versioned
+├── logs/
+├── data_prep.py                   shared loaders and cleaning utilities
+├── DATA_DICTIONARY.md             column-level documentation, all 18 tables
+├── EDA_descriptive_questions.md   question bank + notes log
+├── environment.yml
+└── requirements.txt
+```
+
+---
+
+## Running the pipeline
+
+**Environment.** Anaconda Python 3.13.9 with pandas 2.3.3, scipy 1.16.3,
+statsmodels 0.14.5, scikit-learn 1.7.2. Versions are pinned — pandas is deliberately
+held at 2.x, since 3.x introduces breaking changes to code validated on 2.3.3.
+
+```bash
+conda env create -f environment.yml
+conda activate f1-reality-check
+```
+
+or with pip:
+
+```bash
+pip install -r requirements.txt
+```
+
+**The database is not in version control.** It is 6.5 GB of regenerable output, not
+source. Rebuild it from the API:
+
+```bash
+python pipeline/s01_ingest.py
+python pipeline/s02_build_silver.py
+```
+
+**Verify before trusting anything.** The gate re-checks every invariant established
+during profiling and exits non-zero on failure:
+
+```bash
+python pipeline/s03_verify.py
+```
+
+It reports three tiers: **FAIL** (an invariant broke — the pipeline must stop), **WARN**
+(a known, accepted quirk worth re-seeing each run), and **INFO** (drift monitoring —
+row counts and coverage, logged and diffed week over week).
+
+---
+
+## Data quality register
+
+Every issue below was found empirically, not read from documentation. Several
+contradict the API's own docs, which is why the profiling phase existed.
+
+**Silent type corruption.** `silver_session_result.duration` and `gap_to_leader` mixed
+scalar and JSON values in the raw data. `CAST(... AS REAL)` corrupted these without
+error. Resolved by splitting into five dedicated typed columns. The verification gate
+treats their absence as a hard FAIL, because a regression here would produce
+confident-looking but wrong output rather than a crash.
+
+**`silver_starting_grid` scope is not what the docs imply.** It covers Qualifying and
+Sprint Qualifying sessions, not Race and Sprint.
+
+**Composite key correction.** `silver_overtakes` requires a four-column primary key —
+`(session_key, date, overtaking_driver_number, overtaken_driver_number)`. The
+three-column hypothesis is violated by 2,018 rows, because a driver can pass several
+cars at the same recorded timestamp in a first-lap melee.
+
+**`stop_duration` is effectively unusable.** Measured coverage: 2023 0.0%, 2024 1.4%,
+2025 7.9%, 2026 3.3%. Use `lane_duration`, which is identical to `pit_duration` in all
+20,745 rows where both are populated.
+
+**Eleven ingestion gaps in `silver_session_result`.** Eight in 2023, plus three
+previously undocumented Race gaps found by systematic checking — session_key 9507
+(Miami 2024), 9928 (Hungary 2025), 9869 (São Paulo 2025). All non-cancelled, so
+genuinely missing. In all three, laps, pits, stints and positions are intact and only
+results are absent, indicating a single failed endpoint rather than a lost session —
+recoverable by targeted re-ingestion.
+
+**Three `silver_laps` gaps** — session_keys 9165 (Singapore 2023), 9655 (Qatar 2024),
+9858 (Las Vegas 2025).
+
+**`session_key` is not monotonic with date.** São Paulo (9869, November 2025) has a
+lower key than Hungary (9928, August 2025). Never use it as a chronological proxy —
+critical when building trailing features, where accidental ordering by key would leak
+future information.
+
+**`silver_sessions` contains the full future calendar.** 126 sessions registered for
+2026 but only 44 with results. Any `WHERE year = 2026` filter silently includes races
+that have not happened. This also means the upcoming schedule is already available
+locally for prediction.
+
+**Team name drift across seasons.** Fifteen raw team names collapse to a smaller set of
+constructors: AlphaTauri → RB → Racing Bulls, and Alfa Romeo → Kick Sauber → Audi.
+`normalize_team_names()` handles this and must be applied before any multi-year team
+aggregation. Cadillac is deliberately *not* mapped — a genuinely new 2026 constructor,
+not a rename — and is excluded from comparative analyses on sample-size grounds.
+
+**`country_code` in `silver_drivers` is NULL for 2025–2026.** The API stopped
+populating it.
+
+**DB Browser silently swallows INSERT errors.** Constraint violations must be surfaced
+through Python's `sqlite3` module.
+
+---
+
+## Methodological principles
+
+Established during the diagnostic phase and applied throughout.
+
+**Thresholds are derived, never guessed.** Tukey fences are computed fresh per dataset
+rather than hardcoded. Where a domain rule exists it is preferred to a statistical one —
+the "fighting" threshold is 1.0s because that is F1's own DRS detection window, not
+because it looked reasonable.
+
+**Sample thresholds come from power calculations.** This repeatedly meant declining to
+claim a result: driver-level DNF analysis needs n = 233 starts per driver, roughly ten
+seasons; wet-weather specialisation needs 30 wet races against ~15 available. Both are
+reported as descriptive with the limitation stated.
+
+**Bonferroni correction** applied for multiple comparisons throughout.
+
+**Session-median normalization** for any cross-circuit pace comparison — raw lap times
+are confounded by circuit mix.
+
+**Verify, never trust documentation.** The data dictionary was wrong at least twice.
+Every assumption, filter, and threshold got a confirming query before being accepted.
+
+**Composite keys join on all columns.** SQLite will not error on a partial key join, it
+will silently fan out.
+
+**Filtering belongs downstream.** The silver layer preserves raw reality — a
+3,510-second "lap" is a car sitting under a red flag, and it stays. Filtering happens in
+the diagnostic and predictive layers, where the choice is explicit and documented.
+
+---
+
+## Roadmap
+
+**Near term**
+- Backfill the three recoverable Race result gaps (+3 training races)
+- Replace the exact-lap `caution_flag` with a range-based Safety Car flag; the current
+  version under-detects SC periods and over-flags sector-scoped yellows, which
+  contaminates the strongest feature
+- Build the training table with strictly trailing features
+- Baseline multinomial model, rolling-origin validation, calibration analysis
+- Publish the dashboard, including a public prediction track record
+
+**Later**
+- Transcribe team radio (15,575 audio URLs, currently no text) to enable content-level
+  rather than volume-level analysis
+- Add Virtual Safety Car detection, which requires parsing the race control message text
+- Encode competing pit stops on adjacent laps — identified as the dominant unmeasured
+  factor in whether a slow stop actually costs track position
+- Revisit wet-weather analysis as the 2026 season adds wet races toward the power
+  threshold
+
+---
+
+*This project uses unofficial data from the OpenF1 API and is not associated with,
+endorsed by, or connected to Formula 1, the FIA, or any F1 team.*
