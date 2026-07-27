@@ -24,7 +24,7 @@ Each entry is dated where known and states the evidence, not just the conclusion
 
 
 ## Data quality — schema and types
-
+openf1_ingestion.py cached failures as completions. fetch() returned [] on timeout, HTTP error, and genuine empty response alike. ingest_per_session() then wrote that to _ingestion_progress regardless, so already_fetched() skipped the pair forever. Any transient network failure, or any fetch issued before a session had taken place, became a permanent, invisible gap. Found 2026-07-27: 282 affected (endpoint, session) pairs across all four seasons, including three 2026 races fetched on 30 June before they were run. Fixed in s01_backfill.py by recording a three-state outcome (ok / empty / failed) and never marking a failure terminal. Recovered 320,127 rows.
 ### 1. `silver_session_result.duration` mixed scalars and JSON — silently corrupted by CAST
 *Phase: IDA*
 
@@ -85,7 +85,7 @@ team bucket to map them to.
 ## Data quality — coverage and gaps
 
 ### 7. Eleven ingestion gaps in `silver_session_result`
-*Eight found during IDA; three found 2026-07-26*
+*Eight found during IDA; three found 2026-07-26 , all were recovered, and that the cause was the resumability bug, not upstream absence.*
 
 **2023 (8 sessions):** Bahrain Race, Azerbaijan Sprint, Hungarian Qualifying, Belgian
 Qualifying, Mexico City Practice 3, Las Vegas Practice 1, Austrian Sprint Qualifying,
@@ -124,7 +124,7 @@ the gate running automatically rather than on recall.
 
 ### 8. Three `silver_laps` gaps
 *Phase: IDA*
-
+The three lap gaps weren't permanently missing; they recovered too. Explicitly note this corrected the earlier hypothesis that they were never available upstream.
 session_keys 9165 (Singapore 2023), 9655 (Qatar 2024), 9858 (Las Vegas 2025).
 
 Unlike #7 these have persisted across the whole project, suggesting the data was never
@@ -188,10 +188,10 @@ doesn't need an external calendar source.
 
 | Year | Sessions scheduled | With results | Races completed |
 |---|---:|---:|---:|
-| 2023 | 118 | 105 | 21 |
-| 2024 | 123 | 115 | 23 |
-| 2025 | 123 | 117 | 22 |
-| 2026 | 126 | 44 | 8 |
+| 2023 | 118 | 105 | 22 |
+| 2024 | 123 | 115 | 24 |
+| 2025 | 123 | 117 | 24 |
+| 2026 | 126 | 44  | 11 |
 
 **66 training races, 8 in 2026.** For winner prediction the effective sample is races,
 not driver-rows  one winner per race means 66 events, not ~1,320. At roughly 10–15

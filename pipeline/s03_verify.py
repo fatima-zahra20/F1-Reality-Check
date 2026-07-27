@@ -53,22 +53,6 @@ REQUIRED_SPLIT_COLUMNS = {
     ],
 }
 
-# Known 2023 ingestion gaps in silver_session_result (notes log #13).
-KNOWN_RESULT_GAPS = [
-    (2023, "Bahrain", "Race"),
-    (2023, "Azerbaijan", "Sprint"),
-    (2023, "Hungarian", "Qualifying"),
-    (2023, "Belgian", "Qualifying"),
-    (2023, "Mexico City", "Practice 3"),
-    (2023, "Las Vegas", "Practice 1"),
-    (2023, "Austrian", "Sprint Qualifying"),
-    (2023, "Qatar", "Sprint Qualifying"),
-]
-
-# Known silver_laps ingestion gaps (phase 3 transition note, item 3).
-KNOWN_LAP_GAP_SESSIONS = [9165, 9655, 9858]
-
-
 class Report:
     def __init__(self) -> None:
         self.fails: list[str] = []
@@ -272,36 +256,62 @@ def check_stop_duration_coverage(con, rep: Report) -> None:
         if year == 2023 and with_dur:
             rep.warn("2023 now has stop_duration values — documented gap may have been backfilled")
 
+def check_completed_races_have_data(con, rep: Report) -> None:
+    """
+    Forward-looking invariant: every non-cancelled Race or Sprint session that
+    finished more than 3 days ago must have both laps and results.
 
-def check_known_result_gaps(con, rep: Report) -> None:
-    print("\n[10] The confirmed 2023 silver_session_result ingestion gaps")
-    needed = ("silver_session_result", "silver_sessions", "silver_meetings")
+    This replaces the earlier checks that asserted a hardcoded list of known gaps
+    still existed. All of those were recovered on 2026-07-27 once the ingestion
+    resumability bug was fixed, so the list was stale. A live invariant catches
+    the next failure automatically instead of only the ones already known.
+
+    The 3-day grace period avoids flagging a race that ran this weekend but whose
+    data OpenF1 has not published yet.
+    """
+    print("\n[10] Completed races have both laps and results")
+    needed = ("silver_sessions", "silver_meetings", "silver_laps", "silver_session_result")
     if not all(table_exists(con, t) for t in needed):
         return
-    for year, fragment, session_name in KNOWN_RESULT_GAPS:
-        n = q1(con, """
-            SELECT COUNT(*)
-            FROM silver_sessions s
-            JOIN silver_meetings m ON m.meeting_key = s.meeting_key
-            JOIN silver_session_result r ON r.session_key = s.session_key
-            WHERE m.year = ? AND m.meeting_name LIKE ? AND s.session_name = ?
-        """, (year, f"%{fragment}%", session_name))
-        if n:
-            rep.info(f"{year} {fragment} {session_name}: now has {n} result rows (gap filled)")
-        else:
-            rep.ok(f"{year} {fragment} {session_name}: still empty (expected)")
 
+    rows = con.execute("""
+        SELECT m.year, m.meeting_name, s.session_name, s.session_key,
+               (SELECT COUNT(*) FROM silver_laps l
+                 WHERE l.session_key = s.session_key) AS laps,
+               (SELECT COUNT(*) FROM silver_session_result r
+                 WHERE r.session_key = s.session_key) AS results
+        FROM silver_sessions s
+        JOIN silver_meetings m ON m.meeting_key = s.meeting_key
+        WHERE s.session_name IN ('Race', 'Sprint')
+          AND s.is_cancelled = 0
+          AND s.date_start < datetime('now', '-3 days')
+        ORDER BY s.date_start
+    """).fetchall()
 
-def check_known_lap_gaps(con, rep: Report) -> None:
-    print("\n[11] The 3 confirmed silver_laps ingestion gaps")
-    if not table_exists(con, "silver_laps"):
-        return
-    for sk in KNOWN_LAP_GAP_SESSIONS:
-        n = q1(con, "SELECT COUNT(*) FROM silver_laps WHERE session_key = ?", (sk,))
-        if n:
-            rep.info(f"session_key {sk}: now has {n:,} laps (gap filled)")
-        else:
-            rep.ok(f"session_key {sk}: still empty (expected)")
+    bad = [r for r in rows if r[4] == 0 or r[5] == 0]
+    for year, meeting, sname, sk, laps, results in bad:
+        missing = []
+        if laps == 0:
+            missing.append("laps")
+        if results == 0:
+            missing.append("results")
+        rep.fail(f"{year} {meeting} / {sname} (sk={sk}) missing: {', '.join(missing)}")
+
+    if not bad:
+        rep.ok(f"all {len(rows)} completed race/sprint sessions have laps and results")
+
+    # Training-set size, logged for drift monitoring.
+    usable = con.execute("""
+        SELECT m.year, COUNT(DISTINCT m.meeting_key)
+        FROM silver_sessions s
+        JOIN silver_meetings m ON m.meeting_key = s.meeting_key
+        WHERE s.session_name = 'Race' AND s.is_cancelled = 0
+          AND EXISTS (SELECT 1 FROM silver_laps l WHERE l.session_key = s.session_key)
+          AND EXISTS (SELECT 1 FROM silver_session_result r WHERE r.session_key = s.session_key)
+        GROUP BY m.year ORDER BY m.year
+    """).fetchall()
+    for year, n in usable:
+        rep.info(f"{year}: {n} usable races (laps + results)")
 
 
 def check_orphans(con, rep: Report) -> None:
@@ -369,8 +379,11 @@ def check_cadillac_exclusion(con, rep: Report) -> None:
     if not table_exists(con, "silver_drivers"):
         return
     n = q1(con, """
-        SELECT COUNT(DISTINCT session_key) FROM silver_drivers
-        WHERE team_name LIKE '%Cadillac%'
+        SELECT COUNT(DISTINCT d.session_key)
+        FROM silver_drivers d
+        WHERE d.team_name LIKE '%Cadillac%'
+          AND EXISTS (SELECT 1 FROM silver_session_result r
+                       WHERE r.session_key = d.session_key)
     """)
     rep.info(f"Cadillac appears in {n} sessions")
     if n and n > 40:
@@ -389,8 +402,7 @@ CHECKS = [
     check_weather_dupes,
     check_starting_grid_scope,
     check_stop_duration_coverage,
-    check_known_result_gaps,
-    check_known_lap_gaps,
+    check_completed_races_have_data,
     check_orphans,
     check_team_name_drift,
     check_null_team_name,
