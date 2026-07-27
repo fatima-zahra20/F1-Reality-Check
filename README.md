@@ -107,7 +107,7 @@ A point worth stating plainly, because it constrains everything downstream:
 | 2024 | 23 |
 | 2025 | 22 |
 | **Training total (2023–25)** | **66** |
-| 2026 (in progress) | 8 |
+| 2026 (in progress) | 11 |
 
 At ~20 drivers per race this is ~1,320 driver-race rows — but the target is *who won*,
 and there is one winner per race. So the **effective sample is 66 events, not 1,320**.
@@ -127,6 +127,9 @@ OpenF1 API
     │
     ▼
 [ s02_build_silver ]  ──▶  18 typed, PK-enforced silver tables
+    │
+    ▼
+[ s02b_caution_flags ]
     │
     ▼
 [ s03_verify ]  ──▶  invariant gate: FAIL halts the run
@@ -345,8 +348,7 @@ row counts and coverage, logged and diffed week over week).
 
 ## Data quality register
 
-Every issue below was found empirically, not read from documentation. Several
-contradict the API's own docs, which is why the profiling phase existed.
+these gaps were found and fixed, not standing
 
 **Silent type corruption.** `silver_session_result.duration` and `gap_to_leader` mixed
 scalar and JSON values in the raw data. `CAST(... AS REAL)` corrupted these without

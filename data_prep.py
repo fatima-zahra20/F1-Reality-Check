@@ -92,33 +92,29 @@ def normalize_team_names(df, col='team_name'):
 
 def load_laps(year=None, session_name=None):
     """
-    Loads silver_laps with a caution_flag column: 1 if a SafetyCar/Red/Yellow
-    message was logged on that exact session_key + lap_number, else 0.
-    Filter on caution_flag == 0 before any pace regression.
+    Loads silver_laps joined to silver_lap_flags, which classifies each lap by
+    race-wide neutralisation (sc_flag / vsc_flag / red_flag) and separately by
+    sector yellow. `caution_flag` is retained as an alias for `neutralised` for
+    backward compatibility with existing notebooks, but now means "race was
+    neutralised" rather than "any flag was logged on this lap number".
 
-    KNOWN LIMITATION: this joins race control on exact lap_number, but Safety Car
-    messages are not always tagged to every lap they span (notes log #10). So
-    caution_flag == 0 does NOT guarantee a clean lap. A range-based SC flag
-    (deployment message -> clearing message) is the planned fix, and it matters
-    because session-normalized pace is the strongest predictor in the model.
+    Sector yellows are deliberately NOT neutralising: measured at 94.11s mean
+    versus 89.19s clean, they cost ~5% and are localised to one sector.
+    Safety Car laps average 128.59s (+44%), VSC 109.20s (+22%).
     """
     query = """
-    WITH caution_laps AS (
-        SELECT session_key, lap_number,
-               MAX(CASE WHEN category = 'SafetyCar' THEN 1
-                        WHEN category = 'Flag' AND flag IN ('RED','YELLOW','DOUBLE YELLOW') THEN 1
-                        ELSE 0 END) AS caution_flag
-        FROM silver_race_control
-        WHERE lap_number IS NOT NULL
-        GROUP BY session_key, lap_number
-    )
     SELECT l.*, s.year, s.session_name, m.meeting_name, d.team_name, d.full_name,
-           COALESCE(c.caution_flag, 0) AS caution_flag
+           f.sc_flag, f.vsc_flag, f.red_flag, f.yellow_sector_flag,
+           f.neutralised,
+           COALESCE(f.neutralised, 0) AS caution_flag
     FROM silver_laps l
     JOIN silver_sessions s ON l.session_key = s.session_key
     JOIN silver_meetings m ON s.meeting_key = m.meeting_key
     JOIN silver_drivers d ON l.session_key = d.session_key AND l.driver_number = d.driver_number
-    LEFT JOIN caution_laps c ON l.session_key = c.session_key AND l.lap_number = c.lap_number
+    LEFT JOIN silver_lap_flags f
+           ON f.session_key   = l.session_key
+          AND f.driver_number = l.driver_number
+          AND f.lap_number    = l.lap_number
     WHERE l.lap_duration IS NOT NULL
     """
     params = []

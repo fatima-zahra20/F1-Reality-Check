@@ -38,7 +38,8 @@ EXPECTED_TABLES = [
     "silver_championship_drivers", "silver_championship_teams",
     "silver_car_data", "silver_location",
 ]
-
+# Derived tables, built by s02b_caution_flags.py rather than the silver build.
+DERIVED_TABLES = ["silver_caution_periods", "silver_lap_flags"]
 # Columns created by the silver build that the data dictionary does NOT document.
 # If these go missing, a rebuild silently regressed to the raw mixed-type columns.
 REQUIRED_SPLIT_COLUMNS = {
@@ -107,10 +108,37 @@ def check_tables_present(con, rep: Report) -> None:
     actual = [r[0] for r in con.execute(
         "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'silver_%'"
     )]
-    extra = sorted(set(actual) - set(EXPECTED_TABLES))
+    extra = sorted(set(actual) - set(EXPECTED_TABLES) - set(DERIVED_TABLES))
     if extra:
         rep.warn(f"undocumented silver tables present: {extra}")
 
+
+def check_lap_flags_fresh(con, rep: Report) -> None:
+    """
+    silver_lap_flags is DERIVED from silver_laps via s02b_caution_flags.py.
+    A silver rebuild does not update it, so it can silently go stale. Row-count
+    parity is a cheap proxy for freshness.
+    """
+    print("\n[17] silver_lap_flags is present and matches silver_laps")
+    if not table_exists(con, "silver_lap_flags"):
+        rep.fail("silver_lap_flags missing — run pipeline/s02b_caution_flags.py")
+        return
+
+    laps = q1(con, "SELECT COUNT(*) FROM silver_laps")
+    flags = q1(con, "SELECT COUNT(*) FROM silver_lap_flags")
+    if laps != flags:
+        rep.fail(
+            f"silver_lap_flags has {flags:,} rows vs silver_laps {laps:,} — "
+            "stale; rerun s02b_caution_flags.py"
+        )
+    else:
+        rep.ok(f"{flags:,} rows, matches silver_laps")
+
+    if table_exists(con, "silver_caution_periods"):
+        for kind, n in con.execute(
+            "SELECT kind, COUNT(*) FROM silver_caution_periods GROUP BY kind ORDER BY 2 DESC"
+        ):
+            rep.info(f"caution periods — {kind}: {n}")
 
 def check_split_columns(con, rep: Report) -> None:
     print("\n[2] Split columns from the silver build (undocumented in the dictionary)")
@@ -373,22 +401,33 @@ def check_temporal_coverage(con, rep: Report) -> None:
     if latest:
         rep.info(f"latest session: {latest[0]} — {latest[1]} / {latest[2]}")
 
-
 def check_cadillac_exclusion(con, rep: Report) -> None:
-    print("\n[16] Cadillac sample size (excluded from comparative analyses)")
+    """
+    Cadillac is excluded from comparative analyses and from the model.
+
+    The original reason was sample size (n was 8-10 early in 2026). That no
+    longer holds -- 11 races, 61 sessions with results as of 2026-07-27. The
+    exclusion now rests on a structural reason instead: Cadillac is a new-for-2026
+    constructor with no presence in the 2023-25 training data, so every trailing
+    feature (rolling DNF rate, wet_advantage, prior-season pace) is undefined for
+    them, and the model has never observed them.
+
+    This is a modelling constraint, not a data problem, so it reports as INFO.
+    """
+    print("\n[16] Cadillac scope (excluded — no training-set history)")
     if not table_exists(con, "silver_drivers"):
         return
-    n = q1(con, """
-        SELECT COUNT(DISTINCT d.session_key)
+    races = q1(con, """
+        SELECT COUNT(DISTINCT s.meeting_key)
         FROM silver_drivers d
+        JOIN silver_sessions s ON s.session_key = d.session_key
         WHERE d.team_name LIKE '%Cadillac%'
+          AND s.session_name = 'Race'
           AND EXISTS (SELECT 1 FROM silver_session_result r
                        WHERE r.session_key = d.session_key)
     """)
-    rep.info(f"Cadillac appears in {n} sessions")
-    if n and n > 40:
-        rep.warn("Cadillac sample may now justify reconsidering the blanket exclusion")
-
+    rep.info(f"Cadillac has {races} completed races, all in 2026 (test period only)")
+    rep.info("excluded from the model: no 2023-25 history, trailing features undefined")
 
 # --- main ------------------------------------------------------------------------
 
@@ -408,6 +447,7 @@ CHECKS = [
     check_null_team_name,
     check_temporal_coverage,
     check_cadillac_exclusion,
+    check_lap_flags_fresh, 
 ]
 
 
