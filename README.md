@@ -10,6 +10,9 @@ the data rather than assumed from familiarity with the sport.
 
 > **Status:** descriptive and diagnostic phases complete. Predictive phase in progress.
 > Dashboard not yet published.
+>
+> Figures below were re-verified against the diagnostic notebooks' stored outputs on
+> 2026-07-27, after the ingestion backfill recovered 320,127 previously-missing rows.
 
 ---
 
@@ -77,22 +80,26 @@ Scale of the silver layer:
 |---|---:|
 | `silver_location` | 25,849,231 |
 | `silver_car_data` | 9,365,942 |
-| `silver_intervals` | 1,875,432 |
-| `silver_position` | 281,801 |
-| `silver_laps` | 217,692 |
-| `silver_weather` | 42,915 |
-| `silver_stints` | 31,033 |
+| `silver_intervals` | 2,131,182 |
+| `silver_position` | 310,397 |
+| `silver_laps` | 239,102 |
+| `silver_weather` | 47,726 |
+| `silver_stints` | 34,567 |
 | `silver_pit` | 26,791 |
-| `silver_overtakes` | 20,065 |
-| `silver_race_control` | 19,807 |
+| `silver_race_control` | 22,423 |
+| `silver_overtakes` | 22,438 |
 | `silver_team_radio` | 15,575 |
 | `silver_drivers` | 9,949 |
-| `silver_session_result` | 7,660 |
+| `silver_session_result` | 8,447 |
 | `silver_championship_drivers` | 2,098 |
-| `silver_starting_grid` | 1,814 |
+| `silver_starting_grid` | 2,064 |
 | `silver_championship_teams` | 1,001 |
 | `silver_sessions` | 490 |
 | `silver_meetings` | 100 |
+
+Counts as reported by `pipeline/s03_verify.py` on 2026-07-27. `silver_pit` and
+`silver_team_radio` are the two tables still awaiting a silver rebuild — 4,080 rows
+were recovered into bronze for them after this run (see [Roadmap](#roadmap)).
 
 Full column-level documentation, including null counts, type decisions, and per-table
 quirks, is in **[DATA_DICTIONARY.md](DATA_DICTIONARY.md)**.
@@ -103,17 +110,21 @@ A point worth stating plainly, because it constrains everything downstream:
 
 | | Races with results |
 |---|---:|
-| 2023 | 21 |
-| 2024 | 23 |
-| 2025 | 22 |
-| **Training total (2023–25)** | **66** |
+| 2023 | 22 |
+| 2024 | 24 |
+| 2025 | 24 |
+| **Training total (2023–25)** | **70** |
 | 2026 (in progress) | 11 |
 
-At ~20 drivers per race this is ~1,320 driver-race rows — but the target is *who won*,
-and there is one winner per race. So the **effective sample is 66 events, not 1,320**.
+At ~20 drivers per race this is ~1,400 driver-race rows — but the target is *who won*,
+and there is one winner per race. So the **effective sample is 70 events, not 1,400**.
 That supports roughly 4–6 predictors, not fifteen, and rules out high-variance models
 like gradient boosting as a primary approach. The feature set was kept small
 deliberately, and the diagnostic phase is what justified which features earned a place.
+
+These counts come from the verification gate's live check (every non-cancelled Race
+session that has both laps and results), not from a hardcoded list. They rose from 66
+to 70 when the backfill recovered four previously-missing races.
 
 ---
 
@@ -123,7 +134,7 @@ deliberately, and the diagnostic phase is what justified which features earned a
 OpenF1 API
     │
     ▼
-[ s01_ingest ]  ──▶  bronze tables
+[ openf1_ingestion / s01_backfill ]  ──▶  bronze tables
     │
     ▼
 [ s02_build_silver ]  ──▶  18 typed, PK-enforced silver tables
@@ -187,8 +198,12 @@ The descriptive layer answers each stage factually. The diagnostic layer revisit
 stage asking *why*, using regression, ANOVA/ANCOVA, logistic regression, chi-square,
 paired t-tests, correlation, and variance tests.
 
-The full question bank, with completion status and the running notes log, is in
-**[EDA_descriptive_questions.md](EDA_descriptive_questions.md)**.
+The full question banks, with completion status, are in
+**[DESCRIPTIVE ANALYTICS/descriptive_question_bank.md](DESCRIPTIVE%20ANALYTICS/descriptive_question_bank.md)**
+and
+**[DIAGNOSTIC ANALYTICS/diagnostic_question_bank.md](DIAGNOSTIC%20ANALYTICS/diagnostic_question_bank.md)**.
+The running record of data-quality findings and methodological decisions is in
+**[NOTES_LOG.md](NOTES_LOG.md)**.
 
 ---
 
@@ -197,41 +212,49 @@ The full question bank, with completion status and the running notes log, is in
 These are the diagnostic results that shaped the feature set.
 
 **Pace dominates everything.** Session-normalized mean race pace (driver mean lap minus
-session median) explains ~40–52% of team race-points variance on its own. Adding
-reliability or strategy metrics contributes essentially nothing once pace is controlled
-— all three are highly correlated because all three measure the same latent variable:
-car quality.
+session median) explains ~37% of race-level and ~53% of season-level team points
+variance on its own. Reliability carries a small but real independent effect at race
+level (p = 0.029, standardized coefficient roughly 9× smaller than pace) and is not
+detectable at season level (p = 0.693, n = 40). Pit strategy adds essentially nothing
+(ΔR² = 0.001). All three are highly correlated because all three measure the same
+latent variable: car quality.
 
-**Grid position is the strongest single race-level predictor** (R² = 0.590, slope
-0.682), and this relationship does *not* vary significantly by circuit type (p = 0.612)
+**Grid position is the strongest single race-level predictor** (R² = 0.593, slope
+0.684), and this relationship does *not* vary significantly by circuit type (p = 0.683)
 — contradicting the intuition that street circuits should punish a poor grid slot more
 heavily.
 
 **Reliability is a car effect, not a driver effect.** DNF rate is team-specific
-(Williams 22.2% worst, McLaren 5.5% best). Williams fragility held across three
-different drivers. The cleanest evidence is a natural experiment: Carlos Sainz, the same
-driver, recorded an 11.9% DNF rate at Ferrari and 20.7% at Williams.
+(Williams 21.5% worst, McLaren 6.3% best; χ² = 24.7, p = 0.003). Williams fragility held
+across three different drivers, all in the 17.6–25.0% band. The cleanest evidence is a
+natural experiment: Carlos Sainz, the same driver, recorded an 11.4% DNF rate at Ferrari
+and 17.6% at Williams — a directional match to each team's own rate, not an exact one.
 
 **At driver level, qualifying pace outranks race pace.** Ranking predictors of the
-points gap between teammates by standardized coefficient: qualifying pace (2.194) >
-race pace (1.565) > reliability (1.366) > pit strategy (0.368, p = 0.250, not
-significant).
+points gap between teammates by standardized coefficient: qualifying pace (2.058) >
+race pace (1.656) ≈ reliability (1.644) > pit strategy (0.602, p = 0.047). Race pace and
+reliability are close enough that this data cannot rank them against each other.
 
-**One-stop strategies beat two-stop by ~0.68 places** at the same starting position
-(ANCOVA, p = 0.006), confirmed by two independent methods.
+**Fewer pit stops win.** At the same starting position, one-stop strategies beat
+two-stop by ~0.58 places (ANCOVA, p = 0.006) and three-plus-stop by ~0.61 places
+(p = 0.032). Confirmed by two independent methods — the teammate-level logistic
+regression finds the same direction (coefficient −1.51, p < 0.001).
 
-**Overtakes are gap-driven.** Conversion rate is ~16.7%; gap to the car ahead is the
-dominant predictor (logistic coefficient −1.32), with tyre delta also significant
-(−0.054).
+**Overtakes are gap-driven.** Conversion rate is ~17.5%; gap to the car ahead is the
+dominant predictor (logistic coefficient −1.355), with tyre delta also significant
+(−0.050). n = 38,381 opportunities.
 
 **Being lapped is pure pace deficit, not unreliability.** Team is the strongest
-predictor of lapping rate — Ferrari 0.8% versus Sauber 53.2%.
+predictor of lapping rate — Ferrari 1.4% versus Sauber 51.4% — driven by a 0.885 s/lap
+pace deficit relative to session median.
 
-**Wet-weather advantage exists but is not yet statistically demonstrable.** Ferrari,
-McLaren, Mercedes and the RB lineage show positive `wet_advantage`; Alpine and Sauber
-negative. This remains **descriptive only**: a maximum of 15 wet races per entity against
-the ~30 required for 80% power at a two-position effect size. Reported as a candidate
-feature with its limitation stated, not as a result.
+**Wet-weather advantage exists but is not yet statistically demonstrable.** Sauber,
+Alpine and Haas show negative `wet_advantage` (gaining more places in the wet); Ferrari,
+RB, McLaren and Mercedes positive. This remains **descriptive only**: a maximum of 17 wet
+races per entity against the ~30 required for 80% power at a two-position effect size,
+and the metric is confounded by typical grid position (back-of-grid entrants have more
+places available to gain in any conditions). Reported as a candidate feature with its
+limitations stated, not as a result.
 
 ---
 
@@ -253,26 +276,33 @@ demonstrates handling of the most common silent failure in prediction projects:
 **leakage** — training on features that would not have existed at the moment of
 prediction.
 
-**Features** (kept deliberately small given 66 events):
+**Features** (kept deliberately small given 70 events):
 
 1. `session_normalized_team_pace` — trailing, the dominant predictor
 2. `grid_position` — post-qualifying stage only
-3. `wet_advantage × race_had_rain` — interaction term
+3. `wet_advantage × race_had_rain` — interaction term, **not yet leakage-safe** (see below)
 4. `rolling_dnf_rate` — trailing reliability, capturing trend rather than season average
 5. `circuit_type` — categorical
 
-**Validation is rolling-origin, not a random split.** Eight held-out 2026 races is far
+**Open issue on feature 3.** `race_had_rain` is a race-day observation. It does not exist
+at the pre-weekend stage, and does not exist at the post-qualifying stage either. As
+written, this term leaks. It needs either a forecast input, a rain-probability prior by
+circuit and month, or removal from both stages — a decision to be made before the
+training table is built, not inside it.
+
+**Validation is rolling-origin, not a random split.** Eleven held-out 2026 races is far
 too few to distinguish skill from luck. Instead the model trains on 2023 and predicts
 2024 race by race, then trains on 2023–24 and predicts 2025, and so on — always
-predicting forward, never using future information. This yields ~45–50 genuinely
-out-of-sample predictions while respecting time order.
+predicting forward, never using future information. This yields ~48 genuinely
+out-of-sample predictions within the training seasons, ~59 including 2026, while
+respecting time order.
 
 **Evaluation uses Brier score and calibration curves, not accuracy.** With 20 classes
 and a favourite who wins roughly 40% of the time, accuracy is close to meaningless. The
 question that matters is whether a stated 30% happens about 30% of the time.
 
 **Baseline first.** A well-specified multinomial logit is the primary model. Anything
-more complex must beat it on out-of-sample Brier score to earn inclusion — and with 66
+more complex must beat it on out-of-sample Brier score to earn inclusion — and with 70
 events, it very likely will not.
 
 ---
@@ -295,16 +325,21 @@ F1-Reality-Check/
 ├── DIAGNOSTIC ANALYTICS/          7 notebooks (statistical tests + regressions)
 ├── pipeline/
 │   ├── config.py                  single source of truth for all paths
+│   ├── s01_backfill.py            targeted re-ingestion of failed fetches
+│   ├── s02_build_silver.py        bronze → silver build driver
+│   ├── s02b_caution_flags.py      range-based SC / VSC / RED periods
 │   └── s03_verify.py              invariant gate
 ├── outputs/                       pipeline outputs consumed by Tableau
 ├── models/                        serialized models + metrics, versioned
 ├── logs/
 ├── data_prep.py                   shared loaders and cleaning utilities
 ├── DATA_DICTIONARY.md             column-level documentation, all 18 tables
-├── EDA_descriptive_questions.md   question bank + notes log
+├── NOTES_LOG.md                   data-quality findings + decisions
 ├── environment.yml
 └── requirements.txt
 ```
+
+Steps `s04`–`s09` from the architecture diagram are not yet written.
 
 ---
 
@@ -329,8 +364,11 @@ pip install -r requirements.txt
 source. Rebuild it from the API:
 
 ```bash
-python pipeline/s01_ingest.py
+python "DATA INGESTION/openf1_ingestion.py"     # first-time ingest
+python pipeline/s01_backfill.py                 # dry run — shows the plan
+python pipeline/s01_backfill.py --execute       # add --include-optional for pit/team_radio
 python pipeline/s02_build_silver.py
+python pipeline/s02b_caution_flags.py           # derived caution tables
 ```
 
 **Verify before trusting anything.** The gate re-checks every invariant established
@@ -361,22 +399,40 @@ Sprint Qualifying sessions, not Race and Sprint.
 
 **Composite key correction.** `silver_overtakes` requires a four-column primary key —
 `(session_key, date, overtaking_driver_number, overtaken_driver_number)`. The
-three-column hypothesis is violated by 2,018 rows, because a driver can pass several
+three-column hypothesis is violated by 2,225 rows, because a driver can pass several
 cars at the same recorded timestamp in a first-lap melee.
 
 **`stop_duration` is effectively unusable.** Measured coverage: 2023 0.0%, 2024 1.4%,
 2025 7.9%, 2026 3.3%. Use `lane_duration`, which is identical to `pit_duration` in all
 20,745 rows where both are populated.
 
-**Eleven ingestion gaps in `silver_session_result`.** Eight in 2023, plus three
-previously undocumented Race gaps found by systematic checking — session_key 9507
-(Miami 2024), 9928 (Hungary 2025), 9869 (São Paulo 2025). All non-cancelled, so
-genuinely missing. In all three, laps, pits, stints and positions are intact and only
-results are absent, indicating a single failed endpoint rather than a lost session —
-recoverable by targeted re-ingestion.
+**Ingestion cached failures as completions — the root cause, now fixed.** The original
+`openf1_ingestion.py` recorded an (endpoint, session) pair as complete whether the fetch
+succeeded, returned genuinely empty, or failed, because `fetch()` returned `[]` in all
+three cases. Any transient network error — or any fetch issued *before* a session had
+taken place — became a permanent, invisible gap. Found 2026-07-27: 282 affected pairs
+across all four seasons, including three 2026 races fetched on 30 June before they were
+run. `s01_backfill.py` records a three-state outcome (`ok` / `empty` / `failed`) and
+never marks a failure terminal. **Recovered 320,127 rows.**
 
-**Three `silver_laps` gaps** — session_keys 9165 (Singapore 2023), 9655 (Qatar 2024),
-9858 (Las Vegas 2025).
+**All eleven `silver_session_result` gaps and all three `silver_laps` gaps are closed.**
+The eight 2023 result gaps, the three Race gaps (9507 Miami 2024, 9928 Hungary 2025,
+9869 São Paulo 2025) and the three lap gaps (9165 Singapore 2023, 9655 Qatar 2024, 9858
+Las Vegas 2025) were all products of the resumability bug, not upstream absence. The
+gate now asserts the live invariant — every non-cancelled Race/Sprint older than three
+days must have both laps and results — rather than a hardcoded list of known gaps, so
+the next failure is caught automatically.
+
+**HTTP 404 is not a definitive answer from this API.** Verified 2026-07-27: during a run
+that was also drawing 429s, the `pit` endpoint returned 404 for sessions that answer 200
+with rows when queried unhurried — 2024 Japanese GP (54 rows) and 2025 Las Vegas GP (23)
+were both recorded as permanently empty on that basis. OpenF1 emits 404 as a
+load-shedding symptom. Treat 404 as retryable, and pace requests well below 1/second.
+
+**`pit` and `team_radio` are optional endpoints in the backfill** and were not covered by
+the first pass. 14 Race sessions had full laps and 40–85 stints but zero pit rows. The
+2026 races have since been recovered into bronze; the older seasons appear genuinely
+absent upstream. Awaiting a silver rebuild.
 
 **`session_key` is not monotonic with date.** São Paulo (9869, November 2025) has a
 lower key than Hungary (9928, August 2025). Never use it as a chronological proxy —
@@ -435,11 +491,27 @@ the diagnostic and predictive layers, where the choice is explicit and documente
 
 ## Roadmap
 
+**Complete**
+- Fixed the ingestion resumability bug; recovered 320,127 rows and +4 training races
+- Replaced the exact-lap `caution_flag` with range-based `silver_caution_periods` /
+  `silver_lap_flags`, separating SC (85) / VSC (112) / RED (225). This also corrected a
+  latent error: VSC was never missing from the data — it lives inside
+  `category='SafetyCar'` under two message spellings, so earlier analyses counted every
+  VSC as a full Safety Car
+- Re-verified all diagnostic notebook conclusions against their stored outputs
+
 **Near term**
-- Backfill the three recoverable Race result gaps (+3 training races)
-- Replace the exact-lap `caution_flag` with a range-based Safety Car flag; the current
-  version under-detects SC periods and over-flags sector-scoped yellows, which
-  contaminates the strongest feature
+- Fix 404/429 handling in `s01_backfill.py`, re-run with `--include-optional`, then
+  rebuild silver so the recovered `pit` / `team_radio` rows land
+- Extend the gate: per-endpoint coverage checks (it passed clean while 14 races had no
+  pit data), plus a null/coverage snapshot written to `outputs/` and diffed run over run
+- Re-run the diagnostic notebooks — several cells hold results that predate the caution
+  fix, and a few carry figures with no stored output behind them
+- Decide the leakage-sensitive design questions before building the training table: a
+  canonical race-ordering table (`session_key` is not monotonic with date), a per-feature
+  "known as of when" contract, the `race_had_rain` leak, cold-start policy for new
+  entrants, and whether Sprints count as training events
+- Write `s04_descriptive` as parameterized, year-agnostic queries emitting output tables
 - Build the training table with strictly trailing features
 - Baseline multinomial model, rolling-origin validation, calibration analysis
 - Publish the dashboard, including a public prediction track record
@@ -447,11 +519,13 @@ the diagnostic and predictive layers, where the choice is explicit and documente
 **Later**
 - Transcribe team radio (15,575 audio URLs, currently no text) to enable content-level
   rather than volume-level analysis
-- Add Virtual Safety Car detection, which requires parsing the race control message text
+- Rebuild the position-swing and anomaly-cause analyses on `silver_lap_flags` so SC and
+  VSC are separated and multi-lap neutralisations are fully covered
 - Encode competing pit stops on adjacent laps — identified as the dominant unmeasured
   factor in whether a slow stop actually costs track position
+- Fix the `driver_number` → `full_name` fan-out in the wet-weather driver table
 - Revisit wet-weather analysis as the 2026 season adds wet races toward the power
-  threshold
+  threshold (17 available, ~30 needed)
 
 ---
 
