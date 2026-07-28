@@ -210,7 +210,4 @@ logs/
 # Scratch
 tree.txt
 
-# Pipeline outputs ARE tracked — they are the deliverable.
-# The blanket *.csv rule above would otherwise exclude them.
-!outputs/
-!outputs/**/*.csv
+# Pipeline outputs are regenerable, run s04_descriptive.py to rebuild them.
