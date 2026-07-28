@@ -34,9 +34,7 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from config import DB_PATH  # noqa: E402
-
-TELEMETRY = ["car_data", "location"]
+from config import DB_PATH, BRONZE_DB_PATH  # noqa: E402
 
 # Each entry: bronze source table -> list of statements, executed in order.
 # Keys are the bare names; silver tables are silver_<key>.
@@ -86,7 +84,7 @@ SELECT
     date_end,
     CAST(year AS INTEGER),
     CASE is_cancelled WHEN 'True' THEN 1 WHEN 'False' THEN 0 END
-FROM meetings
+FROM bronze.meetings
 """]
 
 BUILD["sessions"] = ["""
@@ -128,7 +126,7 @@ SELECT
     gmt_offset,
     CAST(year AS INTEGER),
     CASE is_cancelled WHEN 'True' THEN 1 WHEN 'False' THEN 0 END
-FROM sessions
+FROM bronze.sessions
 """]
 
 BUILD["drivers"] = ["""
@@ -158,7 +156,7 @@ SELECT
     broadcast_name, full_name, name_acronym,
     team_name, team_colour, first_name, last_name,
     headshot_url, country_code
-FROM drivers
+FROM bronze.drivers
 """]
 
 BUILD["laps"] = ["""
@@ -202,7 +200,7 @@ SELECT
     segments_sector_1,
     segments_sector_2,
     segments_sector_3
-FROM laps
+FROM bronze.laps
 """]
 
 BUILD["stints"] = ["""
@@ -230,7 +228,7 @@ SELECT
     CAST(lap_end   AS INTEGER),
     compound,
     CAST(tyre_age_at_start AS INTEGER)
-FROM stints
+FROM bronze.stints
 """]
 
 BUILD["pit"] = ["""
@@ -258,7 +256,7 @@ SELECT
     CAST(stop_duration AS REAL),
     CAST(lane_duration AS REAL),
     CAST(pit_duration  AS REAL)
-FROM pit
+FROM bronze.pit
 """]
 
 BUILD["position"] = ["""
@@ -283,7 +281,7 @@ SELECT
     CAST(meeting_key   AS INTEGER),
     "date",
     CAST("position"    AS INTEGER)
-FROM position
+FROM bronze.position
 """]
 
 BUILD["intervals"] = ["""
@@ -325,7 +323,7 @@ SELECT
         THEN CAST(REPLACE(REPLACE(REPLACE(gap_to_leader, '+', ''), ' LAPS', ''), ' LAP', '') AS INTEGER)
         ELSE NULL
     END
-FROM intervals
+FROM bronze.intervals
 """]
 
 BUILD["overtakes"] = ["""
@@ -350,7 +348,7 @@ SELECT
     CAST(overtaken_driver_number  AS INTEGER),
     CAST(meeting_key              AS INTEGER),
     CAST("position"               AS INTEGER)
-FROM overtakes
+FROM bronze.overtakes
 """]
 
 BUILD["race_control"] = ["""
@@ -391,7 +389,7 @@ SELECT
     CAST(sector AS INTEGER),
     CAST(qualifying_phase AS INTEGER),
     message
-FROM race_control
+FROM bronze.race_control
 """]
 
 BUILD["session_result"] = ["""
@@ -439,7 +437,7 @@ SELECT
     END,
     CASE WHEN gap_to_leader LIKE '[%' THEN gap_to_leader ELSE NULL END,
     CAST(points AS REAL)
-FROM session_result
+FROM bronze.session_result
 """]
 
 BUILD["starting_grid"] = ["""
@@ -461,7 +459,7 @@ SELECT
     CAST(meeting_key   AS INTEGER),
     CAST("position"    AS INTEGER),
     CAST(lap_duration  AS REAL)
-FROM starting_grid
+FROM bronze.starting_grid
 """]
 
 BUILD["team_radio"] = ["""
@@ -487,7 +485,7 @@ SELECT
     "date",
     CAST(meeting_key   AS INTEGER),
     recording_url
-FROM team_radio
+FROM bronze.team_radio
 """]
 
 BUILD["weather"] = ["""
@@ -519,7 +517,7 @@ SELECT DISTINCT
     CAST(air_temperature   AS REAL),
     CAST(wind_speed        AS REAL),
     CAST(wind_direction    AS INTEGER)
-FROM weather
+FROM bronze.weather
 """]
 
 BUILD["championship_drivers"] = ["""
@@ -545,7 +543,7 @@ SELECT
     CAST(position_current AS INTEGER),
     CAST(points_start     AS REAL),
     CAST(points_current   AS REAL)
-FROM championship_drivers
+FROM bronze.championship_drivers
 """]
 
 BUILD["championship_teams"] = ["""
@@ -571,73 +569,16 @@ SELECT
     CAST(position_current AS INTEGER),
     CAST(points_start     AS REAL),
     CAST(points_current   AS REAL)
-FROM championship_teams
+FROM bronze.championship_teams
 """]
 
-BUILD["car_data"] = ["""
-DROP TABLE IF EXISTS silver_car_data
-""", """
-CREATE TABLE silver_car_data (
-    session_key    INTEGER NOT NULL,
-    driver_number  INTEGER NOT NULL,
-    "date"         TEXT    NOT NULL,
-    meeting_key    INTEGER NOT NULL,
-    throttle       INTEGER NOT NULL,
-    brake          INTEGER NOT NULL,
-    rpm            INTEGER NOT NULL,
-    speed          INTEGER NOT NULL,
-    n_gear         INTEGER NOT NULL,
-    drs            INTEGER,
-    PRIMARY KEY (session_key, driver_number, "date")
-)
-""", """
-INSERT INTO silver_car_data
-SELECT
-    CAST(session_key   AS INTEGER),
-    CAST(driver_number AS INTEGER),
-    "date",
-    CAST(meeting_key   AS INTEGER),
-    CAST(throttle AS INTEGER),
-    CAST(brake    AS INTEGER),
-    CAST(rpm      AS INTEGER),
-    CAST(speed    AS INTEGER),
-    CAST(n_gear   AS INTEGER),
-    CAST(drs      AS INTEGER)
-FROM car_data
-"""]
-
-BUILD["location"] = ["""
-DROP TABLE IF EXISTS silver_location
-""", """
-CREATE TABLE silver_location (
-    session_key    INTEGER NOT NULL,
-    driver_number  INTEGER NOT NULL,
-    "date"         TEXT    NOT NULL,
-    meeting_key    INTEGER NOT NULL,
-    x              INTEGER NOT NULL,
-    y              INTEGER NOT NULL,
-    z              INTEGER NOT NULL,
-    PRIMARY KEY (session_key, driver_number, "date")
-)
-""", """
-INSERT INTO silver_location
-SELECT
-    CAST(session_key   AS INTEGER),
-    CAST(driver_number AS INTEGER),
-    "date",
-    CAST(meeting_key   AS INTEGER),
-    CAST(x AS INTEGER),
-    CAST(y AS INTEGER),
-    CAST(z AS INTEGER)
-FROM location
-"""]
 
 
 # --- runner ----------------------------------------------------------------------
 
-def count(con: sqlite3.Connection, table: str):
+def count(con: sqlite3.Connection, table: str, schema: str = "main"):
     try:
-        return con.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0]
+        return con.execute(f'SELECT COUNT(*) FROM {schema}."{table}"').fetchone()[0]
     except sqlite3.OperationalError:
         return None
 
@@ -646,7 +587,7 @@ def build_table(con: sqlite3.Connection, name: str) -> tuple[bool, str]:
     """Runs one table's statements inside a transaction. Returns (ok, message)."""
     silver = f"silver_{name}"
     before = count(con, silver)
-    bronze = count(con, name)
+    bronze = count(con, name, "bronze")
 
     if bronze is None:
         return False, f"bronze table '{name}' does not exist"
@@ -672,16 +613,13 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="Rebuild silver tables from bronze.")
     ap.add_argument("--tables", nargs="*", default=None,
                     help="specific tables to rebuild (bare names, e.g. laps session_result)")
-    ap.add_argument("--include-telemetry", action="store_true",
-                    help="include car_data and location (~35M rows, slow)")
     ap.add_argument("--list", action="store_true", help="list available tables and exit")
     args = ap.parse_args()
 
     if args.list:
         print("Available tables:")
         for name in BUILD:
-            tag = "  (telemetry)" if name in TELEMETRY else ""
-            print(f"  {name}{tag}")
+            print(f"  {name}")
         return 0
 
     if args.tables:
@@ -692,22 +630,30 @@ def main() -> int:
             return 1
         targets = args.tables
     else:
-        targets = [t for t in BUILD if t not in TELEMETRY or args.include_telemetry]
+        targets = list(BUILD)
 
     if not DB_PATH.exists():
-        print(f"[FAIL] database not found at {DB_PATH}")
+        print(f"[FAIL] silver database not found at {DB_PATH}")
+        return 1
+    if not BRONZE_DB_PATH.exists():
+        print(f"[FAIL] bronze database not found at {BRONZE_DB_PATH}")
         return 1
 
     print("=" * 74)
     print("SILVER BUILD")
-    print(f"database: {DB_PATH}")
-    print(f"tables:   {', '.join(targets)}")
+    print(f"silver: {DB_PATH}")
+    print(f"bronze: {BRONZE_DB_PATH}")
+    print(f"tables: {', '.join(targets)}")
     print("=" * 74)
 
     con = sqlite3.connect(str(DB_PATH))
     con.execute("PRAGMA journal_mode=WAL")
     con.execute("PRAGMA synchronous=NORMAL")
     con.execute("PRAGMA cache_size=-65536")
+
+    # Bronze lives in its own file since the 2026-07-28 split; the build reads
+    # from it via ATTACH and writes into main (silver).
+    con.execute(f"ATTACH DATABASE '{BRONZE_DB_PATH.as_posix()}' AS bronze")
 
     failures = []
     for name in targets:

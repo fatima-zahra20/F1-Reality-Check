@@ -47,7 +47,7 @@ from pathlib import Path
 import requests
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from config import DB_PATH  # noqa: E402
+from config import DB_PATH, BRONZE_DB_PATH  # noqa: E402
 
 BASE_URL = "https://api.openf1.org/v1"
 REQUEST_DELAY = 1.0          # seconds between calls, matching the original script
@@ -225,8 +225,8 @@ def build_plan(con, only_sessions=None, include_optional=False):
     sessions = con.execute(
         """
         SELECT s.session_key, s.session_name, m.meeting_name, s.date_start
-        FROM silver_sessions s
-        JOIN silver_meetings m ON m.meeting_key = s.meeting_key
+        FROM silver.silver_sessions s
+        JOIN silver.silver_meetings m ON m.meeting_key = s.meeting_key
         WHERE s.is_cancelled = 0
           AND s.date_start < ?
         ORDER BY s.date_start
@@ -242,14 +242,18 @@ def build_plan(con, only_sessions=None, include_optional=False):
         for endpoint in expected_endpoints(session_name, include_optional):
             row = con.execute(
                 """
-                SELECT rows_inserted FROM _ingestion_progress
+                SELECT rows_inserted, status FROM _ingestion_progress
                 WHERE endpoint = ? AND session_key = ?
                 """,
                 (endpoint, str(session_key)),
             ).fetchone()
 
-            # Retry when previously recorded as zero rows, or never attempted.
-            if row is None or row[0] == 0:
+            # Retry only when no definitive answer was ever recorded: never
+            # attempted, a legacy row with no status, or an explicit failure.
+            # A confirmed 'empty' is a real answer and is not re-queried.
+            if row is None:
+                plan.append((session_key, session_name, meeting_name, endpoint))
+            elif row[0] == 0 and (row[1] is None or row[1] == "failed"):
                 plan.append((session_key, session_name, meeting_name, endpoint))
 
     return plan
@@ -271,8 +275,15 @@ def main() -> int:
         print(f"[FAIL] database not found at {DB_PATH}")
         return 1
 
-    con = sqlite3.connect(str(DB_PATH))
+    if not BRONZE_DB_PATH.exists():
+        print(f"[FAIL] bronze database not found at {BRONZE_DB_PATH}")
+        return 1
+
+    # Writes go to bronze; planning reads silver_sessions from the silver file,
+    # attached read-only.
+    con = sqlite3.connect(str(BRONZE_DB_PATH))
     con.execute("PRAGMA journal_mode=WAL")
+    con.execute(f"ATTACH DATABASE '{DB_PATH.as_posix()}' AS silver")
     ensure_status_columns(con)
 
     plan = build_plan(con, args.sessions, args.include_optional)

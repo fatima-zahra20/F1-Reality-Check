@@ -36,7 +36,6 @@ EXPECTED_TABLES = [
     "silver_starting_grid", "silver_session_result", "silver_race_control",
     "silver_team_radio", "silver_weather",
     "silver_championship_drivers", "silver_championship_teams",
-    "silver_car_data", "silver_location",
 ]
 # Derived tables, built by s02b_caution_flags.py rather than the silver build.
 DERIVED_TABLES = ["silver_caution_periods", "silver_lap_flags"]

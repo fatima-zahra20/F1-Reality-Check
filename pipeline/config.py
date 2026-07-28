@@ -4,9 +4,17 @@ from pathlib import Path
 # Project root: this file lives in pipeline/, so go up one level.
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
-# --- data ---
-DB_PATH = PROJECT_ROOT / "DATA INGESTION" / "f1.db"
+# --- databases (medallion layers, one file each) ---
+# Bronze is raw API output, read only by the silver build and re-fetchable, so it
+# lives outside the working database. Split on 2026-07-28: f1.db went from
+# 6.4 GB to 352 MB.
+BRONZE_DB_PATH = PROJECT_ROOT / "DATA INGESTION" / "bronze_f1.db"
+DB_PATH        = PROJECT_ROOT / "DATA INGESTION" / "f1.db"           # silver
+GOLD_DB_PATH   = PROJECT_ROOT / "DATA INGESTION" / "gold_f1.db"      # built later
+
 INGESTION_SCRIPT = PROJECT_ROOT / "DATA INGESTION" / "openf1_ingestion.py"
+
+# Reference only — the executable build is pipeline/s02_build_silver.py
 SILVER_SQL = PROJECT_ROOT / "SCHEMA MODELING" / "to_silver.sql"
 
 # --- query libraries ---
@@ -27,10 +35,11 @@ EXCLUDED_TEAMS = ["Cadillac"]          # partial 2026 season, n≈8-10
 STOP_DURATION_MIN_YEAR = 2024          # zero coverage in 2023
 
 # --- telemetry (excluded from the weekly pipeline) ---
-# silver_car_data (9.4M rows) + silver_location (25.8M rows) are ~35M of the
-# database's 6.5 GB and cover only 32/490 sessions — unusable as model features.
-# Refreshed manually on demand, never in the scheduled run.
-TELEMETRY_TABLES = ["silver_car_data", "silver_location"]
+# car_data (9.4M rows) and location (25.8M rows) exist in bronze only. They cover
+# 32 of 490 sessions, so they cannot be model features or appear in season-wide
+# aggregates. Silver copies were dropped in the 2026-07-28 split; rebuild from
+# bronze if ever needed.
+TELEMETRY_TABLES = ["car_data", "location"]
 INCLUDE_TELEMETRY_IN_WEEKLY = False
 
 for _d in (OUTPUTS_DIR, MODELS_DIR, LOGS_DIR):
