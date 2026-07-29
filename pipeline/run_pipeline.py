@@ -7,16 +7,27 @@ Order
     s02_build_silver  rebuild silver from bronze   (skipped if nothing new)
     s02b_caution_flags rebuild derived flag tables (skipped if nothing new)
     s03_verify        invariant gate               (always runs)
+    s04_descriptive   descriptive serving layer    (only if the gate passed)
+    s05_diagnostic    diagnostic serving layer     (only if the gate passed)
 
 Skipping matters: most weeks bring no new data, and rebuilding 2.1M interval
 rows to produce a byte-identical result is wasted time. The gate always runs, so
 a no-op week still confirms the database is sound.
 
+The serving layers do NOT follow that skip rule. They are cheap and fully
+derived, so they rebuild on every successful run rather than only when
+ingestion found rows — otherwise a manual run to refresh the dashboard would
+silently do nothing, which is the more expensive failure.
+
+They are gated on s03 passing. Publishing a serving layer built on a database
+that failed its own invariants would put wrong data in front of someone as
+finished output, which is worse than publishing nothing.
+
 Exit codes
 ----------
     0  everything succeeded
     1  a step failed
-    2  the verification gate reported FAIL
+    2  the verification gate reported FAIL (serving layers skipped)
 
 Each run writes a timestamped log to logs/. Failures are visible there rather
 than only on a console nobody was watching.
@@ -160,6 +171,32 @@ def main() -> int:
 
     # --- 4. verify -------------------------------------------------------------
     code, out = runner.run_step("verify", "s03_verify.py")
+    gate_passed = code == 0
+
+    # --- 5 & 6. serving layers -------------------------------------------------
+    # Rebuilt whenever the gate passes, regardless of whether ingestion found
+    # anything. They are derived views over silver and take well under a minute,
+    # so the cost of an unnecessary rebuild is far lower than the cost of a
+    # dashboard that quietly kept showing last week's numbers.
+    serving_status = "skipped"
+    serving_failed: list[str] = []
+
+    if not args.execute:
+        runner.log("\nServing layers skipped (dry run).")
+    elif not gate_passed:
+        runner.log("\nServing layers SKIPPED — the verification gate reported FAIL.")
+        runner.log("Building them now would publish data the gate has already")
+        runner.log("rejected, presented as a finished dashboard.")
+    else:
+        serving_status = "built"
+        for name, script in (("descriptive", "s04_descriptive.py"),
+                             ("diagnostic", "s05_diagnostic.py")):
+            rc, _ = runner.run_step(name, script)
+            if rc != 0:
+                runner.log(f"\n{name} serving layer FAILED.")
+                serving_failed.append(name)
+        if serving_failed:
+            serving_status = f"FAILED: {', '.join(serving_failed)}"
 
     elapsed = time.time() - overall_started
     runner.log("")
@@ -167,14 +204,19 @@ def main() -> int:
     runner.log(f"PIPELINE FINISHED in {elapsed:.1f}s")
     runner.log(f"new rows: {new_rows:,}")
     runner.log(f"rebuild:  {'yes' if should_rebuild else 'skipped'}")
-    runner.log(f"gate:     {'PASS' if code == 0 else 'FAIL'}")
+    runner.log(f"gate:     {'PASS' if gate_passed else 'FAIL'}")
+    runner.log(f"serving:  {serving_status}")
     runner.log(f"log:      {runner.log_path}")
     runner.log("=" * 74)
 
     runner.flush()
 
-    if code != 0:
+    # Gate failure outranks a serving-layer failure: it says the database itself
+    # is not trustworthy, which is the more important thing to surface.
+    if not gate_passed:
         return 2
+    if serving_failed:
+        return 1
     return 0
 
 

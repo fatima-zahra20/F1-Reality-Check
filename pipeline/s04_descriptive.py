@@ -58,6 +58,12 @@ from config import DB_PATH, OUTPUTS_DIR  # noqa: E402
 
 DASHBOARD_DIR = OUTPUTS_DIR / "dashboard"
 
+# A clean lap longer than this multiple of its session's median clean lap is a
+# car sitting in a red-flag queue, not a lap. Derived per session rather than
+# hardcoded in seconds — see the note in build_fact_driver_race. s05_diagnostic
+# applies the same rule.
+LAP_OUTLIER_FACTOR = 2.0
+
 # Constructor renames across 2023-2026. Mirrors data_prep.TEAM_NAME_MAP.
 # Cadillac deliberately unmapped — a genuinely new 2026 constructor.
 TEAM_NAME_MAP = {
@@ -299,14 +305,14 @@ def build_fact_driver_race(con) -> pd.DataFrame:
         df[c] = df[c].fillna(0).astype(int)
 
     # --- pace, clean laps only ---
-    # neutralised = 0 excludes SC / VSC / red flag laps. NULL (19 laps with no
-    # timestamp) is excluded too — unknown status is not assumed clean.
-    pace = pd.read_sql(f"""
+    # neutralised = 0 excludes SC / VSC / red flag laps. NULL is excluded too —
+    # unknown status is not assumed clean.
+    #
+    # The aggregation happens in pandas rather than SQL because it needs the
+    # derived lap-duration bound below, and SQLite has no MEDIAN.
+    raw = pd.read_sql(f"""
         WITH scope AS ({RACE_SCOPE})
-        SELECT l.session_key, l.driver_number,
-               COUNT(*)              AS clean_laps,
-               AVG(l.lap_duration)   AS mean_clean_lap,
-               MIN(l.lap_duration)   AS fastest_lap
+        SELECT l.session_key, l.driver_number, l.lap_duration
         FROM scope
         JOIN silver_laps l ON l.session_key = scope.session_key
         JOIN silver_lap_flags f
@@ -316,8 +322,26 @@ def build_fact_driver_race(con) -> pd.DataFrame:
         WHERE l.lap_duration IS NOT NULL
           AND f.neutralised = 0
           AND COALESCE(l.is_pit_out_lap, 0) = 0
-        GROUP BY l.session_key, l.driver_number
     """, con)
+
+    # neutralised = 0 is necessary but not sufficient. A red-flag suspension
+    # leaves the car stationary on track with the clock running, and those laps
+    # carry neutralised = 0 because no flag was logged against that lap number.
+    # Australia 2023 (session_key 7787) contains laps of ~2,000s this way, which
+    # dragged its mean clean lap to 564s against a true ~85s.
+    #
+    # The bound is derived per session from the median of its own clean laps —
+    # never a hardcoded seconds value, which would be wrong the moment a slower
+    # circuit joined the calendar. Median rather than mean, because the outliers
+    # being removed are precisely what corrupts a mean.
+    session_median = raw.groupby("session_key")["lap_duration"].transform("median")
+    raw = raw[raw["lap_duration"] <= LAP_OUTLIER_FACTOR * session_median]
+
+    pace = (raw.groupby(["session_key", "driver_number"])
+               .agg(clean_laps=("lap_duration", "size"),
+                    mean_clean_lap=("lap_duration", "mean"),
+                    fastest_lap=("lap_duration", "min"))
+               .reset_index())
     df = df.merge(pace, on=["session_key", "driver_number"], how="left")
 
     # Session-median normalisation: raw lap times are not comparable across
@@ -434,7 +458,13 @@ def build_fact_lap(con) -> pd.DataFrame:
     out = merged[keep].copy()
 
     # Pace relative to that race's median clean lap — comparable across circuits.
-    clean = out[(out["neutralised"] == 0) & (out["is_pit_out_lap"] == 0)]
+    # The same derived bound as build_fact_driver_race, applied so both tables
+    # normalise against an identical baseline. A median is robust enough that
+    # the trimming barely moves it, but "barely" is not "identically", and a
+    # dashboard that shows two different medians for one race is a bug report.
+    clean = out[(out["neutralised"] == 0) & (out["is_pit_out_lap"] == 0)].copy()
+    first_pass = clean.groupby("session_key")["lap_duration"].transform("median")
+    clean = clean[clean["lap_duration"] <= LAP_OUTLIER_FACTOR * first_pass]
     medians = clean.groupby("session_key")["lap_duration"].median().rename("session_median_lap")
     out = out.merge(medians, on="session_key", how="left")
     out["lap_vs_median"] = (out["lap_duration"] - out["session_median_lap"]).round(3)

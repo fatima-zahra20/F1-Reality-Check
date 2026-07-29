@@ -1,6 +1,44 @@
 """Central configuration. Every pipeline step imports paths from here."""
 from pathlib import Path
 
+# --- environment guard -----------------------------------------------------------
+# Every pipeline step imports this module, so this is the one place that catches a
+# wrong interpreter before it can do damage.
+#
+# The failure this prevents is not a crash — it is worse than a crash. pandas 3.x
+# changes groupby, NaN handling and dtype inference in ways that shift results by
+# a few percent without erroring, so an accidental run produces numbers that look
+# plausible, differ from every recorded figure, and read as a data problem rather
+# than an environment one. NOTES_LOG #42 records this happening once already: a
+# stray python 3.14 / pandas 3.0.3 install, since re-created, currently sits ahead
+# of the pinned Anaconda environment on PATH.
+#
+# Fail loudly at import instead.
+try:
+    import pandas as _pd
+except ImportError as _exc:  # pragma: no cover
+    raise ImportError(
+        "pandas is not installed in this interpreter.\n"
+        "The F1 Reality Check pipeline requires the pinned Anaconda environment "
+        "(python 3.13.9, pandas 2.3.3, statsmodels 0.14.5).\n"
+        "Create it with:  conda env create -f environment.yml"
+    ) from _exc
+
+_PANDAS_MAJOR = int(_pd.__version__.split(".")[0])
+if _PANDAS_MAJOR != 2:
+    import sys as _sys
+    raise ImportError(
+        f"pandas {_pd.__version__} detected — this pipeline requires pandas 2.x.\n"
+        f"  interpreter: {_sys.executable}\n"
+        f"  python:      {_sys.version.split()[0]}\n\n"
+        "pandas 3.x does not crash here, it silently returns different numbers, "
+        "which is why this is a hard stop rather than a warning (NOTES_LOG #42).\n"
+        "Run with the pinned environment instead:\n"
+        "  conda activate f1-reality-check\n"
+        "or invoke that interpreter directly, e.g.\n"
+        '  & "$env:USERPROFILE\\anaconda3\\python.exe" pipeline\\run_pipeline.py --execute'
+    )
+
 # Project root: this file lives in pipeline/, so go up one level.
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
