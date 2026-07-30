@@ -1,29 +1,16 @@
-# Install with:  pip install -r requirements.txt
-# The canonical pin for the pipeline is environment.yml (conda); this file is
-# also what Streamlit Cloud reads from the repo root to build the app container.
+# What Streamlit Cloud installs to run streamlit_app.py — nothing else.
 #
-# pandas MUST stay on 2.x. pipeline/config.py refuses to import otherwise —
-# pandas 3.x changes groupby and NaN handling in ways that shift results by a
-# few percent without raising, which reads as a data bug rather than an
-# environment one. See NOTES_LOG #42.
+# Kept deliberately minimal. An earlier version of this file also pinned
+# scipy, statsmodels, scikit-learn and jupyterlab for the pipeline, and Streamlit
+# Cloud's pip install failed on that combination without a clear error in the
+# app itself — the platform's base image already provides streamlit, so the app
+# ran anyway but with none of the listed packages installed, surfacing as
+# ModuleNotFoundError: plotly on first import. Only list what the app imports.
+#
+# For the pipeline's dependencies, see requirements-pipeline.txt or
+# environment.yml (the canonical conda pin).
 
-# --- dashboard (needed by Streamlit Cloud) ---
 streamlit==1.51.0
 plotly==6.3.0
-
-# --- pipeline and analysis ---
-numpy==2.3.5
 pandas==2.3.3
-scipy==1.16.3
-statsmodels==0.14.5
-scikit-learn==1.7.2
-matplotlib
-seaborn
 requests
-
-# --- notebooks ---
-# Only used to run DIAGNOSTIC ANALYTICS/*.ipynb locally. Streamlit Cloud will
-# install these too and never use them, costing a few minutes of build time.
-# Move them to a separate file if the deploy ever gets slow enough to annoy.
-jupyterlab
-ipykernel

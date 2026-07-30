@@ -1,0 +1,27 @@
+# Pipeline and analysis environment — ingestion, silver build, verification,
+# the serving layers, and the diagnostic notebooks.
+#
+# This is NOT what Streamlit Cloud installs. It reads requirements.txt from the
+# repo root, which is deliberately limited to the dashboard's own four
+# dependencies — see the comment there for why mixing the two broke the deploy.
+#
+# The canonical pin is environment.yml (conda). Use this only if installing
+# with pip instead:
+#
+#     pip install -r requirements-pipeline.txt
+#
+# pandas MUST stay on 2.x. pipeline/config.py refuses to import otherwise —
+# pandas 3.x changes groupby and NaN handling in ways that shift results by a
+# few percent without raising, which reads as a data bug rather than an
+# environment one. See NOTES_LOG #42.
+
+numpy==2.3.5
+pandas==2.3.3
+scipy==1.16.3
+statsmodels==0.14.5
+scikit-learn==1.7.2
+matplotlib
+seaborn
+requests
+jupyterlab
+ipykernel
