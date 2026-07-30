@@ -1570,7 +1570,7 @@ def main() -> int:
     n_sig = sum(1 for t in d.tests if t["significant"])
     n_caveat = sum(1 for t in d.tests if t["caveat"])
     print(f"{len(d.tests)} tests | {n_sig} significant | {n_caveat} carrying a caveat")
-    print(f"Point Power BI at {DASHBOARD_DIR}")
+    print(f"Serving layer written to {DASHBOARD_DIR}")
     print("=" * 74)
     return 0
 

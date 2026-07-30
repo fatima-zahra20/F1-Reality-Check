@@ -9,6 +9,7 @@ Order
     s03_verify        invariant gate               (always runs)
     s04_descriptive   descriptive serving layer    (only if the gate passed)
     s05_diagnostic    diagnostic serving layer     (only if the gate passed)
+    s06_publish       push data to the dashboard   (only with --publish)
 
 Skipping matters: most weeks bring no new data, and rebuilding 2.1M interval
 rows to produce a byte-identical result is wasted time. The gate always runs, so
@@ -22,6 +23,11 @@ silently do nothing, which is the more expensive failure.
 They are gated on s03 passing. Publishing a serving layer built on a database
 that failed its own invariants would put wrong data in front of someone as
 finished output, which is worse than publishing nothing.
+
+s06 is opt-in via --publish rather than automatic. Everything before it writes
+to this machine and is undoable; s06 replaces the data behind a public URL. A
+step that changes what the outside world sees should be asked for explicitly,
+not ride along with a routine refresh.
 
 Exit codes
 ----------
@@ -38,6 +44,7 @@ Usage
     python pipeline\\run_pipeline.py --execute
     python pipeline\\run_pipeline.py --execute --force-rebuild
     python pipeline\\run_pipeline.py --execute --skip-ingest
+    python pipeline\\run_pipeline.py --execute --publish   # also refresh the dashboard
 """
 
 from __future__ import annotations
@@ -117,6 +124,9 @@ def main() -> int:
                     help="rebuild silver even if ingestion found nothing new")
     ap.add_argument("--skip-ingest", action="store_true",
                     help="skip ingestion (useful when rebuilding after a manual fetch)")
+    ap.add_argument("--publish", action="store_true",
+                    help="publish the serving layer to the GitHub Release the "
+                         "dashboard reads from (needs GITHUB_TOKEN)")
     args = ap.parse_args()
 
     LOGS_DIR.mkdir(exist_ok=True)
@@ -198,6 +208,28 @@ def main() -> int:
         if serving_failed:
             serving_status = f"FAILED: {', '.join(serving_failed)}"
 
+    # --- 7. publish ------------------------------------------------------------
+    # Opt-in. Requires the serving layers to have been built this run, since
+    # publishing means replacing the live dashboard's data — doing that from a
+    # stale outputs/ directory would push whatever happened to be lying around.
+    publish_status = "not requested"
+
+    if args.publish:
+        if not args.execute:
+            publish_status = "skipped (dry run)"
+            runner.log("\nPublish skipped — --publish needs --execute.")
+        elif serving_status != "built":
+            publish_status = "skipped (no fresh serving layer)"
+            runner.log("\nPublish SKIPPED — the serving layers were not rebuilt")
+            runner.log("this run, so there is nothing verified to publish.")
+        else:
+            rc, _ = runner.run_step("publish", "s06_publish.py", ["--execute"])
+            publish_status = "published" if rc == 0 else "FAILED"
+            if rc != 0:
+                runner.log("\nPublish FAILED — the dashboard still serves the")
+                runner.log("previous data, which is the safe outcome.")
+                serving_failed.append("publish")
+
     elapsed = time.time() - overall_started
     runner.log("")
     runner.log("=" * 74)
@@ -206,6 +238,7 @@ def main() -> int:
     runner.log(f"rebuild:  {'yes' if should_rebuild else 'skipped'}")
     runner.log(f"gate:     {'PASS' if gate_passed else 'FAIL'}")
     runner.log(f"serving:  {serving_status}")
+    runner.log(f"publish:  {publish_status}")
     runner.log(f"log:      {runner.log_path}")
     runner.log("=" * 74)
 

@@ -4,7 +4,7 @@ s04_descriptive.py — builds the descriptive serving layer for the dashboard.
 Produces a star schema as CSVs in outputs/dashboard/:
 
     dim_race           one row per race          (~81)
-    dim_driver         one row per driver        (~35)
+    dim_driver         driver x season           (~90)
     dim_team           one row per constructor   (~11)
     fact_driver_race   driver x race             (~1,700)
     fact_lap           driver x race x lap       (~100k)
@@ -20,8 +20,12 @@ gained data.
 
 NATURAL KEYS ONLY. No surrogate ids generated at build time: if dim_driver
 assigned driver_id = 1,2,3... those numbers could shift when a new driver
-appears, silently breaking every relationship in a saved Power BI report. Keys
-are session_key, driver_number, and normalised team_name.
+appears, silently breaking every relationship built on them. Keys are
+session_key, driver_number, and normalised team_name.
+
+DRIVER NUMBERS ARE NOT DRIVERS. They are reassigned between seasons, so
+dim_driver is grained by driver_number x year and must be joined with the
+year from dim_race. See build_dim_driver.
 
 DYNAMIC SCOPE. "All completed, non-cancelled races with both laps and results" —
 never a hardcoded year or session list, so new races flow through with no edits.
@@ -146,44 +150,86 @@ def build_dim_race(con) -> pd.DataFrame:
 
 def build_dim_driver(con) -> pd.DataFrame:
     """
-    One row per driver. A driver's name metadata can vary across sessions, so
-    the most recent non-null value wins.
+    One row per driver_number x year.
+
+    Numbers are reused. #1 passes to the reigning champion, and 34 numbers in
+    the archive have belonged to more than one person. Keyed on driver_number
+    alone, this table merged Verstappen's 2023-2025 Red Bull races into Lando
+    Norris's row — 81 races entered, first_year 2023, carrying Verstappen's NED
+    country code. Every chart labelled by driver name inherited that.
+
+    Season is the smallest grain at which a number reliably points at one
+    person, and it joins cleanly: facts carry session_key, dim_race carries
+    year.
+
+    Identity attributes (acronym, country, headshot) are resolved per full_name
+    across all seasons rather than per row, because they describe the human, not
+    the season — and OpenF1 drops country_code for whole seasons at a time, so
+    a within-season lookup would return null for drivers it has known since 2023.
     """
     df = pd.read_sql(f"""
         WITH scope AS ({RACE_SCOPE})
-        SELECT DISTINCT
+        SELECT
             d.driver_number,
+            m.year,
             d.full_name,
             d.name_acronym,
             d.broadcast_name,
             d.country_code,
             d.headshot_url,
-            s.date_start
-        FROM scope
-        JOIN silver_drivers d ON d.session_key = scope.session_key
-        JOIN silver_sessions s ON s.session_key = scope.session_key
-        WHERE d.full_name IS NOT NULL
-        ORDER BY d.driver_number, s.date_start
-    """, con)
-
-    latest = (df.sort_values("date_start")
-                .groupby("driver_number", as_index=False)
-                .last()
-                .drop(columns=["date_start"]))
-
-    # Seasons active, useful as a slicer.
-    spans = pd.read_sql(f"""
-        WITH scope AS ({RACE_SCOPE})
-        SELECT d.driver_number, MIN(m.year) AS first_year, MAX(m.year) AS last_year,
-               COUNT(DISTINCT scope.session_key) AS races_entered
+            s.date_start,
+            scope.session_key
         FROM scope
         JOIN silver_drivers d ON d.session_key = scope.session_key
         JOIN silver_sessions s ON s.session_key = scope.session_key
         JOIN silver_meetings m ON m.meeting_key = s.meeting_key
-        GROUP BY d.driver_number
+        WHERE d.full_name IS NOT NULL
     """, con)
 
-    return latest.merge(spans, on="driver_number", how="left")
+    # Within a season a number occasionally appears under two names (a reserve
+    # standing in). The one who actually raced most is the driver; report the
+    # rest rather than silently picking.
+    per_season = (df.groupby(["driver_number", "year", "full_name"])["session_key"]
+                    .nunique().rename("races_entered").reset_index())
+
+    contested = per_season.groupby(["driver_number", "year"]).filter(
+        lambda g: len(g) > 1
+    )
+    for (num, yr), g in contested.groupby(["driver_number", "year"]):
+        names = ", ".join(f"{r.full_name} ({r.races_entered})"
+                          for r in g.itertuples())
+        print(f"  note: #{num} in {yr} raced under more than one name — {names}")
+
+    season = (per_season.sort_values("races_entered")
+                        .groupby(["driver_number", "year"], as_index=False)
+                        .last())
+
+    # Attributes describe the person, so resolve them per name across all
+    # seasons, taking the most recent non-null of each.
+    def last_valid(s: pd.Series):
+        s = s.dropna()
+        return s.iloc[-1] if len(s) else None
+
+    attrs = (df.sort_values("date_start")
+               .groupby("full_name", as_index=False)
+               .agg({c: last_valid for c in
+                     ["name_acronym", "broadcast_name", "country_code",
+                      "headshot_url"]}))
+
+    # Career span, keyed on the person. A driver who changes number between
+    # seasons still aggregates correctly.
+    career = (per_season.groupby("full_name", as_index=False)
+                        .agg(first_year=("year", "min"),
+                             last_year=("year", "max"),
+                             career_races=("races_entered", "sum")))
+
+    out = (season.merge(attrs, on="full_name", how="left")
+                 .merge(career, on="full_name", how="left"))
+
+    return out[["driver_number", "year", "full_name", "name_acronym",
+                "broadcast_name", "country_code", "headshot_url",
+                "races_entered", "first_year", "last_year", "career_races"]] \
+        .sort_values(["year", "driver_number"], ignore_index=True)
 
 
 def build_dim_team(con) -> pd.DataFrame:
@@ -627,7 +673,7 @@ def main() -> int:
         print("=" * 74)
         return 1
     print(f"Built {len(targets)} table(s).")
-    print(f"Point Power BI at {DASHBOARD_DIR}")
+    print(f"Serving layer written to {DASHBOARD_DIR}")
     print("=" * 74)
     return 0
 
