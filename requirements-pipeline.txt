@@ -5,8 +5,8 @@
 # repo root, which is deliberately limited to the dashboard's own four
 # dependencies — see the comment there for why mixing the two broke the deploy.
 #
-# The canonical pin is environment.yml (conda). Use this only if installing
-# with pip instead:
+# The canonical pin is environment-pipeline.yml (conda). Use this only if
+# installing with pip instead:
 #
 #     pip install -r requirements-pipeline.txt
 #

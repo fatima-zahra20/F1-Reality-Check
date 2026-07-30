@@ -21,7 +21,7 @@ except ImportError as _exc:  # pragma: no cover
         "pandas is not installed in this interpreter.\n"
         "The F1 Reality Check pipeline requires the pinned Anaconda environment "
         "(python 3.13.9, pandas 2.3.3, statsmodels 0.14.5).\n"
-        "Create it with:  conda env create -f environment.yml"
+        "Create it with:  conda env create -f environment-pipeline.yml"
     ) from _exc
 
 _PANDAS_MAJOR = int(_pd.__version__.split(".")[0])

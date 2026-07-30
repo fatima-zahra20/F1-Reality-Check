@@ -335,7 +335,7 @@ F1-Reality-Check/
 ├── data_prep.py                   shared loaders and cleaning utilities
 ├── DATA_DICTIONARY.md             column-level documentation, all 18 tables
 ├── NOTES_LOG.md                   data-quality findings + decisions
-├── environment.yml
+├── environment-pipeline.yml
 └── requirements.txt
 ```
 
@@ -350,7 +350,7 @@ statsmodels 0.14.5, scikit-learn 1.7.2. Versions are pinned — pandas is delibe
 held at 2.x, since 3.x introduces breaking changes to code validated on 2.3.3.
 
 ```bash
-conda env create -f environment.yml
+conda env create -f environment-pipeline.yml
 conda activate f1-reality-check
 ```
 

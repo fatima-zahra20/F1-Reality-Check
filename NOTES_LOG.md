@@ -424,7 +424,7 @@ diagnostic phase actually ran in.
 A stray `.venv` on Python 3.14 with **pandas 3.0.3** was found in the project and
 removed. Pandas 3.x has breaking changes; activating that environment and re-running the
 diagnostic notebooks would have produced failures or different numbers that looked like
-data problems. Versions are pinned in `environment.yml` and `requirements.txt`
+data problems. Versions are pinned in `environment-pipeline.yml` and `requirements.txt`
 specifically to prevent a future `conda update` from doing this silently.
 
 
