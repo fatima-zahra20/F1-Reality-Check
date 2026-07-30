@@ -107,11 +107,11 @@ def build_db() -> dict[str, int]:
             "Run s04_descriptive.py and s05_diagnostic.py first."
         )
 
-    # Drop and rewrite, matching s04/s05. A half-updated bundle published as
-    # current truth is the failure worth avoiding here.
-    if DB_FILE.exists():
-        DB_FILE.unlink()
-
+    # Drop and rewrite per table via to_sql(if_exists="replace"), matching
+    # s04/s05, rather than deleting the file first. On Windows the file delete
+    # fails outright if a local `streamlit run` still has dashboard.db open —
+    # replacing tables in place works regardless of who else has it open for
+    # reading.
     counts: dict[str, int] = {}
     with sqlite3.connect(DB_FILE) as con:
         for table in TABLES:
@@ -120,13 +120,20 @@ def build_db() -> dict[str, int]:
             counts[table] = len(df)
             print(f"  {table:20s} {len(df):>8,} rows")
 
+        # DROP TABLE (inside to_sql's replace) already drops that table's
+        # indexes, so recreating them here never collides with a stale one.
         for table, col in INDEXES:
             con.execute(f"CREATE INDEX ix_{table}_{col} ON {table}({col})")
 
-    # VACUUM cannot run inside the transaction the context manager holds open.
-    con = sqlite3.connect(DB_FILE)
-    con.execute("VACUUM")
-    con.close()
+    # VACUUM cannot run inside the transaction the context manager holds open,
+    # and needs exclusive access it may not get with another reader attached.
+    # It only reclaims space, so skip it rather than fail the whole publish.
+    try:
+        con = sqlite3.connect(DB_FILE)
+        con.execute("VACUUM")
+        con.close()
+    except sqlite3.OperationalError as exc:
+        print(f"  (skipped VACUUM: {exc} — file is still valid, just not compacted)")
 
     return counts
 
