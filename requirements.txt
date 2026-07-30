@@ -7,10 +7,16 @@
 # ran anyway but with none of the listed packages installed, surfacing as
 # ModuleNotFoundError: plotly on first import. Only list what the app imports.
 #
+# streamlit is deliberately NOT listed here. The platform installs its own
+# build (currently 1.60.0) as part of its base setup. Pinning an older version
+# ourselves forced pip to satisfy that exact version, which pulled in its older
+# pyarrow pin — one with no prebuilt wheel for this platform's Python 3.13, so
+# pip tried to compile it from source and failed. Let the platform manage its
+# own streamlit version instead of fighting it.
+#
 # For the pipeline's dependencies, see requirements-pipeline.txt or
-# environment.yml (the canonical conda pin).
+# environment-pipeline.yml (the canonical conda pin).
 
-streamlit==1.51.0
 plotly==6.3.0
 pandas==2.3.3
 requests
