@@ -474,10 +474,15 @@ def build_fact_lap(con) -> pd.DataFrame:
         by=["session_key", "driver_number"], direction="backward",
     )
 
-    # --- gap to leader: one reading per lap ---
+    # --- gaps: one reading per lap ---
+    # interval_seconds is the gap to the car ahead, gap_to_leader_seconds the
+    # gap to P1. Both are needed to answer whether a driver was fighting,
+    # isolated, or lapped: the leader gap alone cannot distinguish a driver
+    # locked in a battle from one circulating alone at the same deficit.
     intervals = pd.read_sql(f"""
         WITH scope AS ({RACE_SCOPE})
         SELECT i.session_key, i.driver_number, i."date",
+               i.interval_seconds, i.interval_laps,
                i.gap_to_leader_seconds, i.gap_to_leader_laps
         FROM scope JOIN silver_intervals i ON i.session_key = scope.session_key
         ORDER BY i."date"
@@ -499,7 +504,8 @@ def build_fact_lap(con) -> pd.DataFrame:
         "i1_speed", "i2_speed", "st_speed", "is_pit_out_lap",
         "sc_flag", "vsc_flag", "red_flag", "yellow_sector_flag", "neutralised",
         "stint_number", "compound", "tyre_age",
-        "position", "gap_to_leader_seconds", "gap_to_leader_laps",
+        "position", "interval_seconds", "interval_laps",
+        "gap_to_leader_seconds", "gap_to_leader_laps",
     ]
     out = merged[keep].copy()
 
