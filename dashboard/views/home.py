@@ -131,15 +131,17 @@ with st.container(key="hero"):
         unsafe_allow_html=True,
     )
 
+    # Paths are relative to the entry point (streamlit_app.py at the repo
+    # root), not to this file, and must match its st.Page() paths exactly.
     c1, c2, c3 = st.columns(3)
     with c1:
         if st.button("Analyse", width="stretch"):
-            st.switch_page("views/analyse.py")
+            st.switch_page("dashboard/views/analyse.py")
     with c2:
         if st.button("Diagnose", width="stretch"):
-            st.switch_page("views/diagnose.py")
+            st.switch_page("dashboard/views/diagnose.py")
     with c3:
         if st.button("Predict", width="stretch"):
-            st.switch_page("views/predict.py")
+            st.switch_page("dashboard/views/predict.py")
 
 render_footer()
