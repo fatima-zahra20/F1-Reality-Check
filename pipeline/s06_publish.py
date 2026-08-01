@@ -73,7 +73,7 @@ API = "https://api.github.com"
 # cannot silently end up published.
 TABLES = [
     "dim_race", "dim_driver", "dim_team",
-    "fact_driver_race", "fact_lap", "fact_event",
+    "fact_driver_race", "fact_lap", "fact_event", "fact_championship",
     "diag_tests", "diag_coefficients", "diag_groups", "diag_points",
 ]
 
@@ -83,6 +83,7 @@ INDEXES = [
     ("fact_lap", "session_key"),
     ("fact_driver_race", "session_key"),
     ("fact_event", "session_key"),
+    ("fact_championship", "session_key"),
     ("diag_coefficients", "test_id"),
     ("diag_groups", "test_id"),
     ("diag_points", "test_id"),

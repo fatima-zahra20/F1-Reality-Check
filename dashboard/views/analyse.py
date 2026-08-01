@@ -20,7 +20,9 @@ import pandas as pd
 import streamlit as st
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+import story_driver  # noqa: E402
 import story_race  # noqa: E402
+import story_team  # noqa: E402
 from app_common import query, render_footer  # noqa: E402
 
 # --- shared filters -----------------------------------------------------------
@@ -64,12 +66,6 @@ session_key = st.sidebar.selectbox(
 )
 race = season_races[season_races.session_key == session_key].iloc[0]
 
-st.sidebar.divider()
-st.sidebar.caption(
-    "Data from the OpenF1 API, rebuilt weekly. Clean laps exclude safety car, "
-    "VSC and red flag periods."
-)
-
 
 # --- story picker -------------------------------------------------------------
 
@@ -90,19 +86,97 @@ st.caption(
     f"{race.circuit_type} circuit"
 )
 
+
+# --- section picker -----------------------------------------------------------
+# One section at a time rather than one long scroll: each maps to a file in
+# DESCRIPTIVE ANALYTICS and answers that file's questions. Sections differ by
+# story, since a team has no "gaps" questions and only a driver has a teammate.
+
+MODULES = {
+    "Story of a Race": story_race,
+    "Story of a Driver": story_driver,
+    "Story of a Team": story_team,
+}
+section_pairs = MODULES[story].section_options()
+section_titles = {key: title for key, title in section_pairs}
+section_keys = list(section_titles)
+
+# Switching story changes which sections exist, and Diagnose can hand over a
+# section directly. Fall back to the first section rather than raising when the
+# stored key is not valid here.
+if st.session_state.get("section_choice") not in section_keys:
+    st.session_state["section_choice"] = section_keys[0]
+
+st.sidebar.divider()
+section = st.sidebar.radio(
+    "Section", section_keys,
+    format_func=lambda k: section_titles.get(k, k),
+    key="section_choice",
+)
+
 if story == "Story of a Race":
-    story_race.render(race)
+    story_race.render(race, section)
+
 elif story == "Story of a Driver":
-    st.info(
-        "Not built yet. This will follow the same question bank through one "
-        "driver's race: their grid slot, their lap 1, their stints, their "
-        "radio traffic, their result."
-    )
+    # The driver list depends on the race, so it is built here rather than
+    # alongside the season and race pickers above.
+    entrants = query("""
+        SELECT f.driver_number, d.full_name, d.name_acronym, f.team_name,
+               f.finish_position
+        FROM fact_driver_race f
+        JOIN dim_race r ON r.session_key = f.session_key
+        LEFT JOIN dim_driver d
+               ON d.driver_number = f.driver_number AND d.year = r.year
+        WHERE f.session_key = ?
+        ORDER BY f.finish_position IS NULL, f.finish_position
+    """, (int(race.session_key),))
+
+    if entrants.empty:
+        st.info("No entrants recorded for this race.")
+    else:
+        driver_labels = {
+            int(r.driver_number):
+                f"{r.full_name or ('#' + str(int(r.driver_number)))}"
+                f"  ·  {r.team_name}"
+            for r in entrants.itertuples()
+        }
+        driver_options = list(driver_labels)
+
+        # Changing race leaves the previous race's driver selected, who may
+        # not have entered this one. Reset before the widget renders.
+        if st.session_state.get("driver_choice") not in driver_options:
+            st.session_state["driver_choice"] = driver_options[0]
+
+        driver_number = st.sidebar.selectbox(
+            "Driver", driver_options,
+            format_func=lambda k: driver_labels.get(k, str(k)),
+            key="driver_choice",
+        )
+        story_driver.render(race, driver_number, section)
+
 else:
-    st.info(
-        "Not built yet. This will compare a team's two cars: combined grid "
-        "position, who out-qualified whom, whether the strategies converged "
-        "or split, and the combined points haul."
-    )
+    teams = query("""
+        SELECT DISTINCT team_name FROM fact_driver_race
+        WHERE session_key = ? ORDER BY team_name
+    """, (int(race.session_key),))
+
+    if teams.empty:
+        st.info("No teams recorded for this race.")
+    else:
+        team_options = teams.team_name.tolist()
+
+        # Changing race can leave a team selected that did not enter this one
+        # (Cadillac joined in 2026). Reset before the widget renders.
+        if st.session_state.get("team_choice") not in team_options:
+            st.session_state["team_choice"] = team_options[0]
+
+        team = st.sidebar.selectbox("Team", team_options, key="team_choice")
+        story_team.render(race, team, section)
+
+st.sidebar.divider()
+st.sidebar.caption(
+    "Data from the OpenF1 API, rebuilt weekly. Clean laps exclude safety car, "
+    "VSC and red flag periods."
+)
 
 render_footer()

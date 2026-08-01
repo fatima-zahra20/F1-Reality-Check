@@ -9,6 +9,7 @@ Produces a star schema as CSVs in outputs/dashboard/:
     fact_driver_race   driver x race             (~1,700)
     fact_lap           driver x race x lap       (~100k)
     fact_event         one row per notable moment
+    fact_championship  team x race, standings before and after
 
 Design decisions
 ----------------
@@ -602,6 +603,49 @@ def build_fact_event(con) -> pd.DataFrame:
     return out.sort_values(["session_key", "event_time"])
 
 
+def build_fact_championship(con) -> pd.DataFrame:
+    """
+    Constructor standings before and after each race.
+
+    The API reports these per session as position/points "start" and "current",
+    which is what makes "how did this race move the championship" answerable
+    without reconstructing the table by summing results.
+
+    Renamed constructors are collapsed the same way as everywhere else, so a
+    team's championship line is continuous across a rename. Where two source
+    rows now share a normalised name in one race, points are summed and the
+    better (numerically lower) position kept — this cannot happen with the
+    current mapping, since no two mapped names competed in the same season,
+    but summing is the behaviour that stays correct if one ever does.
+    """
+    df = pd.read_sql(f"""
+        WITH scope AS ({RACE_SCOPE})
+        SELECT c.session_key, c.team_name,
+               c.position_start, c.position_current,
+               c.points_start, c.points_current
+        FROM scope JOIN silver_championship_teams c
+             ON c.session_key = scope.session_key
+    """, con)
+
+    if df.empty:
+        return df
+
+    df = normalize_teams(df)
+    for col in ["position_start", "position_current", "points_start",
+                "points_current"]:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    out = (df.groupby(["session_key", "team_name"], as_index=False)
+             .agg(position_start=("position_start", "min"),
+                  position_current=("position_current", "min"),
+                  points_start=("points_start", "sum"),
+                  points_current=("points_current", "sum")))
+
+    out["points_gained"] = out["points_current"] - out["points_start"]
+    out["positions_gained"] = out["position_start"] - out["position_current"]
+    return out.sort_values(["session_key", "position_current"])
+
+
 # --- runner ----------------------------------------------------------------------
 
 BUILDERS = {
@@ -611,6 +655,7 @@ BUILDERS = {
     "fact_driver_race": build_fact_driver_race,
     "fact_lap": build_fact_lap,
     "fact_event": build_fact_event,
+    "fact_championship": build_fact_championship,
 }
 
 

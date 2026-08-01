@@ -22,68 +22,15 @@ Blocks follow the bank's own order, so the page reads chronologically:
 
 from __future__ import annotations
 
-import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
 from app_common import NEUTRAL, fmt_lap, query, team_colours
-
-# A pit out-lap or a lap behind a safety car is not a racing lap. Blocks that
-# describe pace exclude them; blocks that describe what happened do not.
-CLEAN_LAP = "neutralised = 0 AND is_pit_out_lap = 0"
-
-# Within this gap a driver is in the DRS/attack window rather than circulating
-# alone. One second is the sport's own definition, not a derived threshold.
-FIGHTING_SECONDS = 1.0
-
-PLOT_BASE = dict(
-    margin=dict(l=10, r=10, t=10, b=10),
-    plot_bgcolor="rgba(0,0,0,0)",
-    paper_bgcolor="rgba(0,0,0,0)",
+from story_common import (
+    AXIS_BASE, CLEAN_LAP, FIGHTING_SECONDS, PLOT_BASE,
+    field as _field, guide as _guide, hbar as _bar, labels as _labels,
 )
-AXIS_BASE = dict(fixedrange=True, gridcolor="rgba(0,0,0,0.08)")
-
-
-def _guide(text: str) -> None:
-    """One consistent 'how to read this' line under each plot."""
-    st.caption(f"**How to read this.** {text}")
-
-
-def _bar(df, x, y, colours, hover, xtitle=None, zeroline=False, height=None):
-    """One horizontal bar chart, styled once so every block looks the same."""
-    fig = go.Figure(go.Bar(
-        x=df[x], y=df[y], orientation="h",
-        marker_color=colours,
-        customdata=hover,
-        hovertemplate="<b>%{customdata[0]}</b><br>%{customdata[1]}"
-                      "<br>%{x}<extra></extra>",
-    ))
-    fig.update_layout(
-        height=height or max(320, 24 * len(df)),
-        xaxis=dict(title=xtitle, zeroline=zeroline,
-                   zerolinecolor="rgba(0,0,0,0.3)", **AXIS_BASE),
-        yaxis=dict(title=None, **AXIS_BASE),
-        **PLOT_BASE,
-    )
-    return fig
-
-
-def _field(session_key: int) -> pd.DataFrame:
-    """One row per driver in this race, with names and team resolved."""
-    return query("""
-        SELECT f.*, d.full_name, d.name_acronym
-        FROM fact_driver_race f
-        JOIN dim_race r ON r.session_key = f.session_key
-        LEFT JOIN dim_driver d
-               ON d.driver_number = f.driver_number AND d.year = r.year
-        WHERE f.session_key = ?
-        ORDER BY f.finish_position IS NULL, f.finish_position
-    """, (session_key,))
-
-
-def _labels(df: pd.DataFrame) -> pd.Series:
-    return df.name_acronym.fillna(df.driver_number.astype(str))
 
 
 # --- 1. Pre-race, grid & setup -----------------------------------------------
@@ -849,23 +796,87 @@ def _outcome(session_key: int, race) -> None:
     )
 
 
+# --- sections ------------------------------------------------------------------
+
+# One entry per file in DESCRIPTIVE ANALYTICS, in the same order. The questions
+# are the bank's own, adapted from "the driver" to the whole field, which is
+# what this story answers.
+SECTIONS = [
+    ("grid_setup", "Pre-race, grid and setup", [
+        "What grid position did each driver start from, and what lap time earned it?",
+        "Which drivers have a grid position but no recorded qualifying lap time, "
+        "and which of those are genuine DNS cases?",
+        "What was each team's combined grid position, a front-row lockout or "
+        "split across the field?",
+    ]),
+    ("lap1", "The start, lap 1", [
+        "How did each driver's position change from their grid slot to the end "
+        "of lap 1, and how many places did they gain or lose?",
+        "Did any race control flag or incident fire in the opening laps?",
+    ]),
+    ("lap_by_lap", "Race pace, lap by lap", [
+        "What was the field's lap time trend across the race?",
+        "Were there specific laps with anomalous times, and where do they fall?",
+        "What was the fastest lap of the race, and on which lap number and "
+        "tyre compound did it occur?",
+    ]),
+    ("tyres", "Tyre strategy", [
+        "How many stints did the field run, on which compounds?",
+        "Which compound sequences were used, and how did each finish?",
+    ]),
+    ("pit_stops", "Pit stops", [
+        "How many pit stops were made, and on which laps?",
+        "What was the total lane duration for each stop?",
+        "Did any stop go unusually long, a disaster stop?",
+    ]),
+    ("position", "Position dynamics", [
+        "How did positions evolve over the full race distance?",
+        "How many overtakes were made, and by whom?",
+        "At what points did the biggest position swings happen?",
+    ]),
+    ("gaps", "Gaps and race context", [
+        "How did gaps to the car ahead evolve, fighting, isolated, or lapped?",
+        "Which drivers were lapped by the leader?",
+    ]),
+    ("incidents", "Incidents and conditions", [
+        "What race control events occurred during the race?",
+        "What were the weather conditions, and did they change mid-race?",
+    ]),
+    ("radio", "Team radio", [
+        "How many radio messages were sent, and for which drivers do they cluster?",
+    ]),
+    ("outcome", "Finish and outcome", [
+        "What was each final classified position, and how does it compare to "
+        "the grid slot?",
+        "Who finished, DNF'd, DNS'd or was disqualified?",
+        "How many points did each driver score, and what was the gap to the winner?",
+    ]),
+]
+
+
+def section_options() -> list[tuple[str, str]]:
+    return [(key, title) for key, title, _ in SECTIONS]
+
+
 # --- entry point ---------------------------------------------------------------
 
-def render(race) -> None:
+def render(race, section_key: str) -> None:
     session_key = int(race.session_key)
-    blocks = [
-        lambda: _grid_and_setup(session_key),
-        lambda: _start_lap1(session_key),
-        lambda: _race_pace(session_key),
-        lambda: _tyre_strategy(session_key),
-        lambda: _pit_stops(session_key),
-        lambda: _position_dynamics(session_key),
-        lambda: _gaps(session_key),
-        lambda: _incidents(session_key, race),
-        lambda: _team_radio(session_key),
-        lambda: _outcome(session_key, race),
-    ]
-    for i, block in enumerate(blocks):
-        block()
-        if i < len(blocks) - 1:
-            st.divider()
+    blocks = {
+        "grid_setup": lambda: _grid_and_setup(session_key),
+        "lap1": lambda: _start_lap1(session_key),
+        "lap_by_lap": lambda: _race_pace(session_key),
+        "tyres": lambda: _tyre_strategy(session_key),
+        "pit_stops": lambda: _pit_stops(session_key),
+        "position": lambda: _position_dynamics(session_key),
+        "gaps": lambda: _gaps(session_key),
+        "incidents": lambda: _incidents(session_key, race),
+        "radio": lambda: _team_radio(session_key),
+        "outcome": lambda: _outcome(session_key, race),
+    }
+    questions = next((q for k, _, q in SECTIONS if k == section_key), [])
+    if questions:
+        st.caption("**Questions this section answers**")
+        st.markdown("\n".join(f"- {q}" for q in questions))
+        st.divider()
+    blocks[section_key]()

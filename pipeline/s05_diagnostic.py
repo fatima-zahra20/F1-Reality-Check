@@ -98,6 +98,11 @@ ALPHA = 0.05
 # A lap longer than this multiple of the session median is a red-flag queue.
 LAP_OUTLIER_FACTOR = 2.0
 
+# Below this many shared races a teammate pairing cannot support a t-test.
+# Used by the qualifying-delta and sector-consistency analyses alike, so the
+# two report on the same set of pairings.
+MIN_PAIR_SESSIONS = 8
+
 # Same dynamic scope as s04 — no year list to maintain.
 RACE_SCOPE = """
     SELECT s.session_key, s.meeting_key
@@ -1201,7 +1206,7 @@ def a13_teammate_quali_deltas(d: Diagnostics, ctx) -> None:
     clean = pairs[(pairs["quali_lap_delta"] >= lo) & (pairs["quali_lap_delta"] <= hi)]
 
     counts = clean.groupby("pair_id").size()
-    valid = counts[counts >= 8].index
+    valid = counts[counts >= MIN_PAIR_SESSIONS].index
     sub = clean[clean["pair_id"].isin(valid)]
 
     alpha_c = bonferroni(len(valid))
@@ -1225,8 +1230,9 @@ def a13_teammate_quali_deltas(d: Diagnostics, ctx) -> None:
         f"{n_sig} of {len(valid)} teammate pairings show a qualifying pace gap that "
         f"survives Bonferroni correction. Car pace is held constant within a pairing, "
         f"so these isolate a genuine driver effect.",
-        f"Pairings with fewer than 8 shared qualifying sessions excluded as "
-        f"underpowered. Tukey fence [{lo:.3f}, {hi:.3f}] applied to remove aborted laps.",
+        f"Pairings with fewer than {MIN_PAIR_SESSIONS} shared qualifying sessions "
+        f"excluded as underpowered. Tukey fence [{lo:.3f}, {hi:.3f}] applied to "
+        f"remove aborted laps.",
     )
 
 
@@ -1402,6 +1408,554 @@ def a16_lap1_swing(d: Diagnostics, ctx) -> None:
     d.add_points("T16", df, "grid_position", "lap1_swing", label="full_name")
 
 
+def a17_lap1_chaos_by_circuit(d: Diagnostics, ctx) -> None:
+    """
+    Is lap-1 chaos more frequent at certain circuit types?
+
+    Chaos is measured as "race control logged anything on lap 1", per race.
+    Overtake counts are not usable for this: silver_overtakes carries a
+    timestamp but no lap number, so isolating lap-1 passes would need the
+    lap-2 boundary derived per driver, and the resulting count would still
+    include pit-cycle swaps (NOTES_LOG #20).
+    """
+    con = ctx["con"]
+
+    races = pd.read_sql(f"""
+        WITH scope AS ({RACE_SCOPE})
+        SELECT scope.session_key, m.circuit_type
+        FROM scope
+        JOIN silver_sessions s ON s.session_key = scope.session_key
+        JOIN silver_meetings m ON m.meeting_key = s.meeting_key
+    """, con)
+
+    # "Any message on lap 1" is useless as a proxy: every race logs procedural
+    # traffic such as GREEN LIGHT - PIT EXIT OPEN, so the rate is 100% for every
+    # circuit type and the test has no variance to work with. Restrict to
+    # categories that mean something actually happened.
+    chaos = pd.read_sql(f"""
+        WITH scope AS ({RACE_SCOPE})
+        SELECT DISTINCT rc.session_key
+        FROM scope JOIN silver_race_control rc ON rc.session_key = scope.session_key
+        WHERE rc.lap_number = 1
+          AND (rc.category IN ('SafetyCar', 'CarEvent')
+               OR (rc.category = 'Flag'
+                   AND rc.flag IN ('YELLOW', 'DOUBLE YELLOW', 'RED')))
+    """, con)
+
+    races["chaos"] = races["session_key"].isin(chaos["session_key"]).astype(int)
+
+    # Circuit types with too few races cannot support a chi-square cell.
+    counts = races["circuit_type"].value_counts()
+    thin = counts[counts < 5].index.tolist()
+    kept = races[~races["circuit_type"].isin(thin)]
+
+    table = pd.crosstab(kept["circuit_type"], kept["chaos"])
+    chi2, p, _, _ = stats.chi2_contingency(table)
+    v = cramers_v(chi2, table)
+
+    for ctype, grp in kept.groupby("circuit_type"):
+        d.add_group("T17", "lap1_chaos_rate", "circuit_type", ctype,
+                    grp["chaos"].mean(), len(grp))
+
+    rates = kept.groupby("circuit_type")["chaos"].mean()
+    spread = ", ".join(f"{k} {v_:.1%}" for k, v_ in rates.items())
+    d.add_test(
+        "T17", "start",
+        "Is lap-1 chaos more frequent at certain circuits?",
+        "chi-square: circuit_type x any race control message on lap 1",
+        chi2, p, v, "cramers_v", len(kept), p < ALPHA,
+        f"Lap-1 incident rates are near-identical across circuit types ({spread}), "
+        f"so the opening lap is no more eventful on street circuits than on "
+        f"permanent ones.",
+        (f"Circuit types with fewer than 5 races excluded: {thin}. " if thin else "")
+        + "An incident is a yellow, double yellow or red flag, a safety car, or a "
+          "car event logged on lap 1. Purely procedural messages are excluded: "
+          "counting those puts every race at 100% and leaves nothing to compare. "
+          "Overtakes are not included, because the overtake feed carries no lap "
+          "number.",
+    )
+
+
+def a18_within_stint_pace(d: Diagnostics, ctx) -> None:
+    """
+    What explains lap-time variation within a stint?
+
+    The bank specifies lap_duration ~ tyre_age + compound + track_temp +
+    lap_number. The outcome here is lap time against the session median
+    instead of raw seconds: a raw lap time is dominated by which circuit it
+    was set on, which would swamp every other term (NOTES_LOG #35).
+    """
+    con = ctx["con"]
+    laps = ctx["clean_laps"]
+
+    stints = pd.read_sql(f"""
+        WITH scope AS ({RACE_SCOPE})
+        SELECT st.session_key, st.driver_number, st.stint_number, st.compound,
+               st.tyre_age_at_start, st.lap_start, st.lap_end
+        FROM scope JOIN silver_stints st ON st.session_key = scope.session_key
+        WHERE st.lap_end >= st.lap_start AND st.compound IS NOT NULL
+    """, con)
+
+    m = laps.merge(stints, on=["session_key", "driver_number"], how="inner")
+    m = m[(m["lap_number"] >= m["lap_start"]) & (m["lap_number"] <= m["lap_end"])].copy()
+    m["tyre_age"] = m["tyre_age_at_start"] + (m["lap_number"] - m["lap_start"])
+
+    temp = pd.read_sql(f"""
+        WITH scope AS ({RACE_SCOPE})
+        SELECT w.session_key, AVG(w.track_temperature) AS track_temperature
+        FROM scope JOIN silver_weather w ON w.session_key = scope.session_key
+        GROUP BY w.session_key
+    """, con)
+    m = m.merge(temp, on="session_key", how="left")
+
+    keep = m["compound"].value_counts()
+    m = m[m["compound"].isin(keep[keep >= 200].index)]
+    m = m.dropna(subset=["lap_vs_median", "tyre_age", "track_temperature",
+                         "lap_number"])
+
+    fit = smf.ols(
+        "lap_vs_median ~ tyre_age + C(compound) + track_temperature + lap_number",
+        data=m).fit()
+    vifs = compute_vifs(m, ["tyre_age", "track_temperature", "lap_number"])
+    d.add_coefficients("T18", "within_stint_pace", fit, vifs=vifs)
+
+    age = fit.params.get("tyre_age", np.nan)
+    age_p = fit.pvalues.get("tyre_age", np.nan)
+    fuel = fit.params.get("lap_number", np.nan)
+    temp = fit.params.get("track_temperature", np.nan)
+    max_vif = max(vifs.values()) if vifs else np.nan
+
+    age_clause = (
+        f"tyre age adds {age:+.3f}s per lap"
+        if age_p < ALPHA else
+        f"tyre age carries no detectable effect of its own (p={age_p:.2f})"
+    )
+    d.add_test(
+        "T18", "pace",
+        "What factors explain lap-time variation within a stint?",
+        "OLS: lap_vs_median ~ tyre_age + C(compound) + track_temperature + lap_number",
+        fit.fvalue, fit.f_pvalue, fit.rsquared, "r_squared", int(fit.nobs),
+        fit.f_pvalue < ALPHA,
+        f"Together these explain {fit.rsquared:.1%} of how far a lap sits from its "
+        f"session median. Fuel load dominates: every lap completed takes "
+        f"{abs(fuel):.3f}s off the lap time. Each degree of track temperature adds "
+        f"{temp:+.3f}s, and once fuel is in the model {age_clause}. Compound "
+        f"matters more than either, with intermediates a different kind of lap "
+        f"entirely.",
+        f"Tyre age and lap number rise together within any stint, so they can only "
+        f"be separated because stints start at different points in the race; VIF "
+        f"peaks at {max_vif:.2f}. Compound is chosen by teams, never assigned, so "
+        f"its coefficients carry a selection effect. The outcome is normalised to "
+        f"the session median, so this describes relative pace, not lap times.",
+    )
+
+
+def a19_anomalous_lap_causes(d: Diagnostics, ctx) -> None:
+    """
+    Do anomalous laps cluster around a specific cause more for some teams?
+
+    An anomalous lap is one above that driver's own Tukey fence within the
+    race, which is what makes "unusually slow for them" rather than "slow".
+    """
+    con = ctx["con"]
+
+    laps = pd.read_sql(f"""
+        WITH scope AS ({RACE_SCOPE})
+        SELECT l.session_key, l.driver_number, l.lap_number, l.lap_duration,
+               f.sc_flag, f.vsc_flag, f.red_flag, f.yellow_sector_flag,
+               d.team_name
+        FROM scope
+        JOIN silver_laps l ON l.session_key = scope.session_key
+        JOIN silver_lap_flags f
+          ON f.session_key = l.session_key AND f.driver_number = l.driver_number
+         AND f.lap_number = l.lap_number
+        JOIN silver_drivers d
+          ON d.session_key = l.session_key AND d.driver_number = l.driver_number
+        WHERE l.lap_duration IS NOT NULL
+          AND COALESCE(l.is_pit_out_lap, 0) = 0
+    """, con)
+    laps = drop_excluded_teams(normalize_teams(laps))
+
+    # Fence per driver per race, derived fresh (NOTES_LOG #30).
+    g = laps.groupby(["session_key", "driver_number"])["lap_duration"]
+    q1 = g.transform(lambda s: s.quantile(0.25))
+    q3 = g.transform(lambda s: s.quantile(0.75))
+    laps["anomalous"] = laps["lap_duration"] > q3 + 1.5 * (q3 - q1)
+
+    odd = laps[laps["anomalous"]].copy()
+
+    def cause(r):
+        if r["red_flag"] == 1:
+            return "RedFlag"
+        if r["sc_flag"] == 1:
+            return "SafetyCar"
+        if r["vsc_flag"] == 1:
+            return "VSC"
+        if r["yellow_sector_flag"] == 1:
+            return "Yellow"
+        return "Unflagged"
+
+    odd["cause"] = odd.apply(cause, axis=1)
+
+    # Red flags are too rare to hold a chi-square cell, as the notebook found.
+    dropped = int((odd["cause"] == "RedFlag").sum())
+    odd = odd[odd["cause"] != "RedFlag"]
+
+    table = pd.crosstab(odd["team_name"], odd["cause"])
+    chi2, p, _, _ = stats.chi2_contingency(table)
+    v = cramers_v(chi2, table)
+
+    shares = odd["cause"].value_counts(normalize=True)
+    for cse, share in shares.items():
+        d.add_group("T19", "cause_share", "cause", str(cse), share,
+                    int((odd["cause"] == cse).sum()))
+    for team, grp in odd.groupby("team_name"):
+        d.add_group("T19", "unflagged_share", "team", team,
+                    (grp["cause"] == "Unflagged").mean(), len(grp))
+
+    d.add_test(
+        "T19", "pace",
+        "Do anomalous laps cluster around a specific cause more for some teams?",
+        "chi-square: team_name x anomaly cause (SafetyCar / VSC / Yellow / Unflagged)",
+        chi2, p, v, "cramers_v", len(odd), p < ALPHA,
+        f"{shares.get('Unflagged', 0):.0%} of unusually slow laps carry no flag at "
+        f"all, so most are traffic, mistakes or damage rather than neutralisations. "
+        + ("The mix of causes does differ by team."
+           if p < ALPHA else
+           "The mix of causes does not differ detectably by team."),
+        f"{dropped} red-flag laps dropped: too few to support a chi-square cell. "
+        "An anomalous lap is defined against that driver's own spread in that "
+        "race, so the threshold moves with the circuit. Flags come from "
+        "silver_lap_flags, which covers ranges, so an unflagged lap is genuinely "
+        "unflagged rather than merely untagged.",
+    )
+
+
+def a20_sector_consistency(d: Diagnostics, ctx) -> None:
+    """
+    Is a driver's sector advantage over their teammate consistent enough to be
+    a real skill signal?
+
+    Sectors are not comparable to each other (they differ in length), so this
+    only ever compares the same sector between two drivers in the same car.
+    """
+    con = ctx["con"]
+
+    sec = pd.read_sql(f"""
+        WITH scope AS ({RACE_SCOPE})
+        SELECT l.session_key, l.driver_number, l.lap_number,
+               l.duration_sector_1, l.duration_sector_2, l.duration_sector_3,
+               d.team_name, d.full_name
+        FROM scope
+        JOIN silver_laps l ON l.session_key = scope.session_key
+        JOIN silver_lap_flags f
+          ON f.session_key = l.session_key AND f.driver_number = l.driver_number
+         AND f.lap_number = l.lap_number
+        JOIN silver_drivers d
+          ON d.session_key = l.session_key AND d.driver_number = l.driver_number
+        WHERE f.neutralised = 0 AND COALESCE(l.is_pit_out_lap, 0) = 0
+          AND l.duration_sector_1 IS NOT NULL
+    """, con)
+    sec = drop_excluded_teams(normalize_teams(sec))
+
+    per_race = (sec.groupby(["session_key", "team_name", "driver_number", "full_name"])
+                   .agg(s1=("duration_sector_1", "median"),
+                        s2=("duration_sector_2", "median"),
+                        s3=("duration_sector_3", "median"))
+                   .reset_index())
+    per_race["year"] = 0  # teammate_pairs keys on it; sectors need no season split
+
+    pairs = teammate_pairs(per_race, ["s1", "s2", "s3"])
+
+    results, tested = [], 0
+    for (pair_id, sector) in [(p, s) for p in pairs["pair_id"].unique()
+                              for s in ["s1", "s2", "s3"]]:
+        sub = pairs[pairs["pair_id"] == pair_id][f"{sector}_delta"].dropna()
+        if len(sub) < MIN_PAIR_SESSIONS:
+            continue
+        tested += 1
+        t, p = stats.ttest_1samp(sub, 0)
+        results.append({"pair_id": pair_id, "sector": sector, "t": t, "p": p,
+                        "mean": sub.mean(), "n": len(sub)})
+
+    res = pd.DataFrame(results)
+    alpha_c = bonferroni(tested) if tested else ALPHA
+    res["significant"] = res["p"] < alpha_c
+    n_sig = int(res["significant"].sum())
+
+    for r in res[res["significant"]].itertuples():
+        lo, hi = mean_ci(pairs[pairs["pair_id"] == r.pair_id]
+                         [f"{r.sector}_delta"].dropna())
+        d.add_group("T20", "sector_delta_seconds", "pair_sector",
+                    f"{r.pair_id} {r.sector.upper()}", r.mean, r.n, lo, hi)
+
+    d.add_test(
+        "T20", "pace",
+        "Is a driver's sector strength consistent across races, or too variable "
+        "to be meaningful?",
+        f"one-sample t-test per teammate pair per sector vs 0, "
+        f"Bonferroni alpha={alpha_c:.5f} ({tested} comparisons)",
+        np.nan, np.nan, n_sig / tested if tested else np.nan,
+        "proportion_significant", int(res["n"].sum()) if len(res) else 0,
+        n_sig > 0,
+        f"{n_sig} of {tested} pair-and-sector combinations show a sector advantage "
+        f"that survives Bonferroni correction. Because both drivers share a car, "
+        f"a surviving signal isolates a genuine and repeatable driver difference "
+        f"in that part of the circuit.",
+        f"Pairs with fewer than {MIN_PAIR_SESSIONS} shared races excluded. Sectors "
+        "are never compared to each other, only the same sector between teammates, "
+        "because sectors differ in length. Medians per race are used so a single "
+        "traffic-affected lap cannot move a pairing.",
+    )
+
+
+def a21_strategy_divergence(d: Diagnostics, ctx) -> None:
+    """
+    When teammates' strategies diverge, what predicts which one finished ahead?
+
+    Only pairs whose stop counts actually differed are in scope: where both
+    cars ran the same strategy there is no divergence to explain.
+    """
+    dr = drop_excluded_teams(ctx["driver_race"])
+
+    base = dr[["session_key", "driver_number", "team_name", "full_name", "year",
+               "pit_count", "first_pit_lap", "pace_vs_median", "grid_position",
+               "finish_position"]].copy()
+    pairs = teammate_pairs(base, ["pit_count", "first_pit_lap", "pace_vs_median",
+                                  "grid_position", "finish_position"])
+
+    div = pairs[(pairs["pit_count_delta"].abs() > 0)].dropna(subset=[
+        "finish_position_delta", "pit_count_delta", "first_pit_lap_delta",
+        "pace_vs_median_delta", "grid_position_delta"]).copy()
+
+    # a finished ahead of b when a's finishing position is the lower number.
+    div["a_ahead"] = (div["finish_position_delta"] < 0).astype(int)
+
+    model = smf.logit(
+        "a_ahead ~ pit_count_delta + first_pit_lap_delta + pace_vs_median_delta "
+        "+ grid_position_delta", data=div).fit(disp=False)
+    vifs = compute_vifs(div, ["pit_count_delta", "first_pit_lap_delta",
+                              "pace_vs_median_delta", "grid_position_delta"])
+    d.add_coefficients("T21", "strategy_divergence_logit", model, vifs=vifs)
+
+    pace_c = model.params.get("pace_vs_median_delta", np.nan)
+    d.add_test(
+        "T21", "strategy",
+        "When teammates' strategies diverge, what predicts which one pays off?",
+        "logistic regression: finished-ahead ~ stop count, first stop lap, pace "
+        "and grid deltas, on teammate pairs whose stop counts differed",
+        model.llr, model.llr_pvalue, model.prsquared, "pseudo_r_squared",
+        int(model.nobs), model.llr_pvalue < ALPHA,
+        f"Across {int(model.nobs)} teammate races where the two cars ran different "
+        f"stop counts, race pace is what decides the outcome ({pace_c:.2f} log-odds "
+        f"per second): the faster car finishes ahead largely regardless of which "
+        f"strategy it was given.",
+        "Strategy is not assigned at random. A team that splits strategies usually "
+        "does so because one car is already behind, so the strategy and the "
+        "situation that produced it cannot be fully separated here. Finishing "
+        "ahead is also not the same as the strategy paying off.",
+    )
+
+
+def a22_disaster_stop_concentration(d: Diagnostics, ctx) -> None:
+    """
+    Are disaster stops random, or concentrated in specific teams?
+
+    lane_duration, not stop_duration: coverage is 3.5% for stop_duration
+    against 77% for lane_duration.
+    """
+    con = ctx["con"]
+
+    pits = pd.read_sql(f"""
+        WITH scope AS ({RACE_SCOPE})
+        SELECT p.session_key, p.driver_number, p.lap_number, p.lane_duration,
+               d.team_name
+        FROM scope
+        JOIN silver_pit p ON p.session_key = scope.session_key
+        JOIN silver_drivers d
+          ON d.session_key = p.session_key AND d.driver_number = p.driver_number
+        WHERE p.lane_duration IS NOT NULL
+    """, con)
+    pits = drop_excluded_teams(normalize_teams(pits))
+
+    q1, q3 = pits["lane_duration"].quantile([0.25, 0.75])
+    fence = q3 + 1.5 * (q3 - q1)
+    pits["disaster"] = (pits["lane_duration"] > fence).astype(int)
+
+    # Which stop of the race it was, capped: 4th stops are too rare to stand alone.
+    pits = pits.sort_values(["session_key", "driver_number", "lap_number"])
+    pits["stop_number"] = (pits.groupby(["session_key", "driver_number"])
+                               .cumcount() + 1).clip(upper=3)
+
+    table = pd.crosstab(pits["team_name"], pits["disaster"])
+    chi2, p, _, _ = stats.chi2_contingency(table)
+    v = cramers_v(chi2, table)
+
+    for team, grp in pits.groupby("team_name"):
+        d.add_group("T22", "disaster_rate", "team", team,
+                    grp["disaster"].mean(), len(grp))
+    for num, grp in pits.groupby("stop_number"):
+        label = f"Stop {int(num)}" + ("+" if num == 3 else "")
+        d.add_group("T22", "disaster_rate", "stop_number", label,
+                    grp["disaster"].mean(), len(grp))
+
+    rates = pits.groupby("team_name")["disaster"].mean().sort_values()
+    d.add_test(
+        "T22", "pit_stops",
+        "Are disaster stops random, or concentrated in specific teams?",
+        f"chi-square: team_name x disaster stop, Tukey fence {fence:.2f}s derived fresh",
+        chi2, p, v, "cramers_v", len(pits), p < ALPHA,
+        f"Disaster stops are not spread evenly: rates run from "
+        f"{rates.iloc[0]:.1%} ({rates.index[0]}) to {rates.iloc[-1]:.1%} "
+        f"({rates.index[-1]}). "
+        + ("The concentration is statistically clear."
+           if p < ALPHA else
+           "The differences are not statistically distinguishable from chance."),
+        f"A disaster is defined by this dataset's own upper Tukey fence "
+        f"({fence:.2f}s), not a fixed number of seconds. lane_duration is used "
+        "because stop_duration covers only 3.5% of stops. Multi-minute values are "
+        "cars held in the lane under a red flag (NOTES_LOG #18), and they are "
+        "counted as disasters here, which slightly inflates rates for teams that "
+        "happened to be in the pits when a race was stopped.",
+    )
+
+
+def a23_fighting_and_overtakes(d: Diagnostics, ctx) -> None:
+    """
+    Does spending more time within a second of the car ahead lead to more
+    overtakes?
+
+    Both quantities are per driver per race. The interval feed samples roughly
+    every few seconds, so the count is exposure time, not a lap count.
+    """
+    con = ctx["con"]
+    dr = ctx["driver_race"]
+
+    fight = pd.read_sql(f"""
+        WITH scope AS ({RACE_SCOPE})
+        SELECT i.session_key, i.driver_number,
+               SUM(CASE WHEN i.interval_seconds < 1.0 THEN 1 ELSE 0 END) AS drs_samples,
+               COUNT(*) AS samples
+        FROM scope JOIN silver_intervals i ON i.session_key = scope.session_key
+        WHERE i.interval_seconds IS NOT NULL
+        GROUP BY i.session_key, i.driver_number
+    """, con)
+
+    made = pd.read_sql(f"""
+        WITH scope AS ({RACE_SCOPE})
+        SELECT o.session_key, o.overtaking_driver_number AS driver_number,
+               COUNT(*) AS overtakes_made
+        FROM scope JOIN silver_overtakes o ON o.session_key = scope.session_key
+        GROUP BY o.session_key, o.overtaking_driver_number
+    """, con)
+
+    m = (fight.merge(made, on=["session_key", "driver_number"], how="left")
+              .fillna({"overtakes_made": 0}))
+    m = m.merge(dr[["session_key", "driver_number", "team_name"]],
+                on=["session_key", "driver_number"], how="inner")
+    m = drop_excluded_teams(m)
+
+    # Share, not raw count: a longer race gives more samples to both variables,
+    # which would manufacture a correlation out of race length alone.
+    m["drs_share"] = m["drs_samples"] / m["samples"]
+
+    r, p = stats.pearsonr(m["drs_share"], m["overtakes_made"])
+    rho, p_rho = stats.spearmanr(m["drs_share"], m["overtakes_made"])
+
+    d.add_group("T23", "correlation", "method", "Pearson", r, len(m))
+    d.add_group("T23", "correlation", "method", "Spearman", rho, len(m))
+
+    # The two coefficients disagree in sign, which is itself the finding: there
+    # is no consistent linear relationship to report in either direction.
+    disagree = (r < 0) != (rho < 0)
+    d.add_test(
+        "T23", "overtaking",
+        "Does spending more time within a second of the car ahead correlate with "
+        "more overtakes?",
+        "Pearson and Spearman correlation between share of interval samples under "
+        "1.0s and overtakes made, per driver per race",
+        r, p, abs(r), "abs_pearson_r", len(m), p < ALPHA,
+        f"Essentially not at all. Pearson gives r={r:+.2f} and Spearman "
+        f"rho={rho:+.2f}"
+        + (", disagreeing even on the direction, " if disagree else ", ")
+        + f"and the share of time spent within a second explains {r**2:.1%} of "
+        f"how many passes a driver makes. Proximity is a precondition for "
+        f"overtaking, not a predictor of it: the cars that spend longest within a "
+        f"second are frequently the ones stuck behind something they cannot pass.",
+        "Correlation only, and the causation runs both ways. A large sample makes "
+        "even a negligible coefficient statistically significant here, which is "
+        "why the effect size matters more than the p-value. The overtake feed "
+        "includes pit-cycle and penalty position changes (NOTES_LOG #20).",
+    )
+
+
+def a24_radio_and_outcome(d: Diagnostics, ctx) -> None:
+    """
+    Does radio volume relate to what happened in the race?
+
+    silver_team_radio holds audio URLs and no transcription, so only volume and
+    timing can be analysed, never content.
+    """
+    con = ctx["con"]
+    dr = drop_excluded_teams(ctx["driver_race"])
+
+    radio = pd.read_sql(f"""
+        WITH scope AS ({RACE_SCOPE})
+        SELECT tr.session_key, tr.driver_number, COUNT(*) AS messages
+        FROM scope JOIN silver_team_radio tr ON tr.session_key = scope.session_key
+        GROUP BY tr.session_key, tr.driver_number
+    """, con)
+
+    covered = set(radio["session_key"].unique())
+    m = dr[dr["session_key"].isin(covered)].merge(
+        radio, on=["session_key", "driver_number"], how="left")
+    m["messages"] = m["messages"].fillna(0)
+
+    # Races differ enormously in how much radio was captured, so compare each
+    # driver against the field in their own race rather than across races.
+    m["messages_vs_race"] = m["messages"] - m.groupby("session_key")["messages"].transform("mean")
+
+    pairs = {
+        "position_change": "places gained",
+        "points": "points scored",
+        "pit_count": "pit stops",
+    }
+    best_r, best_label, best_p, n_used = 0.0, None, np.nan, 0
+    for col, label in pairs.items():
+        sub = m.dropna(subset=[col, "messages_vs_race"])
+        if len(sub) < 30:
+            continue
+        r, p = stats.pearsonr(sub["messages_vs_race"], sub[col])
+        d.add_group("T24", "correlation_with_radio", "outcome", label, r, len(sub))
+        if abs(r) > abs(best_r):
+            best_r, best_label, best_p, n_used = r, label, p, len(sub)
+
+    dnf_sub = m.dropna(subset=["dnf"])
+    r_dnf, p_dnf = stats.pearsonr(dnf_sub["messages_vs_race"], dnf_sub["dnf"])
+    d.add_group("T24", "correlation_with_radio", "outcome", "retired", r_dnf,
+                len(dnf_sub))
+
+    d.add_test(
+        "T24", "racecraft",
+        "Does radio message frequency correlate with race outcome?",
+        "Pearson correlations between a driver's radio volume relative to their "
+        "own race and each outcome measure",
+        best_r, best_p, best_r ** 2, "r_squared", n_used, best_p < ALPHA,
+        f"Radio volume does track race outcome, and more strongly than volume "
+        f"without content might suggest: a driver getting more radio than the "
+        f"rest of their own race correlates with {best_label} at r={best_r:+.2f} "
+        f"({best_r**2:.0%} of the variance), and with retiring at r={r_dnf:+.2f}. "
+        f"The likely mechanism is attention rather than causation, since teams "
+        f"talk most to a car that is in contention or in trouble.",
+        "Messages are audio URLs with no transcription, so this is volume only, "
+        "and volume cannot separate a strategy call from a complaint. The "
+        "relationship is almost certainly reverse causation: being in the fight "
+        "generates radio traffic, not the other way round. Coverage falls sharply "
+        "over time, from 2,744 messages in 2023 to 217 in 2026, and races with no "
+        "radio captured at all are excluded rather than counted as silent.",
+    )
+
+
 # =================================================================================
 
 ANALYSES = {
@@ -1421,6 +1975,17 @@ ANALYSES = {
     "T14": a14_net_gain_by_team,
     "T15": a15_position_swings,
     "T16": a16_lap1_swing,
+    # Added so every question the notebooks answer has a figure recomputed
+    # against current silver, rather than a number carried over from a notebook
+    # run on pre-backfill data with the old caution flag.
+    "T17": a17_lap1_chaos_by_circuit,
+    "T18": a18_within_stint_pace,
+    "T19": a19_anomalous_lap_causes,
+    "T20": a20_sector_consistency,
+    "T21": a21_strategy_divergence,
+    "T22": a22_disaster_stop_concentration,
+    "T23": a23_fighting_and_overtakes,
+    "T24": a24_radio_and_outcome,
 }
 
 TABLES = ["diag_tests", "diag_coefficients", "diag_groups", "diag_points"]

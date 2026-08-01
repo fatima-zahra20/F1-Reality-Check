@@ -286,6 +286,31 @@ mechanical problem warranting no track-wide flag, confirmed via Stroll, 2023 US 
 Sprint lap 16, brake failure and DNF.
 
 
+### 24b. Championship standings are snapshotted before post-race penalties
+*Phase: descriptive*
+
+`silver_championship_teams.points_current` minus `points_start` does **not** equal
+the points a team actually scored in that race. Across 78 races, 12 disagree.
+
+Two causes, both confirmed:
+
+- **Sprint weekends (5 of the 12).** The delta covers the whole weekend, so it
+  includes sprint points banked before the Grand Prix.
+- **Post-race penalties (the other 7).** The standings are recorded as the session
+  ends, before stewards apply disqualifications. 2024 Belgian GP: Russell carries
+  `dsq = 1` and 0 points in `silver_session_result`, yet Mercedes' championship
+  delta is 43, which is Hamilton's 25 plus Russell's original 18. 2025 Las Vegas:
+  both McLaren cars disqualified and scored 0, but the delta reads 30.
+
+**Use each for what it is.** `fact_driver_race.points` is the final classification
+and is what "points scored in this race" means. `fact_championship` is the standings
+as published at session end, and is what "where the team sat in the table" means.
+Never derive one from the other. `fact_championship.points_gained` is therefore
+labelled as a weekend/championship movement in the dashboard, not as race points.
+
+Coverage note: 2026 has standings for 8 of 11 races, and 30 rows have a null
+`position_start` (season openers, where there is no prior standing).
+
 ## Join and query patterns
 
 ### 25. Composite keys must be joined on every column
