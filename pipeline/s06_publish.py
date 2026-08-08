@@ -77,6 +77,8 @@ TABLES = [
     "diag_tests", "diag_coefficients", "diag_groups", "diag_points",
     "perfect_lap", "perfect_lap_model", "perfect_lap_record", "perfect_race",
     "map_circuit_outline", "map_measured_xy", "map_coverage",
+    "lap_factor_anova", "lap_factor_model", "lap_factor_reference",
+    "telemetry_tow", "telemetry_effect",
 ]
 
 # The app filters by race and by test far more than anything else. Without
@@ -93,6 +95,7 @@ INDEXES = [
     ("perfect_race", "session_key"),
     ("map_circuit_outline", "circuit_key"),
     ("map_coverage", "session_key"),
+    ("lap_factor_reference", "session_key"),
 ]
 
 

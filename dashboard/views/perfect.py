@@ -22,6 +22,7 @@ import pandas as pd
 import streamlit as st
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+import lap_factors as lf  # noqa: E402
 import race_map as rm  # noqa: E402
 from app_common import query, render_footer, team_colours  # noqa: E402
 from story_common import guide  # noqa: E402
@@ -279,7 +280,173 @@ st.divider()
 # --- 2 and 3 ----------------------------------------------------------------------
 
 st.header("2. What made the lap what it was")
-st.caption("Next section. Not built yet.")
+
+table = lf.anova()
+resid = table[table.is_residual == 1]
+unexplained_pct = float(resid.pct_variance.iloc[0]) if len(resid) else float("nan")
+r2 = float(table.model_r_squared.iloc[0]) if len(table) else float("nan")
+model_n = int(table.model_n.iloc[0]) if len(table) else 0
+
+# The headline is the size of the gap, not the factors that fill it. Leading
+# with a tidy waterfall would imply lap time is a solved sum; it is not.
+st.error(
+    f"**About {unexplained_pct:.0f}% of it cannot be explained.** Across "
+    f"{model_n:,} clean race laps, everything recorded here (fuel, tyres, "
+    f"compound, weather) accounts for only {100 * r2:.0f}% of why one lap "
+    "differs from another in the same race. The rest is the driver, the car, "
+    "traffic and the racing line, and none of those are in this model."
+)
+
+if focus is None:
+    st.info("Choose a driver above to break down one specific lap.")
+else:
+    one = laps[(laps.driver_number == focus) & (laps.lap_number == lap_number)]
+    if not len(one):
+        st.warning(f"{names[focus]} has no recorded lap {lap_number}.")
+    else:
+        lap = one.iloc[0]
+        refs = lf.reference(int(session_key))
+        blocked = lf.explainable(lap, refs)
+
+        if blocked:
+            st.warning(f"**This lap cannot be broken down.** {blocked}")
+        else:
+            coefs = lf.coefficients()
+            teams = sorted(laps.team_name.dropna().unique())
+            parts = lf.decompose(lap, coefs, refs, teams)
+            totals = lf.summarise(lap, parts, coefs, refs, teams)
+
+            m1, m2, m3 = st.columns(3)
+            m1.metric("This lap against the race median",
+                      f"{totals['actual']:+.3f}s")
+            m2.metric("Explained by measurable factors",
+                      f"{totals['explained']:+.3f}s")
+            m3.metric("Unexplained", f"{totals['unexplained']:+.3f}s")
+
+            st.plotly_chart(
+                lf.waterfall(parts, totals), width="stretch",
+                key=f"wf_{session_key}_{lap_number}_{focus}")
+
+            guide(
+                "Reading left to right, this starts at what the model expects "
+                "from a normal lap of this race, then adds or removes seconds "
+                "for each way this lap differed from that. Red bars cost time, "
+                "green bars gained it. The second-to-last bar is everything "
+                "the data cannot account for, and it is usually the biggest "
+                "one. The final bar is the lap as it was actually driven."
+            )
+
+            with st.expander("The numbers behind each bar"):
+                show = parts.copy()
+                show["This lap"] = [
+                    f"{v}" if isinstance(v, str) else f"{v:g} {u}".strip()
+                    for v, u in zip(show.value, show.unit)]
+                show["Typical here"] = [
+                    f"{v}" if isinstance(v, str) else
+                    ("-" if pd.isna(v) else f"{v:g} {u}".strip())
+                    for v, u in zip(show.reference, show.unit)]
+                st.dataframe(
+                    show[["factor", "This lap", "Typical here", "seconds"]]
+                    .rename(columns={"factor": "Factor",
+                                     "seconds": "Effect (s)"}),
+                    hide_index=True, width="stretch",
+                    column_config={"Effect (s)":
+                                   st.column_config.NumberColumn(format="%+.4f")})
+
+st.subheader("Which factors matter at all")
+
+st.plotly_chart(lf.variance_bar(table), width="stretch", key="variance_bar")
+
+guide(
+    "This is not about one lap. It is a Type II ANOVA over every clean race "
+    "lap in four seasons, showing how much of the variation in lap time each "
+    "factor accounts for once all the others are taken into account. Read the "
+    "share of variance, not the p-value: at this sample size every factor is "
+    "statistically significant, including ones that explain almost nothing."
+)
+
+with st.expander("Full test results"):
+    st.dataframe(
+        table[["factor", "pct_variance", "f_statistic", "p_value", "df"]]
+        .rename(columns={"factor": "Factor", "pct_variance": "% of variance",
+                         "f_statistic": "F", "p_value": "p", "df": "df"}),
+        hide_index=True, width="stretch",
+        column_config={
+            "% of variance": st.column_config.NumberColumn(format="%.3f"),
+            "F": st.column_config.NumberColumn(format="%.1f"),
+            "p": st.column_config.NumberColumn(format="%.2e"),
+        })
+    st.caption(
+        f"Ordinary least squares, n = {model_n:,}, R2 = {r2:.3f}. Type II "
+        "sums of squares, so each factor is measured after the others rather "
+        "than in formula order, which matters because track and air "
+        "temperature move together. Read the share of variance, not the "
+        "p-value: several factors here are significant beyond any doubt while "
+        "explaining less than a twentieth of one percent."
+    )
+
+with st.expander("What the two traffic rows do and do not mean"):
+    st.markdown(
+        "**Out of position** marks a lap where the timing feed reported the "
+        "gap to the car ahead in laps rather than seconds. That happens when a "
+        "car is caught by the leaders, and also when it is damaged, off the "
+        "track, or limping to the pits. Those laps average +10.1s, and the "
+        "three laps before the flag average +2.1s, +2.3s and +3.0s against a "
+        "field baseline near +0.5s. So a car is already slow before the flag "
+        "lands: part of this factor is a consequence of a bad lap rather than "
+        "a cause of one. It stays in the model because leaving it out does not "
+        "make the variance disappear, it moves it into the unexplained share, "
+        "where this page would call it driving."
+        "\n\n"
+        "**Traffic ahead** and **dirty air** are close to nothing here, and "
+        "that is a correction rather than an absence. Before out-of-position "
+        "laps were flagged separately, their gap was filled in at the 10s cap, "
+        "the model saw \"large gap, slow lap\", and read a dirty-air effect out "
+        "of it. On properly timed laps the effect is 0.009s per second at "
+        "p = 0.13. A driver held up behind another car matches that car's pace; "
+        "it does not make their lap slower than it."
+    )
+
+# --- DRS and the tow --------------------------------------------------------------
+# Its own subsection because its scope is different from everything above it.
+# The panel leads with the coverage, not the finding, so a reader cannot take
+# a six-race number for a four-season one.
+tow = lf.tow()
+tel = lf.telemetry()
+
+if len(tow) and len(tel):
+    st.subheader("DRS and the tow")
+
+    st.warning(lf.telemetry_note(tel, "races covered"))
+    st.caption(lf.telemetry_note(tel, "laps covered"))
+
+    st.plotly_chart(lf.tow_chart(tow), width="stretch", key="tow_chart")
+
+    close = tow[tow.bucket == "under 1s"]
+    gain = float(close.top_speed_vs_clear_air.iloc[0]) if len(close) else None
+    lead = ("This is the tow, measured rather than assumed. A car starting its "
+            "lap within one second of the car ahead reaches "
+            f"{abs(gain):.1f} km/h more top speed than one in clear air, which "
+            "is the slipstream and DRS together."
+            if gain is not None else
+            "This is the tow, measured rather than assumed.")
+    guide(
+        lead + " Top speed is on the vertical axis, not lap time, because a "
+        "tow shows up as speed at the end of a straight long before it shows "
+        "up in a lap that is also carrying traffic, tyres and fuel."
+    )
+
+    drs = tel[(tel.kind == "coefficient") & (tel.term == "drs_share")]
+    if len(drs):
+        coef = float(drs.coefficient.iloc[0])
+        st.metric("Ten percentage points more of the lap with DRS open",
+                  f"{coef * 0.1:+.3f}s")
+
+    for term in ("drs and dirty air correlation", "undocumented drs codes",
+                 "ers", "top speed"):
+        note = lf.telemetry_note(tel, term)
+        if note:
+            st.caption(note)
 
 st.divider()
 

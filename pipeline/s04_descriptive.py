@@ -447,11 +447,35 @@ def build_fact_lap(con) -> pd.DataFrame:
         WHERE st.lap_end >= st.lap_start
     """, con)
 
+    # The join fans each lap out to one row per stint the driver ran, so the
+    # matching row has to be chosen before deduplicating, not after.
+    #
+    # Blanking the non-matching rows first and then keeping the first row of
+    # each group silently kept a blanked one: the frame arrives in stint
+    # order, so every lap got its stint-1 row whether or not the lap was in
+    # stint 1. That left tyre data on 27,923 of 90,053 laps, all of them
+    # before the driver's first pit stop, and it read as OpenF1 simply not
+    # recording compound rather than as a join defect.
+    #
+    # Sorting the matching rows to the front fixes it. Ties break on the
+    # lowest stint number, because a lap that appears in two stints is the
+    # in-lap: it was driven on the older tyre and the stop happened at the
+    # end of it.
     laps = laps.merge(stints, on=["session_key", "driver_number"], how="left")
-    in_stint = (laps["lap_number"] >= laps["lap_start"]) & (laps["lap_number"] <= laps["lap_end"])
-    laps.loc[~in_stint.fillna(False), ["stint_number", "compound", "tyre_age_at_start",
-                                       "lap_start", "lap_end"]] = pd.NA
-    laps = laps.drop_duplicates(subset=["session_key", "driver_number", "lap_number"], keep="first")
+    laps["_in_stint"] = (
+        (laps["lap_number"] >= laps["lap_start"])
+        & (laps["lap_number"] <= laps["lap_end"])
+    ).fillna(False)
+
+    laps = laps.sort_values(
+        ["session_key", "driver_number", "lap_number", "_in_stint", "stint_number"],
+        ascending=[True, True, True, False, True],
+    )
+    laps = laps.drop_duplicates(subset=["session_key", "driver_number", "lap_number"],
+                                keep="first")
+    laps.loc[~laps["_in_stint"], ["stint_number", "compound", "tyre_age_at_start",
+                                  "lap_start", "lap_end"]] = pd.NA
+    laps = laps.drop(columns="_in_stint")
     laps["tyre_age"] = laps["tyre_age_at_start"] + (laps["lap_number"] - laps["lap_start"])
 
     # --- position at the end of each lap ---

@@ -3,12 +3,18 @@ s05b_perfect.py - finds the best lap and the best race, 2023 to 2026.
 
 Runs between s05 and s06 so the existing publish command is unchanged.
 
-Produces four CSVs in outputs/dashboard/:
+Produces seven CSVs in outputs/dashboard/:
 
-    perfect_lap         the ranked race laps, with every parameter attached
-    perfect_lap_model   the model behind the ranking, one row per predictor
-    perfect_lap_record  raw fastest clean lap per circuit, for comparison
-    perfect_race        the four components of a great race, ranked separately
+    perfect_lap            the ranked race laps, with every parameter attached
+    perfect_lap_model      the model behind the ranking, one row per predictor
+    perfect_lap_record     raw fastest clean lap per circuit, for comparison
+    perfect_race           the four components of a great race, ranked separately
+    lap_factor_anova       how much of within-race lap variation each factor explains
+    lap_factor_model       every coefficient, so the app can decompose one lap
+    lap_factor_reference   the typical value of each factor within each race
+
+DRS and the tow are NOT here. They exist for six races out of 81 and belong in
+their own step, s05d_telemetry.py, which says so on the page.
 
 Design decisions
 ----------------
@@ -88,11 +94,13 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from scipy import stats
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from config import DB_PATH, OUTPUTS_DIR  # noqa: E402
 
 import statsmodels.formula.api as smf  # noqa: E402
+from statsmodels.stats.anova import anova_lm  # noqa: E402
 from statsmodels.stats.outliers_influence import variance_inflation_factor  # noqa: E402
 
 DASHBOARD_DIR = OUTPUTS_DIR / "dashboard"
@@ -153,6 +161,78 @@ MODEL_FORMULA = (
 NUMERIC_PREDICTORS = ["tyre_age", "lap_number", "track_temperature",
                       "air_temperature", "humidity", "wind_speed", "rainfall"]
 
+# The same predictors against a different target: how far a lap sits from the
+# median lap of its own race, rather than its absolute time.
+#
+# This is the model behind "what made this lap what it was", and the change of
+# target is the whole point. On absolute lap time, 83.6% of the variance is
+# the circuit: a model that mostly knows Monaco is slower than Monza explains
+# a great deal and tells you nothing about a lap. Taking the difference from
+# the session median absorbs the circuit, the era and the car generation, and
+# leaves only what actually varied inside one afternoon.
+#
+# It also makes the honest answer visible. This model reaches R2 = 0.236, so
+# roughly 76% of why one lap differs from another in the same race is not
+# explained by anything recorded. That leftover is the driver, the line, and
+# the parts of the car and the traffic no channel reports.
+#
+# It got there in three steps, each worth recording because each one was a gap
+# in the model rather than a gap in the sport:
+#
+#   93% -> 88%   dividing by the true total instead of the ANOVA table's, which
+#                does not partition the variance
+#   88% -> 83%   adding the car, wind direction crossed with circuit, and gap
+#                to the car ahead
+#   83% -> 76%   flagging out-of-position running and sector yellows instead of
+#                filling them in as clear air and clear track
+#
+# What is still missing is known and mostly unobtainable from this source. ERS
+# deployment does not exist in OpenF1 at all: car_data carries throttle, rpm,
+# brake, speed, n_gear and drs, and nothing else. DRS and the tow do exist, but
+# only for the six races that carry telemetry, so they cannot enter a model
+# fitted across 81. They are reported separately by s05d_telemetry.py.
+FACTOR_FORMULA = (
+    "lap_vs_median ~ C(compound) + tyre_age + lap_number"
+    " + track_temperature + air_temperature + humidity + wind_speed + rainfall"
+    " + C(team_name) + gap_ahead + in_dirty_air"
+    " + out_of_position + being_lapped + yellow_sector"
+    " + C(circuit_short_name):wind_u + C(circuit_short_name):wind_v"
+)
+
+# Human labels. Several formula terms collapse to one factor for reporting,
+# because a reader wants "wind direction", not two orthogonal components
+# crossed with twenty-four circuits.
+FACTOR_LABELS = {
+    "C(compound)": "Tyre compound",
+    "lap_number": "Fuel load, via lap number",
+    "tyre_age": "Tyre age",
+    "rainfall": "Rain",
+    "track_temperature": "Track temperature",
+    "air_temperature": "Air temperature",
+    "humidity": "Humidity",
+    "wind_speed": "Wind speed",
+    "C(team_name)": "The car",
+    "gap_ahead": "Traffic ahead",
+    "in_dirty_air": "Running in dirty air",
+    # Named for what it measures, not for what it would be nice to measure.
+    # See attach_traffic for why this is not simply "traffic".
+    "out_of_position": "Out of position, gap counted in laps",
+    "being_lapped": "Being lapped",
+    "yellow_sector": "Sector yellow flag",
+    "C(circuit_short_name):wind_u": "Wind direction, per circuit",
+    "C(circuit_short_name):wind_v": "Wind direction, per circuit",
+    "Residual": "Everything not measured",
+}
+
+# Within a race, being close behind another car costs time. Beyond this the
+# car ahead is irrelevant, so the gap is capped rather than left to run to
+# the length of a straight and drag the fit around.
+GAP_CAP_SECONDS = 10.0
+
+# The sport's own DRS and dirty-air threshold is one second; 1.5 gives the
+# aerodynamic effect a little room without reaching for a tuned number.
+DIRTY_AIR_SECONDS = 1.5
+
 
 def _round(v, nd=3):
     if v is None:
@@ -200,7 +280,8 @@ def load_laps(con) -> pd.DataFrame:
                d.team_name, d.full_name, d.name_acronym,
                s.year, s.circuit_short_name,
                m.meeting_name,
-               st.compound, st.stint_number, st.tyre_age_at_start, st.lap_start
+               st.compound, st.stint_number, st.tyre_age_at_start, st.lap_start,
+               f.yellow_sector_flag
         FROM scope
         JOIN silver_laps l ON l.session_key = scope.session_key
         JOIN silver_lap_flags f
@@ -238,6 +319,12 @@ def load_laps(con) -> pd.DataFrame:
 
     # Tyre age on THIS lap, not at the stint's start.
     laps["tyre_age"] = laps["tyre_age_at_start"] + (laps["lap_number"] - laps["lap_start"])
+
+    # A sector yellow is NOT a neutralisation, which is why s02b keeps the two
+    # apart and why these laps survive the filter above. But it is not nothing
+    # either: one marshal sector under yellow costs 1.86s, so it belongs in the
+    # model as a factor rather than being left in the residual as "driving".
+    laps["yellow_sector"] = laps["yellow_sector_flag"].fillna(0).astype(int)
 
     return normalize_teams(laps)
 
@@ -514,6 +601,269 @@ def build_perfect_lap_record(laps: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+# --- what made a lap what it was --------------------------------------------------
+
+def attach_traffic(con, laps: pd.DataFrame) -> pd.DataFrame:
+    """
+    Gap to the car ahead at each lap's start, and what kind of traffic it is.
+
+    Intervals are sampled about every four seconds, so this is the nearest
+    reading at or before the lap began, the same convention s04 uses for
+    fact_lap.
+
+    THE NULL INTERVAL IS NOT CLEAR TRACK. This function used to filter
+    interval_seconds IS NOT NULL and then fill every missing gap with the cap,
+    which said "a lap behind" and "alone in front" were the same thing. They
+    are the opposite. When the car ahead is a whole lap away the timing feed
+    stops reporting seconds and reports interval_laps instead, so the filter
+    was removing exactly the rows that identify out-of-position running, and
+    the fill was then labelling them clean air. Those laps are +10.1s, the
+    largest single effect in the model, and the old code buried all of it in
+    the residual. The filter is gone and the lap-counted rows are flagged.
+
+    WHAT out_of_position IS NOT. It is not a clean measure of traffic, and it
+    is not named as one. It marks the 1.56% of laps where the feed reported the
+    gap in laps rather than seconds, which happens when a car is caught by the
+    leaders, but also when it is damaged, off the track, or limping to the pits.
+    The three laps before the flag average +2.1s, +2.3s and +3.0s against a
+    field baseline near +0.5s, so a car is already slow before the flag lands:
+    part of this term is a consequence of a bad lap, not a cause of one. The
+    median spell is one lap, so it is an event marker, not a state.
+
+    It stays in the model anyway. Leaving it out does not make the 5.2% of
+    variance disappear, it moves it into the residual, where the page calls the
+    residual "the driver and the line". Mislabelled is worse than caveated.
+
+    IT ALSO CHANGES WHAT gap_ahead MEANS. With the lapped rows filled to the
+    cap, the model saw "large gap, slow lap" and read a dirty-air effect out of
+    it: gap_ahead came out at -0.135 s per second with p < 1e-300. Once those
+    rows are flagged separately, the gap effect on properly timed laps collapses
+    to -0.009 s per second at p = 0.13, and dirty air to +0.08s. The earlier
+    figure was the artefact, not the finding. A driver held up behind another
+    car matches that car's pace; it does not make their lap slower than it.
+    """
+    intervals = pd.read_sql(f"""
+        WITH scope AS ({RACE_SCOPE})
+        SELECT i.session_key, i.driver_number, i."date", i.interval_seconds,
+               i.interval_laps, i.gap_to_leader_laps
+        FROM scope JOIN silver_intervals i ON i.session_key = scope.session_key
+        WHERE i.interval_seconds IS NOT NULL
+           OR i.interval_laps    IS NOT NULL
+    """, con)
+    intervals["date"] = pd.to_datetime(intervals["date"], format="ISO8601",
+                                       utc=True)
+
+    laps = laps.copy()
+    laps["_ts"] = pd.to_datetime(laps["date_start"], format="ISO8601",
+                                 utc=True, errors="coerce")
+    timed = laps[laps["_ts"].notna()].sort_values("_ts")
+    untimed = laps[laps["_ts"].isna()]
+
+    merged = pd.merge_asof(
+        timed, intervals.sort_values("date"),
+        left_on="_ts", right_on="date",
+        by=["session_key", "driver_number"], direction="backward")
+
+    out = pd.concat([merged, untimed], ignore_index=True)
+    out["gap_ahead"] = out["interval_seconds"].clip(
+        upper=GAP_CAP_SECONDS).fillna(GAP_CAP_SECONDS)
+    out["in_dirty_air"] = (
+        out["interval_seconds"] < DIRTY_AIR_SECONDS).fillna(False).astype(int)
+
+    # Out of position: the car ahead is a lap or more away, so gap_ahead is a
+    # filled-in cap rather than a measurement. The flag lets the model account
+    # for the lap instead of trusting that number.
+    out["out_of_position"] = (
+        out["interval_laps"].notna() | out["interval_seconds"].isna()
+    ).astype(int)
+
+    # Being lapped is the other side of it and a separate cost: yielding to the
+    # leaders is not the same as circulating at the back in clear air.
+    out["being_lapped"] = out["gap_to_leader_laps"].notna().astype(int)
+
+    return out.drop(columns=["_ts", "date"], errors="ignore")
+
+
+def add_wind_components(laps: pd.DataFrame) -> pd.DataFrame:
+    """
+    Wind as two orthogonal components rather than a compass bearing.
+
+    A bearing cannot be used as a number: 359 and 1 degree are neighbours, and
+    a regression would treat them as opposite extremes. Splitting into
+    components fixes that, but the deeper reason is orientation. Position
+    coordinates are in each circuit's own frame and the rotation to compass
+    north is unknown, so there is no way to say which way the pit straight
+    points and therefore no way to compute a headwind directly.
+
+    Crossing both components with circuit lets the model learn that rotation
+    per track. It is the difference between a term worth nothing and the
+    single most useful addition available: wind direction on its own adds
+    0.0004 to R-squared, and crossed with circuit it adds 0.024.
+    """
+    laps = laps.copy()
+    radians = np.radians(laps["wind_direction"].astype(float))
+    laps["wind_u"] = laps["wind_speed"] * np.cos(radians)
+    laps["wind_v"] = laps["wind_speed"] * np.sin(radians)
+    return laps
+
+
+def fit_factor_model(modelled: pd.DataFrame):
+    """The within-race model, its ANOVA, and the VIFs behind it."""
+    needed = ["lap_vs_median", "team_name", "gap_ahead", "in_dirty_air",
+              "out_of_position", "being_lapped", "yellow_sector",
+              "wind_u", "wind_v", "circuit_short_name"]
+    df = modelled.dropna(subset=needed).copy()
+    fit = smf.ols(FACTOR_FORMULA, data=df).fit()
+    table = anova_lm(fit, typ=2)
+    return fit, table, compute_vifs(df)
+
+
+def build_lap_factor_anova(fit, table: pd.DataFrame) -> pd.DataFrame:
+    """
+    One row per factor: how much of within-race lap variation it explains.
+
+    Type II sums of squares, so each factor is measured after every other
+    factor is accounted for. That matters here because track and air
+    temperature move together, and a sequential decomposition would hand
+    whichever came first in the formula all of their shared credit.
+
+    SHARE OF VARIANCE IS THE ANSWER, NOT THE P-VALUE. At 77,000 laps
+    everything is significant: tyre age reaches p = 0.005 while explaining
+    0.009% of the variance. The p column is kept because omitting it would
+    look evasive, but `pct_variance` is the column that means something.
+
+    SHARES ARE TAKEN AGAINST THE TRUE TOTAL, not the ANOVA table's total, and
+    the difference is not cosmetic. Type II sums of squares do not partition
+    the variance: what two correlated predictors share is credited to neither,
+    so the table's own total falls short of the real one. Dividing by it
+    reported the unexplained share as 93.4% when the honest figure, 1 - R2, is
+    88.1%. The gap is carried as its own row rather than quietly absorbed,
+    because 5.7% of lap-time variance genuinely cannot be assigned to any one
+    factor: track and air temperature move together, and so do fuel load and
+    tyre age within a stint.
+    """
+    total = float(fit.centered_tss)
+    mse = float(fit.mse_resid)
+
+    # Terms sharing a label are one factor to a reader: the two wind
+    # components crossed with circuit are 48 parameters answering a single
+    # question. Their sums of squares and degrees of freedom add, and the
+    # joint F follows from the combined term against the model's own error,
+    # which is the same test as comparing the model with and without all of
+    # them at once.
+    grouped: dict[str, dict] = {}
+    for term, r in table.iterrows():
+        if term == "Residual":
+            continue
+        label = FACTOR_LABELS.get(term, term)
+        slot = grouped.setdefault(label, {"terms": [], "sum_sq": 0.0, "df": 0})
+        slot["terms"].append(term)
+        slot["sum_sq"] += float(r.sum_sq)
+        slot["df"] += int(r.df)
+
+    rows = []
+    for label, slot in grouped.items():
+        f_stat = (slot["sum_sq"] / slot["df"]) / mse if slot["df"] else None
+        p = (float(stats.f.sf(f_stat, slot["df"], fit.df_resid))
+             if f_stat is not None else None)
+        rows.append({
+            "term": " + ".join(slot["terms"]),
+            "factor": label,
+            "sum_sq": _round(slot["sum_sq"], 2),
+            "df": slot["df"],
+            "f_statistic": _round(f_stat, 3),
+            "p_value": _round(p, 8),
+            "pct_variance": _round(100 * slot["sum_sq"] / total, 4),
+            "is_residual": 0,
+        })
+
+    unique = sum(r["pct_variance"] for r in rows)
+    unexplained = 100.0 * float(fit.ssr) / total
+    rows.append({
+        "term": "Shared", "factor": "Shared between correlated factors",
+        "sum_sq": _round(total - fit.ssr
+                         - table.sum_sq.drop("Residual").sum(), 2),
+        "df": 0, "f_statistic": None, "p_value": None,
+        "pct_variance": _round(100.0 - unique - unexplained, 4),
+        "is_residual": 0,
+    })
+    rows.append({
+        "term": "Residual", "factor": FACTOR_LABELS["Residual"],
+        "sum_sq": _round(fit.ssr, 2), "df": int(fit.df_resid),
+        "f_statistic": None, "p_value": None,
+        "pct_variance": _round(unexplained, 4), "is_residual": 1,
+    })
+
+    out = pd.DataFrame(rows).sort_values("pct_variance", ascending=False)
+    out.insert(0, "rank", range(1, len(out) + 1))
+    out["model_r_squared"] = _round(fit.rsquared, 4)
+    out["model_n"] = int(fit.nobs)
+    return out.reset_index(drop=True)
+
+
+def build_lap_factor_model(fit, vifs: dict) -> pd.DataFrame:
+    """
+    Every coefficient, including each compound level.
+
+    The app needs all of them: a lap's contribution from a factor is its
+    coefficient times that lap's value, so a table that collapses the dummy
+    levels into a summary row cannot decompose anything. This is the one
+    place where the full parameter list has to ship.
+    """
+    conf = fit.conf_int()
+    rows = []
+    for name in fit.params.index:
+        base = name.split("[")[0] if name.startswith("C(") else name
+        rows.append({
+            "term": name,
+            "factor": FACTOR_LABELS.get(base, base),
+            "kind": "level" if "[" in name else
+                    ("intercept" if name == "Intercept" else "numeric"),
+            "coefficient": _round(fit.params[name], 6),
+            "std_error": _round(fit.bse[name], 6),
+            "p_value": _round(fit.pvalues[name], 8),
+            "ci_lower": _round(conf.loc[name, 0], 6),
+            "ci_upper": _round(conf.loc[name, 1], 6),
+            "vif": _round(vifs.get(name), 3),
+        })
+    return pd.DataFrame(rows)
+
+
+def build_lap_factor_reference(modelled: pd.DataFrame) -> pd.DataFrame:
+    """
+    The typical value of each factor within each race.
+
+    A contribution only means something against a baseline, and the baseline
+    that matches the question is "a normal lap in this same race". Fifty laps
+    of fuel is unremarkable at lap 50 and extraordinary at lap 5, so the
+    reference is per session rather than global.
+    """
+    df = modelled.dropna(subset=["lap_vs_median"])
+    cols = NUMERIC_PREDICTORS + ["gap_ahead", "in_dirty_air", "out_of_position",
+                                 "being_lapped", "yellow_sector",
+                                 "wind_u", "wind_v"]
+    numeric = (df.groupby("session_key")[cols]
+                 .median().reset_index()
+                 .melt(id_vars="session_key", var_name="term",
+                       value_name="reference_value"))
+    numeric["reference_level"] = None
+
+    levels = []
+    for column, term in (("compound", "compound"),
+                         ("circuit_short_name", "circuit")):
+        frame = (df.groupby("session_key")[column]
+                   .agg(lambda s: s.mode().iat[0] if len(s.mode()) else None)
+                   .reset_index().rename(columns={column: "reference_level"}))
+        frame["term"] = term
+        frame["reference_value"] = None
+        levels.append(frame[["session_key", "term", "reference_value",
+                             "reference_level"]])
+
+    out = pd.concat([numeric] + levels, ignore_index=True)
+    out["reference_value"] = out["reference_value"].round(4)
+    return out.sort_values(["session_key", "term"]).reset_index(drop=True)
+
+
 # --- perfect race ----------------------------------------------------------------
 
 def build_perfect_race(con, laps: pd.DataFrame) -> pd.DataFrame:
@@ -629,7 +979,9 @@ def build_perfect_race(con, laps: pd.DataFrame) -> pd.DataFrame:
 
 # --- runner ----------------------------------------------------------------------
 
-TABLES = ["perfect_lap", "perfect_lap_model", "perfect_lap_record", "perfect_race"]
+TABLES = ["perfect_lap", "perfect_lap_model", "perfect_lap_record",
+          "perfect_race", "lap_factor_anova", "lap_factor_model",
+          "lap_factor_reference"]
 
 
 def main() -> int:
@@ -674,6 +1026,12 @@ def main() -> int:
           f"  ({time.time() - t0:.1f}s)")
 
     t0 = time.time()
+    laps = add_wind_components(attach_traffic(con, laps))
+    print(f"with a gap to the car ahead: "
+          f"{int((laps['gap_ahead'] < GAP_CAP_SECONDS).sum()):>8,}"
+          f"  ({time.time() - t0:.1f}s)")
+
+    t0 = time.time()
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         fit, modelled, rare, bad = fit_lap_model(laps)
@@ -687,6 +1045,14 @@ def main() -> int:
     worst_vif = max(vifs.values()) if vifs else float("nan")
     print(f"  peak VIF among numeric predictors: {worst_vif:.2f}")
 
+    t0 = time.time()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        ffit, ftable, fvifs = fit_factor_model(modelled)
+    print(f"within-race model:    R2={ffit.rsquared:.3f}, "
+          f"{100 * (1 - ffit.rsquared):.1f}% unexplained, "
+          f"{len(ffit.params)} params  ({time.time() - t0:.1f}s)")
+
     ranked = build_perfect_lap(modelled, args.top)
     frames = {
         "perfect_lap": ranked,
@@ -694,6 +1060,9 @@ def main() -> int:
                                                      vifs, rare, bad),
         "perfect_lap_record": build_perfect_lap_record(laps),
         "perfect_race": build_perfect_race(con, laps),
+        "lap_factor_anova": build_lap_factor_anova(ffit, ftable),
+        "lap_factor_model": build_lap_factor_model(ffit, fvifs),
+        "lap_factor_reference": build_lap_factor_reference(modelled),
     }
     con.close()
 
