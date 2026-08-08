@@ -36,10 +36,12 @@ NUMERIC_TERMS = ["lap_number", "tyre_age", "rainfall", "track_temperature",
                  "gap_ahead", "in_dirty_air", "out_of_position",
                  "being_lapped", "yellow_sector"]
 
-# The subset fact_lap stores directly. A lap missing any of these cannot be
-# decomposed; the rest are computed in derive().
-STORED_TERMS = ["lap_number", "tyre_age", "track_temperature",
-                "air_temperature", "humidity", "wind_speed", "wind_direction"]
+# The factors fact_lap stores directly, and therefore the ones that can be
+# null. A null here costs that factor its bar and nothing more: see blocked()
+# and missing_factors(). The rest of the model inputs are computed in derive()
+# and cannot be missing.
+SOFT_TERMS = ["compound", "lap_number", "tyre_age", "track_temperature",
+              "air_temperature", "humidity", "wind_speed", "wind_direction"]
 
 PRETTY = {
     "lap_number": "Fuel load",
@@ -55,6 +57,7 @@ PRETTY = {
     "being_lapped": "Being lapped",
     "yellow_sector": "Sector yellow flag",
     "compound": "Tyre compound",
+    "wind_direction": "Wind direction",
     "team": "The car",
     "wind": "Wind direction",
 }
@@ -153,36 +156,54 @@ def _compound_coef(coefs: pd.DataFrame, level) -> float:
     return float(hit.coefficient.iloc[0]) if len(hit) else 0.0
 
 
-def explainable(lap, refs: pd.DataFrame) -> str | None:
+def blocked(lap, refs: pd.DataFrame) -> str | None:
     """
-    Why this lap cannot be decomposed, or None when it can.
+    Why this lap cannot be decomposed AT ALL, or None when it can.
 
-    The model was fitted on green-flag, non-pit, sanely-timed laps on a known
-    compound. A lap outside that set can still be shown on the map and in the
-    timing panel, but attributing its time to factors would mean feeding the
-    model inputs it was never fitted on.
+    Only three things belong here, and none of them is a missing value.
+
+    A missing factor is a hole in the data, not a reason to refuse: the lap
+    still has a time, the model still has a baseline, and every other factor
+    can still be priced. Those cases are reported by missing_factors() and the
+    waterfall is drawn without them. Refusing the whole breakdown because one
+    of fourteen columns is null threw away thirteen answers to protect one.
+
+    What genuinely cannot be done:
+
+      no baseline    the race was dropped when the model was fitted, so there
+                     is no reference lap to measure departures from
+      no endpoint    the lap has no duration, so the waterfall has nothing to
+                     add up to
+      not a racing   a neutralised or pit-out lap has a real time that is not
+      lap            racing pace. The model was never fitted on these, so its
+                     coefficients would be extrapolation and the leftover bar
+                     would be thirty seconds of safety car labelled "not
+                     measured". That is worse than saying no.
     """
     if refs.empty:
         return ("This race is not in the model. Its stint data could not be "
                 "trusted, so it was excluded when the model was fitted.")
+    if pd.isna(lap.lap_duration) or pd.isna(lap.lap_vs_median):
+        return "This lap has no recorded duration."
     if lap.neutralised == 1:
         return ("This lap ran under a safety car, virtual safety car or red "
                 "flag, so its time reflects a delta rather than racing pace.")
     if lap.is_pit_out_lap == 1:
         return "This is a pit out lap, so part of it was spent in the pit lane."
-    if pd.isna(lap.lap_duration) or pd.isna(lap.lap_vs_median):
-        return "This lap has no recorded duration."
-    if pd.isna(lap.compound):
-        return "No tyre compound is recorded for this lap."
-    # Only the columns fact_lap actually stores. gap_ahead, dirty air and the
-    # wind components are derived in derive(), and a null interval means
-    # clear track rather than missing data, so requiring them here refused
-    # every lap on the page.
-    missing = [PRETTY.get(c, c) for c in STORED_TERMS
-               if pd.isna(getattr(lap, c, np.nan))]
-    if missing:
-        return f"Missing for this lap: {', '.join(missing).lower()}."
     return None
+
+
+def missing_factors(lap) -> list[str]:
+    """
+    Which factors this lap has no value for, named the way the page names them.
+
+    A factor in this list gets no bar. The lap is then priced as if it sat at
+    the race's reference for that factor, so its real effect falls into the
+    "not measured" bar rather than being attributed to something else. That is
+    the honest place for it, and the page says which ones went there.
+    """
+    return [PRETTY.get(c, c) for c in SOFT_TERMS
+            if pd.isna(getattr(lap, c, np.nan))]
 
 
 def _level_coef(coefs: pd.DataFrame, factor: str, level) -> float:
@@ -237,12 +258,17 @@ def decompose(lap, coefs: pd.DataFrame, refs: pd.DataFrame,
             "value": value, "reference": ref, "unit": UNITS.get(term, ""),
         })
 
-    rows.append({
-        "factor": PRETTY["compound"], "term": "compound",
-        "seconds": (_level_coef(coefs, "compound", lap.compound)
-                    - _level_coef(coefs, "compound", ref_level("compound"))),
-        "value": lap.compound, "reference": ref_level("compound"), "unit": "",
-    })
+    # No compound means no bar. It must NOT fall through to _level_coef, which
+    # returns 0.0 for a null level and would therefore price an unknown tyre as
+    # the model's base compound: a confident number invented from nothing.
+    if pd.notna(getattr(lap, "compound", None)):
+        rows.append({
+            "factor": PRETTY["compound"], "term": "compound",
+            "seconds": (_level_coef(coefs, "compound", lap.compound)
+                        - _level_coef(coefs, "compound", ref_level("compound"))),
+            "value": lap.compound, "reference": ref_level("compound"),
+            "unit": "",
+        })
 
     team = getattr(lap, "team_name", None)
     if team and teams_in_race:

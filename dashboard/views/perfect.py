@@ -306,15 +306,27 @@ else:
     else:
         lap = one.iloc[0]
         refs = lf.reference(int(session_key))
-        blocked = lf.explainable(lap, refs)
+        stop = lf.blocked(lap, refs)
 
-        if blocked:
-            st.warning(f"**This lap cannot be broken down.** {blocked}")
+        if stop:
+            st.warning(f"**This lap cannot be broken down.** {stop}")
         else:
+            gaps = lf.missing_factors(lap)
             coefs = lf.coefficients()
             teams = sorted(laps.team_name.dropna().unique())
             parts = lf.decompose(lap, coefs, refs, teams)
             totals = lf.summarise(lap, parts, coefs, refs, teams)
+
+            if gaps:
+                st.info(
+                    "**Not recorded for this lap: "
+                    + ", ".join(g.lower() for g in gaps) + ".** "
+                    + ("Those factors get no bar below. This lap is priced as "
+                       "if it sat at the typical value for this race, so "
+                       "whatever they were really worth is inside the "
+                       "\"not measured\" bar rather than assigned to something "
+                       "else. Everything else is unaffected.")
+                )
 
             m1, m2, m3 = st.columns(3)
             m1.metric("This lap against the race median",
