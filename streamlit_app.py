@@ -38,6 +38,8 @@ pages = [
             icon=":material/science:"),
     st.Page("dashboard/views/predict.py", title="Predict",
             icon=":material/insights:"),
+    st.Page("dashboard/views/perfect.py", title="Find perfect lap",
+            icon=":material/timer:"),
 ]
 
 st.navigation(pages).run()

@@ -499,6 +499,31 @@ def build_fact_lap(con) -> pd.DataFrame:
         by=["session_key", "driver_number"], direction="backward",
     )
 
+    # --- conditions at the moment the lap started ---
+    # Weather is logged about once a minute and a lap takes about ninety
+    # seconds, so nearest-in-time is the only honest join; there is no exact
+    # match to find. Carried per lap rather than per race because a race
+    # average hides exactly the thing worth seeing, a track drying out or a
+    # temperature falling across a stint.
+    weather = pd.read_sql(f"""
+        WITH scope AS ({RACE_SCOPE})
+        SELECT w.session_key, w."date",
+               w.air_temperature, w.track_temperature, w.humidity,
+               w.pressure, w.wind_speed, w.wind_direction, w.rainfall
+        FROM scope JOIN silver_weather w ON w.session_key = scope.session_key
+        ORDER BY w."date"
+    """, con)
+    weather["date"] = pd.to_datetime(weather["date"], format="ISO8601", utc=True)
+
+    merged = pd.merge_asof(
+        merged.sort_values("date_start"),
+        weather.sort_values("date")
+               .rename(columns={"date": "wx_date"})
+               .sort_values("wx_date"),
+        left_on="date_start", right_on="wx_date",
+        by="session_key", direction="nearest",
+    )
+
     keep = [
         "session_key", "driver_number", "lap_number", "date_start",
         "lap_duration", "duration_sector_1", "duration_sector_2", "duration_sector_3",
@@ -507,6 +532,8 @@ def build_fact_lap(con) -> pd.DataFrame:
         "stint_number", "compound", "tyre_age",
         "position", "interval_seconds", "interval_laps",
         "gap_to_leader_seconds", "gap_to_leader_laps",
+        "air_temperature", "track_temperature", "humidity",
+        "pressure", "wind_speed", "wind_direction", "rainfall",
     ]
     out = merged[keep].copy()
 

@@ -75,6 +75,8 @@ TABLES = [
     "dim_race", "dim_driver", "dim_team",
     "fact_driver_race", "fact_lap", "fact_event", "fact_championship",
     "diag_tests", "diag_coefficients", "diag_groups", "diag_points",
+    "perfect_lap", "perfect_lap_model", "perfect_lap_record", "perfect_race",
+    "map_circuit_outline", "map_measured_xy", "map_coverage",
 ]
 
 # The app filters by race and by test far more than anything else. Without
@@ -87,6 +89,10 @@ INDEXES = [
     ("diag_coefficients", "test_id"),
     ("diag_groups", "test_id"),
     ("diag_points", "test_id"),
+    ("perfect_lap", "session_key"),
+    ("perfect_race", "session_key"),
+    ("map_circuit_outline", "circuit_key"),
+    ("map_coverage", "session_key"),
 ]
 
 
