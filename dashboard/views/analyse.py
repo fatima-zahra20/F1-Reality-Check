@@ -538,19 +538,24 @@ _TRACKER_JS = """
       }, ms);
     });
 
-    // One line in the console saying what was actually found. This has been
-    // diagnosed three times by inference because the DOM is not visible from
-    // here; a reader can now paste this instead.
+    // SILENT WHEN HEALTHY, LOUD WHEN NOT. This started as an unconditional log
+    // because the DOM is not visible from here and the fault had been guessed
+    // at three times. It earned its keep: it proved the marker search was the
+    // failure and nothing else. Now it only speaks when something is actually
+    // wrong, so a working page does not print to the console on every load.
     function report() {
-      const detail = rows.map(function (r) {
-        return r.label.innerText.trim().slice(0, 22)
-               + (r.marker ? " [marker]" : " [NO MARKER]");
+      const withMarker = rows.filter(function (r) { return !!r.marker; });
+      if (haveMarkers && rows.length === pairs.length) return;
+      console.warn("F1 section tracker degraded:", {
+        sections: pairs.length,
+        rowsMatched: rows.length,
+        markersFound: withMarker.length,
+        usingRing: haveMarkers,
+        rows: rows.map(function (r) {
+          return r.label.innerText.trim().slice(0, 22)
+                 + (r.marker ? " [marker]" : " [NO MARKER]");
+        }),
       });
-      console.log("F1 section tracker:",
-                  {sections: pairs.length, rowsMatched: rows.length,
-                   markersFound: rows.filter(function (r) {
-                     return !!r.marker; }).length,
-                   usingRing: haveMarkers, rows: detail});
     }
 
     window.parent.addEventListener("scroll", onScroll, true);
