@@ -286,11 +286,22 @@ _TRACKER_JS = """
     // The radio's own circle, described by shape rather than by a class name.
     // Base Web generates its class names and changes them between releases; a
     // small round box inside the label is a far more durable description.
+    //
+    // Searches ALL descendants, not just direct children. The previous version
+    // only looked one level down, which is a guess about how deeply Base Web
+    // nests the marker, and that guess is exactly the kind of thing that
+    // differs between the Streamlit running locally and the one on Cloud.
     function markerOf(label) {
-      for (const el of label.children) {
+      const nodes = [label].concat(
+        Array.prototype.slice.call(label.querySelectorAll("*")));
+      for (const el of nodes) {
+        if (el === label) continue;
+        if (el.tagName === "INPUT") continue;
         const box = el.getBoundingClientRect();
         if (box.width < 6 || box.width > 40) continue;
         if (Math.abs(box.width - box.height) > 3) continue;
+        // A round box that contains the option text is the row, not the dot.
+        if ((el.innerText || "").trim().length) continue;
         const radius = getComputedStyle(el).borderRadius;
         if (radius && (radius.indexOf("%") > -1
                        || parseFloat(radius) >= box.width / 3)) return el;
@@ -343,6 +354,9 @@ _TRACKER_JS = """
       if (!found.length) return false;
 
       restore();
+      // attach() can now run repeatedly while it is still trying to find the
+      // markers, so the previous ring has to go or they pile up in the sidebar.
+      if (ring && ring.parentNode) ring.parentNode.removeChild(ring);
       rows = found;
       group = grp;
       for (const r of rows) r.marker = markerOf(r.label);
@@ -490,28 +504,54 @@ _TRACKER_JS = """
 
     attach();
 
-    // Re-attach whenever Streamlit throws our ring away. Cheap: the callback
-    // only does a contains() check unless something is actually missing.
+    // WHY THIS RETRIES ON haveMarkers AND NOT JUST ON A MISSING RING. If the
+    // first attempt runs before the sidebar has been laid out, or while it is
+    // collapsed, every getBoundingClientRect is zero, no marker is recognised,
+    // and the script settles for the fallback dot. The old condition then
+    // never looked again, because a fallback dot is still a ring as far as
+    // "is it missing" is concerned. That is the plain dot showing up instead
+    // of the moving ring, and it is why retrying could not rescue it.
+    function needsWork() {
+      return !ring || !doc.contains(ring) || !haveMarkers;
+    }
+
     let pending = false;
     const observer = new MutationObserver(function () {
-      if (ring && doc.contains(ring) && doc.contains(toTop)) return;
+      if (!needsWork() && doc.contains(toTop)) return;
       if (pending) return;
       pending = true;
       window.parent.requestAnimationFrame(function () {
         pending = false;
         if (!doc.contains(toTop)) doc.body.appendChild(toTop);
-        if (!ring || !doc.contains(ring)) attach();
+        if (needsWork()) attach();
       });
     });
     observer.observe(doc.body, {childList: true, subtree: true});
 
-    // And a few plain retries, for the case where the sidebar has not been
-    // built yet when this runs and therefore never mutates afterwards.
-    const timers = [120, 400, 1000].map(function (ms) {
+    // Plain retries too, for the case where the sidebar is not built yet when
+    // this runs and therefore never mutates afterwards. They stop as soon as
+    // the markers are found, so a page that works costs three no-op checks.
+    const timers = [120, 400, 1000, 2500].map(function (ms) {
       return window.parent.setTimeout(function () {
-        if (!ring || !doc.contains(ring)) attach();
+        if (needsWork()) attach();
+        if (ms === 2500) report();
       }, ms);
     });
+
+    // One line in the console saying what was actually found. This has been
+    // diagnosed three times by inference because the DOM is not visible from
+    // here; a reader can now paste this instead.
+    function report() {
+      const detail = rows.map(function (r) {
+        return r.label.innerText.trim().slice(0, 22)
+               + (r.marker ? " [marker]" : " [NO MARKER]");
+      });
+      console.log("F1 section tracker:",
+                  {sections: pairs.length, rowsMatched: rows.length,
+                   markersFound: rows.filter(function (r) {
+                     return !!r.marker; }).length,
+                   usingRing: haveMarkers, rows: detail});
+    }
 
     window.parent.addEventListener("scroll", onScroll, true);
     window.parent.addEventListener("resize", onScroll);
