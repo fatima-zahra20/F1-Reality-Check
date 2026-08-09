@@ -58,7 +58,7 @@ def _clean(laps: pd.DataFrame) -> pd.DataFrame:
 # --- 1. Pre-race, grid & setup -------------------------------------------------
 
 def _grid(me: pd.Series, mate: pd.Series | None) -> None:
-    st.subheader("Pre-race: grid and setup")
+    st.subheader("Pre-race, grid and setup")
     st.caption("Where this driver started, and the lap time that earned it.")
 
     c1, c2, c3, c4 = st.columns(4)
@@ -90,7 +90,7 @@ def _grid(me: pd.Series, mate: pd.Series | None) -> None:
 # --- 2. The start, lap 1 -------------------------------------------------------
 
 def _start(session_key: int, me: pd.Series, laps: pd.DataFrame) -> None:
-    st.subheader("The start: lap 1")
+    st.subheader("The start, lap 1")
     st.caption("What the opening lap cost or gained.")
 
     # fact_lap.position is sampled at each lap's start, so position after
@@ -702,6 +702,26 @@ SECTIONS = [
 ]
 
 
+def intro(race, driver_number: int) -> bool:
+    """
+    Who this story is about, printed once above the whole scroll.
+
+    This used to live inside render(), which was correct when the page showed a
+    single section and wrong the moment it showed eleven: the driver's name and
+    team appeared eleven times down the page. Returns False when the driver is
+    not in this race, so the caller can skip the sections entirely rather than
+    have each one report the same absence.
+    """
+    everyone = field(int(race.session_key))
+    row = everyone[everyone.driver_number == driver_number]
+    if row.empty:
+        st.info("This driver did not take part in the selected race.")
+        return False
+    me = row.iloc[0]
+    st.markdown(f"### {me.full_name}  ·  {me.team_name}")
+    return True
+
+
 def section_options() -> list[tuple[str, str]]:
     return [(key, title) for key, title, _ in SECTIONS]
 
@@ -714,7 +734,7 @@ def render(race, driver_number: int, section_key: str) -> None:
 
     row = everyone[everyone.driver_number == driver_number]
     if row.empty:
-        st.info("This driver did not take part in the selected race.")
+        # Silent. intro() has already said so, once, above every section.
         return
     me = row.iloc[0]
 
@@ -725,8 +745,6 @@ def render(race, driver_number: int, section_key: str) -> None:
     mate = mates.iloc[0] if len(mates) == 1 else None
 
     laps = _driver_laps(session_key, driver_number)
-
-    st.markdown(f"### {me.full_name}  ·  {me.team_name}")
 
     blocks = {
         "grid_setup": lambda: _grid(me, mate),

@@ -71,7 +71,7 @@ def _pair_metrics(cars: pd.DataFrame, col: str, fmt: str = "{:.0f}",
 # --- 1. Pre-race, grid & setup -------------------------------------------------
 
 def _grid(cars: pd.DataFrame) -> None:
-    st.subheader("Pre-race: grid and setup")
+    st.subheader("Pre-race, grid and setup")
     st.caption("Where both cars started, and how far apart they qualified.")
 
     on_grid = cars.dropna(subset=["grid_position"])
@@ -111,7 +111,7 @@ def _grid(cars: pd.DataFrame) -> None:
 # --- 2. The start, lap 1 -------------------------------------------------------
 
 def _start(session_key: int, cars: pd.DataFrame) -> None:
-    st.subheader("The start: lap 1")
+    st.subheader("The start, lap 1")
     st.caption("What the opening lap did to each car.")
 
     rows = []
@@ -531,6 +531,29 @@ SECTIONS = [
 ]
 
 
+def intro(race, team: str) -> bool:
+    """
+    Which team this story is about, printed once above the whole scroll.
+
+    Same reason as story_driver.intro: this was inside render(), so a page that
+    shows ten sections showed the team name ten times.
+    """
+    cars = _cars(int(race.session_key), team)
+    if cars.empty:
+        st.info("This team did not enter the selected race.")
+        return False
+
+    known = query("SELECT known_as FROM dim_team WHERE team_name = ?", (team,))
+    subtitle = ""
+    if len(known) and known.known_as.iloc[0] and known.known_as.iloc[0] != team:
+        subtitle = f"  ·  raced as {known.known_as.iloc[0]}"
+
+    st.markdown(f"### {team}{subtitle}")
+    if len(cars) == 1:
+        st.caption("Only one car from this team is recorded in this race.")
+    return True
+
+
 def section_options() -> list[tuple[str, str]]:
     return [(key, title) for key, title, _ in SECTIONS]
 
@@ -542,17 +565,8 @@ def render(race, team: str, section_key: str) -> None:
     cars = _cars(session_key, team)
 
     if cars.empty:
-        st.info("This team did not enter the selected race.")
+        # Silent. intro() has already said so, once, above every section.
         return
-
-    known = query("SELECT known_as FROM dim_team WHERE team_name = ?", (team,))
-    subtitle = ""
-    if len(known) and known.known_as.iloc[0] and known.known_as.iloc[0] != team:
-        subtitle = f"  ·  raced as {known.known_as.iloc[0]}"
-
-    st.markdown(f"### {team}{subtitle}")
-    if len(cars) == 1:
-        st.caption("Only one car from this team is recorded in this race.")
 
     blocks = {
         "grid_setup": lambda: _grid(cars),

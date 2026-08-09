@@ -33,33 +33,65 @@ from story_common import (  # noqa: E402
     ACCENT, AXIS_BASE, INK, MUTED, PLOT_BASE, guide,
 )
 
-# One entry per notebook in DIAGNOSTIC ANALYTICS, in that order, holding the
-# tests that answer its questions and the descriptive section the diagnostic
-# bank says it builds on. The section key must match the story module's own
-# SECTIONS so the hand-over lands on the right block.
+# ONE ENTRY PER QUESTION GROUP, not per notebook, and the two are not the same
+# thing. There are seven notebooks in DIAGNOSTIC ANALYTICS and eleven groups in
+# the question bank, because a notebook was a convenient place to do work and a
+# group is a subject a reader looks for. Grouping the page by notebook filename
+# made the reader learn the filing system before they could find a question.
 #
-# Every question those notebooks answer now has a test here: s05 was extended
-# with T17-T24 so nothing is answered in a notebook but missing from the
-# pipeline. Numbers are recomputed against current silver, never carried over
-# from the notebooks, which ran on pre-backfill data with the old caution flag.
+# So the eleven titles below are the question bank's own, and they line up
+# one-to-one with the descriptive layer's sections. Every section here hands
+# over to the story section of the same name.
+#
+# All 29 tests are still here, each in exactly one group, and every group has at
+# least one. Three groups draw on more than one notebook: race pace takes the
+# stint-variation test from satart_lap and the sector-consistency test from
+# tyre_strategy, tyre strategy takes the two degradation tests from satart_lap,
+# and the three outcome groups split team_driver_outcome by subject. The
+# notebook each test came from is shown on the page, so the provenance is not
+# lost by regrouping.
+#
+# Numbers are recomputed against current silver, never carried over from the
+# notebooks, which ran on pre-backfill data with the old caution flag.
+
+# Which notebook each test was worked out in. Kept separate from the grouping
+# above precisely because the two no longer coincide.
+NOTEBOOKS = {
+    "grid_setup": ["T13", "T03", "T04"],
+    "satart_lap": ["T16", "T17", "T18", "T11a", "T11b"],
+    "tyre_strategy": ["T19", "T20", "T21", "T05a", "T05b"],
+    "pit_stops": ["T07a", "T07b", "T22"],
+    "position": ["T06", "T15", "T23", "T08"],
+    "incidents": ["T09", "T09b", "T12", "T10"],
+    "team_driver_outcome": ["T24", "T01", "T01b", "T14", "T02"],
+}
+NOTEBOOK_OF = {tid: nb for nb, ids in NOTEBOOKS.items() for tid in ids}
+
 SECTIONS = [
-    ("grid_setup", "Grid and setup", ["T13", "T03", "T04"],
+    ("grid_setup", "Pre-race, grid & setup", ["T13", "T03", "T04"],
      "Story of a Race", "grid_setup", "Pre-race, grid and setup"),
-    ("satart_lap", "Start, lap 1 and stint pace",
-     ["T16", "T17", "T18", "T11a", "T11b"],
+    ("lap1", "The start, lap 1", ["T16", "T17"],
      "Story of a Race", "lap1", "The start, lap 1"),
-    ("tyre_strategy", "Tyre strategy",
-     ["T19", "T20", "T21", "T05a", "T05b"],
+    ("lap_by_lap", "Race pace, lap by lap", ["T18", "T20"],
+     "Story of a Race", "lap_by_lap", "Race pace, lap by lap"),
+    ("tyres", "Tyre strategy",
+     ["T11a", "T11b", "T05a", "T05b", "T19", "T21"],
      "Story of a Race", "tyres", "Tyre strategy"),
     ("pit_stops", "Pit stops", ["T07a", "T07b", "T22"],
      "Story of a Race", "pit_stops", "Pit stops"),
-    ("position", "Position dynamics", ["T06", "T15", "T23", "T08"],
+    ("position", "Position dynamics across the race", ["T06", "T15", "T08"],
      "Story of a Race", "position", "Position dynamics"),
-    ("incidents", "Incidents and weather", ["T09", "T09b", "T12", "T10"],
+    ("gaps", "Gaps & race context", ["T23"],
+     "Story of a Race", "gaps", "Gaps and race context"),
+    ("incidents", "Incidents & external context",
+     ["T09", "T09b", "T12", "T10"],
      "Story of a Race", "incidents", "Incidents and conditions"),
-    ("team_driver_outcome", "Team and driver outcome",
-     ["T24", "T01", "T01b", "T14", "T02"],
-     "Story of a Team", "teammate", "Head to head"),
+    ("radio", "Team radio", ["T24"],
+     "Story of a Race", "radio", "Team radio"),
+    ("outcome", "Finish & outcome", ["T01", "T01b", "T14"],
+     "Story of a Race", "outcome", "Finish and outcome"),
+    ("teammate", "Driver vs teammate", ["T02"],
+     "Story of a Driver", "teammate", "Against the teammate"),
 ]
 
 
@@ -806,8 +838,10 @@ st.divider()
 
 
 # --- section picker -----------------------------------------------------------
-# One notebook at a time rather than all 29 tests on one page, matching how
-# Analyse is filtered.
+# ONE NOTEBOOK AT A TIME, and only the dropdown to switch. Analyse shows a whole
+# story at once because a story is meant to be read straight through. A test
+# bank is not: these are 29 independent questions in seven groups, and stacking
+# them makes a page nobody finishes. The difference is deliberate.
 
 section_titles = {key: title for key, title, *_ in SECTIONS}
 section_keys = list(section_titles)
@@ -833,9 +867,13 @@ key, title, test_ids, story, section_key, block = next(
 
 st.header(title)
 present = [t for t in test_ids if t in by_id.index]
+
+# The section key is no longer a filename, so the notebooks are looked up from
+# the tests themselves. A group can draw on more than one.
+books = sorted({NOTEBOOK_OF[t] for t in present if t in NOTEBOOK_OF})
 st.caption(
-    f"{len(present)} question{'s' if len(present) != 1 else ''} answered in "
-    f"`{key}.ipynb`."
+    f"{len(present)} question{'s' if len(present) != 1 else ''}, worked out in "
+    + ", ".join(f"`{b}.ipynb`" for b in books) + "."
 )
 st.divider()
 
@@ -856,14 +894,15 @@ for i, tid in enumerate(present):
     if i < len(present) - 1:
         st.divider()
 
-# The teammate-qualifying question appears in two notebooks. It is answered
-# once, under grid_setup, rather than repeating the same test on one page.
-if chosen == "team_driver_outcome":
+# The teammate-qualifying question belongs to two groups. It is answered once,
+# under the grid, rather than repeating the same test on two pages.
+if chosen == "teammate":
     st.divider()
     st.caption(
-        "This notebook also asks whether a driver's advantage over their "
-        "teammate is statistically significant. That question is answered by "
-        "the qualifying-delta test, shown under Grid and setup."
+        "Whether a driver's advantage over their teammate is real rather than "
+        "race-to-race noise is answered by the qualifying-delta test, shown "
+        "under Pre-race, grid & setup. Their strategies diverging is under "
+        "Tyre strategy."
     )
 
 st.divider()

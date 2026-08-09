@@ -36,7 +36,7 @@ from story_common import (
 # --- 1. Pre-race, grid & setup -----------------------------------------------
 
 def _grid_and_setup(session_key: int) -> None:
-    st.subheader("Pre-race: grid and setup")
+    st.subheader("Pre-race, grid and setup")
     st.caption(
         "What grid position each driver started from, the lap time that earned "
         "it, and how each team's two cars were split across the field."
@@ -131,7 +131,7 @@ def _grid_and_setup(session_key: int) -> None:
 # --- 2. The start, lap 1 -------------------------------------------------------
 
 def _start_lap1(session_key: int) -> None:
-    st.subheader("The start: lap 1")
+    st.subheader("The start, lap 1")
     st.caption(
         "Where the field ran after one racing lap, against where it started."
     )
@@ -613,7 +613,7 @@ def _incidents(session_key: int, race) -> None:
               f"{wet_pct:.0f}% of samples wet")
 
     st.caption(
-        f"Air {race.avg_air_temp:.0f}°C, track {race.avg_track_temp:.0f}°C "
+        f"Air {race.avg_air_temp:.0f}Â°C, track {race.avg_track_temp:.0f}Â°C "
         "on average across the race."
         if pd.notna(race.avg_air_temp) and pd.notna(race.avg_track_temp)
         else "Temperature not recorded for this race."
