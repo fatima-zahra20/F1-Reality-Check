@@ -95,17 +95,13 @@ st.caption(
 # differ by story, since a team has no "gaps" questions and only a driver has a
 # teammate.
 #
-# THE RADIO NO LONGER FILTERS, it aims. Nothing is hidden any more, so the radio
-# picks a target and the link underneath it jumps there, and the same row of
-# links sits at the top of the page. That is done with ordinary markdown
-# anchors against the anchor ids on each header: a radio cannot scroll a
-# Streamlit page by itself, and the alternative is injecting JavaScript that
-# reaches into Streamlit's own DOM and breaks on the next version bump.
+# THE SECTION LIST DOES NOT FILTER, it aims. Nothing is hidden any more, so it
+# marks where you are and jumps you where you want to be. See the block below
+# for why it is hand-written markup rather than an st.radio.
 #
-# It also keeps the hand-over from Diagnose working. That page sets
-# section_choice directly, so arriving here still points the radio at the
-# section it sent you to, and now the rest of the story is visible around it
-# rather than hidden behind it.
+# The hand-over from Diagnose still works. That page sets section_choice
+# directly, so arriving here still opens on the section it sent you to, and now
+# the rest of the story is visible around it rather than hidden behind it.
 #
 # Rendering all ten sections costs 1.31s cold and nothing once cached, so there
 # was no performance reason to keep them apart.
@@ -126,14 +122,61 @@ if st.session_state.get("section_choice") not in section_keys:
     st.session_state["section_choice"] = section_keys[0]
 
 st.sidebar.divider()
-section = st.sidebar.radio(
-    "Section", section_keys,
-    format_func=lambda k: section_titles.get(k, k),
-    key="section_choice",
+section = st.session_state["section_choice"]
+
+# THE SECTION LIST IS OURS, NOT AN st.radio, and that is the whole point.
+#
+# It was a radio, and a script reached into the sidebar to find Base Web's own
+# circle, hide it, and draw a copy that followed the scroll. That worked on one
+# story and failed on the others, then worked and left three rows with no
+# circle at all. The failures were never the same twice because they were races
+# against Streamlit: each rerun builds a new component iframe, timers scheduled
+# on the parent window outlive the iframe that set them, and an orphaned script
+# would re-hide markers after the current one had cleaned up. Nothing about that
+# is fixable from outside; the DOM belongs to Streamlit and it is entitled to
+# rebuild it whenever it likes.
+#
+# So the list is now markup this file owns. It still looks like a radio, it
+# still marks one section, and the ring moves as you scroll. The difference is
+# that every element the script touches was created here, so there is nothing
+# to reverse-engineer and nothing to race.
+#
+# What is given up: it is no longer a widget, so clicking a row does not set
+# session state. It does not need to. Clicking scrolls, which is all it was
+# ever asked to do, and the hand-over from Diagnose still arrives through
+# section_choice and still opens on the right section.
+_TOC_CSS = """
+<style>
+.f1-toc { display: flex; flex-direction: column; gap: 0.42rem;
+          margin: 0.25rem 0 0.5rem 0; }
+.f1-toc a { display: flex; align-items: center; gap: 0.55rem;
+            text-decoration: none; color: inherit; font-size: 0.875rem;
+            line-height: 1.35; }
+.f1-toc a:hover { color: #E10600; }
+.f1-ring { flex: 0 0 auto; width: 17px; height: 17px; border-radius: 50%;
+           border: 1px solid rgba(130,130,140,0.55); box-sizing: border-box;
+           position: relative; transition: border-color 150ms ease-out; }
+.f1-toc a.f1-active .f1-ring { border: 2px solid #E10600; }
+.f1-toc a.f1-active .f1-ring::after {
+    content: ""; position: absolute; inset: 2.5px; border-radius: 50%;
+    background: #E10600; }
+.f1-toc a.f1-active { font-weight: 600; }
+</style>
+"""
+
+_toc_items = "".join(
+    '<a class="f1-sec{active}" href="#sec-{key}" data-sec="{key}">'
+    '<span class="f1-ring"></span><span>{title}</span></a>'.format(
+        key=key, title=title,
+        active=" f1-active" if key == section else "")
+    for key, title in section_pairs
 )
+st.sidebar.markdown("Section")
+st.sidebar.markdown(_TOC_CSS + f'<nav class="f1-toc">{_toc_items}</nav>',
+                    unsafe_allow_html=True)
 
-
-st.caption("Every section of this story is below. The sidebar scrolls to one.")
+st.caption("Every section of this story is below. The sidebar follows as you "
+           "scroll, and clicking a section jumps to it.")
 
 
 def render_story(render_one) -> None:
@@ -227,221 +270,62 @@ st.sidebar.caption(
 #   scrolling the page  moves the radio's red ring to match
 #   a button, low right  returns to the top
 #
-# THE RING THAT MOVES IS A COPY, drawn over the real one. Streamlit owns the
-# actual selection, and moving it for real means telling Python and reloading
-# the page, which during one scroll of eleven sections is eleven reloads, each
-# liable to throw the page back to the top. So instead the script draws a ring
-# in the same place and the same size as the marker of whichever section you
-# are in, and dims the real marker while the two differ. It reads as one ring
-# that slides, and nothing reloads.
+# THE RING IS A CSS CLASS ON OUR OWN ANCHORS. The script's whole job is to work
+# out which section is on screen and move one class name. It reads no Streamlit
+# markup and writes to no Streamlit element, so there is nothing to leave in a
+# broken state and nothing to break on an upgrade.
 #
-# The marker is found by measurement, not by selector: the first child of the
-# label whose computed border-radius makes it a circle. Base Web's class names
-# are generated and change between releases; a round box in the first position
-# is a much more stable description of "the radio dot".
+# It still reaches into the host document, because the sidebar and the page are
+# outside the component iframe. Same origin, so the browser allows it. The one
+# exception to "only our own elements" is scroller(), which walks up from a
+# section anchor reading overflow until it finds whatever Streamlit is actually
+# scrolling. That is a read, and it has a fallback.
 #
-# If that lookup ever fails the script falls back to a plain dot at the right
-# edge of the row, so the tracking degrades rather than disappearing.
-#
-# All of it reaches out of the component iframe into the host document. Same
-# origin, so the browser allows it, but it depends on Streamlit keeping
-# components same-origin. If that ever changes, everything here stops and
-# nothing else breaks: every section is still on the page, the radio still
-# selects one, and the page still scrolls normally.
+# If any of it fails, the list simply stops following the scroll. The sections
+# are all still on the page, the links still jump, and the page still scrolls.
 _scroll_to = None
 if st.session_state.get("_scrolled_to") != (story, section):
     st.session_state["_scrolled_to"] = (story, section)
     _scroll_to = f"sec-{section}"
 
-# Placeholders rather than an f-string. Every brace in JavaScript has to be
-# doubled inside an f-string, which across two hundred lines is a silent
-# correctness risk for no benefit: a mis-escape produces valid Python and
-# broken JavaScript, and nothing on the Python side can see it.
+# Placeholders rather than an f-string, so the JavaScript can be written as
+# JavaScript. Doubling every brace across a script this long is a silent
+# correctness risk: a mis-escape is valid Python and broken JavaScript.
+#
+# EVERY ELEMENT THIS TOUCHES WAS CREATED BY THIS FILE. The rows are the
+# .f1-sec anchors rendered above, the targets are the sec-* divs rendered by
+# render_story, and the button is created here. It reads nothing of
+# Streamlit's own markup, so a Streamlit upgrade cannot silently break it, and
+# there is no state of Streamlit's to leave behind in a bad way. The worst case
+# is the class never moves and the list simply sits still.
 _TRACKER_JS = """
 <script>
 (function () {
   const doc = window.parent.document;
-  const pairs = __PAIRS__;
   const scrollTo = __SCROLL__;
 
   try {
+    if (doc.__f1Cleanup) doc.__f1Cleanup();
+
     if (scrollTo) {
       const target = doc.getElementById(scrollTo);
       if (target) target.scrollIntoView({behavior: "smooth", block: "start"});
     }
 
-    // The host page is not reloaded between Streamlit reruns, so without this
-    // every rerun leaves another live listener behind.
-    if (doc.__f1SpyCleanup) doc.__f1SpyCleanup();
-    doc.querySelectorAll("[data-f1-dot]").forEach(function (n) {
-      if (n.parentNode) n.parentNode.removeChild(n);
-    });
-
-    let rows = [];
-    let group = null;
-    let ring = null;
-    let haveMarkers = false;
-    let last = null;
-
-    // The radio's own circle, described by shape rather than by a class name.
-    // Base Web generates its class names and changes them between releases; a
-    // small round box inside the label is a far more durable description.
-    //
-    // Searches ALL descendants, not just direct children. The previous version
-    // only looked one level down, which is a guess about how deeply Base Web
-    // nests the marker, and that guess is exactly the kind of thing that
-    // differs between the Streamlit running locally and the one on Cloud.
-    function markerOf(label) {
-      const nodes = [label].concat(
-        Array.prototype.slice.call(label.querySelectorAll("*")));
-      for (const el of nodes) {
-        if (el === label) continue;
-        if (el.tagName === "INPUT") continue;
-        const box = el.getBoundingClientRect();
-        if (box.width < 6 || box.width > 40) continue;
-        if (Math.abs(box.width - box.height) > 3) continue;
-        // A round box that contains the option text is the row, not the dot.
-        if ((el.innerText || "").trim().length) continue;
-        const radius = getComputedStyle(el).borderRadius;
-        if (radius && (radius.indexOf("%") > -1
-                       || parseFloat(radius) >= box.width / 3)) return el;
-      }
-      return null;
+    function links() {
+      return Array.prototype.slice.call(doc.querySelectorAll("a.f1-sec"));
     }
 
-    function restore() {
-      for (const r of rows) {
-        if (!r.marker) continue;
-        r.marker.style.opacity = "";
-        r.marker.style.filter = "";
-      }
-    }
-
-    // Everything is rebuilt from the live DOM rather than cached, because
-    // Streamlit replaces whole subtrees. This is why Driver and Team failed
-    // while Race worked: both render another sidebar widget AFTER the radio,
-    // so Streamlit re-rendered the sidebar a moment after this script had
-    // attached, discarding the ring and every element reference with it.
-    function attach() {
-      const sidebar = doc.querySelector('[data-testid="stSidebar"]');
-      if (!sidebar) return false;
-
-      // Scope the search to the radio group holding our titles, so a label
-      // belonging to some other widget can never be picked up.
-      let grp = null;
-      for (const candidate of sidebar.querySelectorAll('[role="radiogroup"]')) {
-        const texts = [];
-        candidate.querySelectorAll("label").forEach(function (n) {
-          texts.push((n.innerText || "").trim());
-        });
-        if (pairs.some(function (p) { return texts.indexOf(p[1]) > -1; })) {
-          grp = candidate;
-          break;
-        }
-      }
-      if (!grp) return false;
-
-      const found = [];
-      for (const pair of pairs) {
-        const anchor = doc.getElementById("sec-" + pair[0]);
-        let label = null;
-        grp.querySelectorAll("label").forEach(function (n) {
-          if (!label && (n.innerText || "").trim() === pair[1]) label = n;
-        });
-        if (anchor && label) found.push({anchor: anchor, label: label,
-                                         marker: null});
-      }
-      if (!found.length) return false;
-
-      restore();
-      // attach() can now run repeatedly while it is still trying to find the
-      // markers, so the previous ring has to go or they pile up in the sidebar.
-      if (ring && ring.parentNode) ring.parentNode.removeChild(ring);
-      rows = found;
-      group = grp;
-      for (const r of rows) r.marker = markerOf(r.label);
-      haveMarkers = rows.every(function (r) { return !!r.marker; });
-
-      if (getComputedStyle(group).position === "static") {
-        group.style.position = "relative";
-      }
-
-      ring = doc.createElement("div");
-      ring.setAttribute("data-f1-dot", "1");
-      Object.assign(ring.style, {
-        position: "absolute", opacity: "0", pointerEvents: "none",
-        borderRadius: "50%", boxSizing: "border-box",
-        transition: "top 180ms ease-out, opacity 180ms ease-out",
-      });
-      if (haveMarkers) {
-        ring.style.border = "2px solid #E10600";
-        ring.innerHTML =
-          '<div style="position:absolute;inset:3px;border-radius:50%;'
-          + 'background:#E10600"></div>';
-      } else {
-        ring.style.background = "#E10600";
-        ring.style.width = "8px";
-        ring.style.height = "8px";
-        ring.style.right = "2px";
-      }
-      group.appendChild(ring);
-
-      last = null;
-      update();
-      return true;
-    }
-
-    function update() {
-      if (!ring || !rows.length) return;
-
-      // The section you are "in" is the last one whose anchor has passed the
-      // top of the viewport. Anything else jitters at section boundaries.
-      let best = rows[0];
-      for (const r of rows) {
-        if (r.anchor.getBoundingClientRect().top <= 120) best = r;
-      }
-      if (best === last) return;
-      last = best;
-
-      const groupBox = group.getBoundingClientRect();
-      if (haveMarkers) {
-        const box = best.marker.getBoundingClientRect();
-        ring.style.width = box.width + "px";
-        ring.style.height = box.height + "px";
-        ring.style.left = (box.left - groupBox.left) + "px";
-        ring.style.top = (box.top - groupBox.top) + "px";
-
-        // EXACTLY ONE RED RING ON SCREEN. The row under the copy is hidden
-        // outright because the copy replaces it. The row you last clicked is
-        // greyed rather than hidden, so it still reads as a radio option with
-        // an empty circle instead of leaving a hole in the list.
-        let checked = null;
-        for (const r of rows) {
-          const input = r.label.querySelector("input");
-          if (input && input.checked) { checked = r; break; }
-        }
-        for (const r of rows) {
-          if (r === best) {
-            r.marker.style.opacity = "0";
-            r.marker.style.filter = "";
-          } else if (r === checked) {
-            r.marker.style.opacity = "0.35";
-            r.marker.style.filter = "grayscale(1)";
-          } else {
-            r.marker.style.opacity = "";
-            r.marker.style.filter = "";
-          }
-        }
-      } else {
-        const box = best.label.getBoundingClientRect();
-        ring.style.top = (box.top - groupBox.top + (box.height - 8) / 2) + "px";
-      }
-      ring.style.opacity = "1";
+    function targets() {
+      return links().map(function (a) {
+        return {link: a, anchor: doc.getElementById("sec-" + a.dataset.sec)};
+      }).filter(function (r) { return !!r.anchor; });
     }
 
     // Whatever actually scrolls. Streamlit scrolls an inner div on some
     // versions and the document on others, so this asks rather than assumes.
     function scroller() {
+      const rows = targets();
       let el = rows.length ? rows[0].anchor.parentElement : null;
       while (el && el !== doc.body) {
         const oy = getComputedStyle(el).overflowY;
@@ -452,8 +336,27 @@ _TRACKER_JS = """
       return doc.scrollingElement || doc.documentElement;
     }
 
+    let last = null;
+    function update() {
+      const rows = targets();
+      if (!rows.length) return;
+
+      // The section you are "in" is the last one whose anchor has passed the
+      // top of the viewport. Anything else jitters at section boundaries.
+      let best = rows[0];
+      for (const r of rows) {
+        if (r.anchor.getBoundingClientRect().top <= 120) best = r;
+      }
+      if (best.link === last) return;
+      last = best.link;
+      // Toggling one class on our own anchors. No Streamlit element is read
+      // or modified, so nothing here can be left in a broken state.
+      for (const r of rows) r.link.classList.remove("f1-active");
+      best.link.classList.add("f1-active");
+    }
+
     const toTop = doc.createElement("button");
-    toTop.setAttribute("data-f1-dot", "1");
+    toTop.setAttribute("data-f1-top", "1");
     toTop.setAttribute("aria-label", "Back to top");
     toTop.title = "Back to top";
     Object.assign(toTop.style, {
@@ -480,7 +383,6 @@ _TRACKER_JS = """
         s.scrollTo({top: 0, behavior: "smooth"});
       }
     });
-    doc.body.appendChild(toTop);
 
     function updateButton() {
       const s = scroller();
@@ -491,113 +393,47 @@ _TRACKER_JS = """
       toTop.style.pointerEvents = show ? "auto" : "none";
     }
 
-    let queued = false;
+    // Old buttons from a previous run go before this one is added, so a rerun
+    // whose cleanup was missed cannot stack them up.
+    doc.querySelectorAll("[data-f1-top]").forEach(function (n) {
+      if (n.parentNode) n.parentNode.removeChild(n);
+    });
+    doc.body.appendChild(toTop);
+
+    // No throttling and no animation frame. update() reads a handful of
+    // rectangles and writes nothing unless the active row actually changed,
+    // and the browser already caps scroll events at one per frame.
+    //
+    // Deliberately NOT window.parent.requestAnimationFrame or setTimeout: a
+    // callback scheduled on the parent window outlives the iframe that
+    // scheduled it, which is precisely how an orphaned script from an earlier
+    // rerun stayed alive and fought the current one.
     function onScroll() {
-      if (queued) return;
-      queued = true;
-      window.parent.requestAnimationFrame(function () {
-        queued = false;
-        update();
-        updateButton();
-      });
+      update();
+      updateButton();
     }
 
-    attach();
-
-    // WHY THIS RETRIES ON haveMarkers AND NOT JUST ON A MISSING RING. If the
-    // first attempt runs before the sidebar has been laid out, or while it is
-    // collapsed, every getBoundingClientRect is zero, no marker is recognised,
-    // and the script settles for the fallback dot. The old condition then
-    // never looked again, because a fallback dot is still a ring as far as
-    // "is it missing" is concerned. That is the plain dot showing up instead
-    // of the moving ring, and it is why retrying could not rescue it.
-    function needsWork() {
-      return !ring || !doc.contains(ring) || !haveMarkers;
-    }
-
-    let pending = false;
-    const observer = new MutationObserver(function () {
-      if (!needsWork() && doc.contains(toTop)) return;
-      if (pending) return;
-      pending = true;
-      window.parent.requestAnimationFrame(function () {
-        pending = false;
-        if (!doc.contains(toTop)) doc.body.appendChild(toTop);
-        if (needsWork()) attach();
-      });
-    });
-    observer.observe(doc.body, {childList: true, subtree: true});
-
-    // Plain retries too, for the case where the sidebar is not built yet when
-    // this runs and therefore never mutates afterwards. They stop as soon as
-    // the markers are found, so a page that works costs three no-op checks.
-    const timers = [120, 400, 1000, 2500].map(function (ms) {
-      return window.parent.setTimeout(function () {
-        if (needsWork()) attach();
-        if (ms === 2500) report();
-      }, ms);
-    });
-
-    // SILENT WHEN HEALTHY, LOUD WHEN NOT. This started as an unconditional log
-    // because the DOM is not visible from here and the fault had been guessed
-    // at three times. It earned its keep: it proved the marker search was the
-    // failure and nothing else. Now it only speaks when something is actually
-    // wrong, so a working page does not print to the console on every load.
-    function report() {
-      const withMarker = rows.filter(function (r) { return !!r.marker; });
-      if (haveMarkers && rows.length === pairs.length) return;
-      console.warn("F1 section tracker degraded:", {
-        sections: pairs.length,
-        rowsMatched: rows.length,
-        markersFound: withMarker.length,
-        usingRing: haveMarkers,
-        rows: rows.map(function (r) {
-          return r.label.innerText.trim().slice(0, 22)
-                 + (r.marker ? " [marker]" : " [NO MARKER]");
-        }),
-      });
-    }
-
+    // capture:true because a scroll event on an inner container does not
+    // bubble, and Streamlit scrolls a div rather than the document.
     window.parent.addEventListener("scroll", onScroll, true);
     window.parent.addEventListener("resize", onScroll);
 
-    doc.__f1SpyCleanup = function () {
+    doc.__f1Cleanup = function () {
       window.parent.removeEventListener("scroll", onScroll, true);
       window.parent.removeEventListener("resize", onScroll);
-      observer.disconnect();
-      timers.forEach(function (t) { window.parent.clearTimeout(t); });
-      if (ring && ring.parentNode) ring.parentNode.removeChild(ring);
       if (toTop.parentNode) toTop.parentNode.removeChild(toTop);
-      restore();
     };
 
+    update();
     updateButton();
   } catch (err) {
-    // A wrong guess about Streamlit's DOM must not leave the sidebar with
-    // markers dimmed and no ring drawn. Undo everything and say so in the
-    // console; the page itself keeps working without the tracking.
     console.error("F1 section tracker failed:", err);
-    doc.querySelectorAll("[data-f1-dot]").forEach(function (n) {
-      if (n.parentNode) n.parentNode.removeChild(n);
-    });
-    const box = doc.querySelector('[data-testid="stSidebar"]');
-    if (box) {
-      box.querySelectorAll("label > *").forEach(function (n) {
-        if (!n.style) return;
-        if (n.style.opacity !== "") n.style.opacity = "";
-        if (n.style.filter !== "") n.style.filter = "";
-      });
-    }
   }
 })();
 </script>
 """
 
-components.html(
-    _TRACKER_JS
-    .replace("__PAIRS__", json.dumps(section_pairs))
-    .replace("__SCROLL__", json.dumps(_scroll_to)),
-    height=0,
-)
+components.html(_TRACKER_JS.replace("__SCROLL__", json.dumps(_scroll_to)),
+                height=0)
 
 render_footer()
