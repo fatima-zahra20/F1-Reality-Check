@@ -864,6 +864,175 @@ def build_lap_factor_reference(modelled: pd.DataFrame) -> pd.DataFrame:
     return out.sort_values(["session_key", "term"]).reset_index(drop=True)
 
 
+# --- the counterfactual: what could have been different ---------------------------
+#
+# Section 3 asks a different question from the ANOVA above it, and a different
+# question needs a different identification strategy.
+#
+# THE ANOVA ASKS how much of the variance each factor accounts for, pooled over
+# every lap of four seasons. That is the right design for "what matters".
+#
+# A COUNTERFACTUAL ASKS what would have happened had one thing been different,
+# which is a causal claim, and the pooled model cannot support it for anything
+# a team chooses. Compounds are not assigned at random: a fresh hard appears at
+# 36% race distance, a fresh soft at 4%. So "fresh soft against fresh hard" in
+# the pooled model is mostly "full tank against half tank", and adding fuel
+# terms does not repair an unbalanced comparison, it just buries it.
+#
+# THE FIX IS TO COMPARE CARS ON THE SAME LAP OF THE SAME RACE. Every car on a
+# given lap shares the fuel load, the track state, the weather, the circuit and
+# the safety car phase, so subtracting the field's mean on that lap removes all
+# of them at once, without estimating a parameter for any of them. What is left
+# is what actually differed between the cars, which is what a "what if we had
+# done X" question is about.
+#
+# WHAT THIS COSTS is the weather. A factor that is identical for every car on a
+# lap is differenced away to nothing, so this model cannot see rain or wind at
+# all. That is not a defect, it is the division of labour: conditions were never
+# a choice, and they are reported from the pooled model as circumstance rather
+# than as advice.
+#
+# WHAT IT FOUND, and it was not what I expected. The pooled model says a fresh
+# soft is 0.229s slower than a fresh hard, which looked like the confound above.
+# It is not. Within-lap it is 0.248s, and a model-free check on the 1,024
+# race-laps where a soft is running and is no older than the hard gives 0.273s.
+# Three routes, one answer. In race trim the soft really is the slower tyre,
+# because a race soft is managed, not attacked. The pooled estimate was mildly
+# biased; the sign was right all along.
+
+WITHIN_FORMULA = (
+    "dev ~ C(compound)*tyre_age + C(team_name) + gap_ahead + in_dirty_air"
+    " + out_of_position + being_lapped + yellow_sector"
+)
+
+# A lap of a race where the feed recorded almost nobody says nothing about how
+# cars differed from each other, and with one car the deviation is zero by
+# construction.
+MIN_CARS_ON_LAP = 5
+
+# Which block of section 3 a lever belongs in. The split is not cosmetic: the
+# first group is identified within-lap and can carry a causal reading, the
+# second is identified only in the pooled model and cannot.
+CHOICE_TERMS = ["compound", "tyre_age", "gap_ahead", "in_dirty_air",
+                "out_of_position", "being_lapped"]
+CONDITION_TERMS = ["rainfall", "track_temperature", "air_temperature",
+                   "humidity", "wind_speed", "wind_direction", "lap_number",
+                   "yellow_sector"]
+
+
+def add_field_deviation(laps: pd.DataFrame) -> pd.DataFrame:
+    """Each lap against the mean of every car running that same lap."""
+    out = laps.copy()
+    grp = out.groupby(["session_key", "lap_number"])["lap_vs_median"]
+    out["field_mean"] = grp.transform("mean")
+    out["cars_on_lap"] = grp.transform("size")
+    out["dev"] = out["lap_vs_median"] - out["field_mean"]
+    return out[out["cars_on_lap"] >= MIN_CARS_ON_LAP]
+
+
+def fit_within_lap_model(modelled: pd.DataFrame):
+    """The same-lap comparison behind every lever a team could have pulled."""
+    df = add_field_deviation(modelled).dropna(
+        subset=["dev", "compound", "tyre_age", "team_name", "gap_ahead"])
+    return smf.ols(WITHIN_FORMULA, data=df).fit(), df
+
+
+def build_counterfactual_model(within, pooled) -> pd.DataFrame:
+    """
+    Every lever section 3 can pull, with where its coefficient came from.
+
+    Two sources in one table, and the `identification` column is the whole
+    point. A reader moving the tyre slider is looking at a number estimated
+    against cars on the same lap; a reader moving the rain slider is looking at
+    a pooled association. Both are useful, they are not the same kind of claim,
+    and the page must not let them look alike.
+    """
+    rows = []
+
+    def emit(fit, name, group, identification):
+        if name not in fit.params.index:
+            return
+        conf = fit.conf_int()
+        # An interaction has a label of its own when one exists, and falls back
+        # to its left-hand term when it does not. Without the first case the 48
+        # wind terms report as "C(circuit_short_name)" instead of "Wind
+        # direction, per circuit"; without the second, compound-by-tyre-age
+        # reports as a formula fragment.
+        if ":" in name:
+            left, right = name.split(":", 1)
+            full = f"{left.split('[')[0]}:{right.split('[')[0]}"
+            base = full if full in FACTOR_LABELS else left.split("[")[0]
+        else:
+            base = name.split("[")[0] if name.startswith("C(") else name
+        rows.append({
+            "term": name,
+            "factor": FACTOR_LABELS.get(base, base),
+            "lever_group": group,
+            "identification": identification,
+            "kind": ("interaction" if ":" in name else
+                     "level" if "[" in name else
+                     "intercept" if name == "Intercept" else "numeric"),
+            "coefficient": _round(fit.params[name], 6),
+            "std_error": _round(fit.bse[name], 6),
+            "p_value": _round(fit.pvalues[name], 8),
+            "ci_lower": _round(conf.loc[name, 0], 6),
+            "ci_upper": _round(conf.loc[name, 1], 6),
+        })
+
+    for name in within.params.index:
+        if name == "Intercept":
+            continue
+        stem = name.split("[")[0].split(":")[0].replace("C(", "").rstrip(")")
+        if stem in CHOICE_TERMS or "compound" in name or "tyre_age" in name:
+            emit(within, name, "choice", "within-lap")
+
+    for name in pooled.params.index:
+        stem = name.split("[")[0].split(":")[0].replace("C(", "").rstrip(")")
+        if stem in CONDITION_TERMS or "wind_" in name:
+            emit(pooled, name, "condition", "pooled")
+
+    out = pd.DataFrame(rows)
+    out["within_r_squared"] = _round(within.rsquared, 4)
+    out["within_n"] = int(within.nobs)
+    return out
+
+
+def build_counterfactual_bounds(modelled: pd.DataFrame) -> pd.DataFrame:
+    """
+    How far each lever may be moved, per race, and how far it has ever gone.
+
+    A counterfactual is only worth reading inside the range the data covers.
+    Two ranges ship, because they answer two different questions: what this
+    race actually saw, and what has ever been recorded anywhere. The second is
+    what allows a combination no driver has run, while still refusing to
+    extrapolate the model into a track temperature that has never existed.
+    """
+    terms = [t for t in (CHOICE_TERMS + CONDITION_TERMS)
+             if t in modelled.columns and t != "compound"]
+    rows = []
+
+    overall = modelled[terms].apply(pd.to_numeric, errors="coerce")
+    for term in terms:
+        s = overall[term].dropna()
+        if s.empty:
+            continue
+        rows.append({"session_key": None, "term": term,
+                     "low": _round(s.min()), "high": _round(s.max()),
+                     "typical": _round(s.median()), "scope": "ever recorded"})
+
+    for session_key, g in modelled.groupby("session_key"):
+        num = g[terms].apply(pd.to_numeric, errors="coerce")
+        for term in terms:
+            s = num[term].dropna()
+            if s.empty:
+                continue
+            rows.append({"session_key": int(session_key), "term": term,
+                         "low": _round(s.min()), "high": _round(s.max()),
+                         "typical": _round(s.median()), "scope": "this race"})
+
+    return pd.DataFrame(rows)
+
+
 # --- perfect race ----------------------------------------------------------------
 
 def build_perfect_race(con, laps: pd.DataFrame) -> pd.DataFrame:
@@ -981,7 +1150,8 @@ def build_perfect_race(con, laps: pd.DataFrame) -> pd.DataFrame:
 
 TABLES = ["perfect_lap", "perfect_lap_model", "perfect_lap_record",
           "perfect_race", "lap_factor_anova", "lap_factor_model",
-          "lap_factor_reference"]
+          "lap_factor_reference", "lap_counterfactual_model",
+          "lap_counterfactual_bounds"]
 
 
 def main() -> int:
@@ -1053,6 +1223,19 @@ def main() -> int:
           f"{100 * (1 - ffit.rsquared):.1f}% unexplained, "
           f"{len(ffit.params)} params  ({time.time() - t0:.1f}s)")
 
+    t0 = time.time()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        wfit, wdf = fit_within_lap_model(modelled)
+    print(f"within-lap model:     R2={wfit.rsquared:.3f}, "
+          f"n={int(wfit.nobs):,}, {len(wfit.params)} params  "
+          f"({time.time() - t0:.1f}s)")
+    fresh = {c: wfit.params.get(f"C(compound)[T.{c}]")
+             for c in ("MEDIUM", "SOFT", "INTERMEDIATE")}
+    print("  a fresh tyre against a fresh HARD: "
+          + ", ".join(f"{k} {v:+.3f}s" for k, v in fresh.items()
+                      if v is not None))
+
     ranked = build_perfect_lap(modelled, args.top)
     frames = {
         "perfect_lap": ranked,
@@ -1063,6 +1246,8 @@ def main() -> int:
         "lap_factor_anova": build_lap_factor_anova(ffit, ftable),
         "lap_factor_model": build_lap_factor_model(ffit, fvifs),
         "lap_factor_reference": build_lap_factor_reference(modelled),
+        "lap_counterfactual_model": build_counterfactual_model(wfit, ffit),
+        "lap_counterfactual_bounds": build_counterfactual_bounds(modelled),
     }
     con.close()
 

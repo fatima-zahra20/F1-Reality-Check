@@ -79,6 +79,7 @@ TABLES = [
     "map_circuit_outline", "map_measured_xy", "map_coverage",
     "lap_factor_anova", "lap_factor_model", "lap_factor_reference",
     "telemetry_tow", "telemetry_effect",
+    "lap_counterfactual_model", "lap_counterfactual_bounds",
 ]
 
 # The app filters by race and by test far more than anything else. Without
@@ -96,6 +97,7 @@ INDEXES = [
     ("map_circuit_outline", "circuit_key"),
     ("map_coverage", "session_key"),
     ("lap_factor_reference", "session_key"),
+    ("lap_counterfactual_bounds", "session_key"),
 ]
 
 

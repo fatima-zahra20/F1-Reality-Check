@@ -6,7 +6,7 @@ project:
 
     1. The state of the race line    what was happening, at one instant
     2. Why the lap was what it was   which factors moved it, and by how much
-    3. What could have been better   waits for the predictive layer
+    3. What could have been better   the same factors, moved on purpose
 
 Unlike Analyse and Diagnose there is no section picker. The three parts are
 meant to be read in order, because part 2 only means anything once part 1 has
@@ -22,6 +22,7 @@ import pandas as pd
 import streamlit as st
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+import lap_counterfactual as cf  # noqa: E402
 import lap_factors as lf  # noqa: E402
 import race_map as rm  # noqa: E402
 from app_common import query, render_footer, team_colours  # noqa: E402
@@ -463,6 +464,154 @@ if len(tow) and len(tel):
 st.divider()
 
 st.header("3. What could have been better")
-st.caption("Waits for the predictive layer.")
+
+if focus is None:
+    st.info("Choose a driver above to run a counterfactual on one lap.")
+else:
+    one3 = laps[(laps.driver_number == focus) & (laps.lap_number == lap_number)]
+    if not len(one3):
+        st.warning(f"{names[focus]} has no recorded lap {lap_number}.")
+    elif pd.isna(one3.iloc[0].lap_duration):
+        st.warning("This lap has no recorded duration, so there is nothing to "
+                   "improve on.")
+    else:
+        lap3 = one3.iloc[0]
+        cmodel = cf.model()
+        cbounds = cf.bounds(int(session_key))
+        circuit = cover[cover.session_key == session_key]
+        circuit_name = (circuit.circuit_short_name.iloc[0]
+                        if len(circuit) else None)
+
+        before = {t: getattr(lap3, t, None)
+                  for t, _l, _k, _u in cf.CHOICE_LEVERS + cf.CONDITION_LEVERS}
+        derived = lf.derive(lap3)
+        for t in ("gap_ahead", "in_dirty_air", "out_of_position",
+                  "being_lapped", "yellow_sector"):
+            before[t] = derived.get(t, before.get(t))
+        before["lap_number"] = lap3.lap_number
+
+        widen = st.toggle(
+            "Allow values from any race, not just this one",
+            value=False, key="cf_widen",
+            help="Opens every slider to the full range recorded across four "
+                 "seasons, so you can build a combination no driver has run. "
+                 "Values outside that range are still refused: the model has "
+                 "no evidence there.")
+
+        st.markdown("#### What could have been done differently")
+        st.caption(
+            "Tyre and traffic. These are estimated against the other cars on "
+            "the same lap of the same race, so fuel, track state and weather "
+            "are shared by everyone in the comparison and cancel out. That is "
+            "what lets these read as choices."
+        )
+
+        ideal = cf.best_case(cmodel, before, cbounds, widen)
+        if st.button("Set the best realistic case", key="cf_best"):
+            for t, _l, _k, _u in cf.CHOICE_LEVERS:
+                st.session_state[f"cf_{t}"] = (
+                    ideal[t] if t == "compound" else
+                    bool(ideal[t]) if _k == "flag" else
+                    (int(ideal[t]) if _k == "int" else float(ideal[t])))
+
+        after = dict(before)
+        for group, levers in (("choice", cf.CHOICE_LEVERS),
+                              ("condition", cf.CONDITION_LEVERS)):
+            if group == "condition":
+                st.markdown("#### What the day did to it")
+                st.caption(
+                    "Weather and fuel. Nobody chose any of these, and they "
+                    "cannot be estimated the same way: every car on a lap "
+                    "shares them, so they vanish from the same-lap comparison "
+                    "above and can only be read from the pooled model. Move "
+                    "them to ask what a different afternoon would have given, "
+                    "not what the team should have done."
+                )
+            cols = st.columns(3)
+            for i, (term, label, kind, unit) in enumerate(levers):
+                col = cols[i % 3]
+                current = before.get(term)
+                if kind == "choice":
+                    opts = cf.COMPOUNDS
+                    idx = (opts.index(current)
+                           if isinstance(current, str) and current in opts
+                           else 0)
+                    after[term] = col.selectbox(label, opts, index=idx,
+                                                key=f"cf_{term}")
+                elif kind == "flag":
+                    after[term] = float(col.checkbox(
+                        f"{label}", value=bool(current and float(current) >= 0.5),
+                        key=f"cf_{term}", help=unit))
+                else:
+                    lim = cf.limits(cbounds, term, widen)
+                    if lim is None or pd.isna(current):
+                        col.caption(f"{label}: not recorded")
+                        after[term] = current
+                        continue
+                    lo, hi = lim
+                    value = float(min(max(float(current), lo), hi))
+                    if kind == "int":
+                        after[term] = float(col.slider(
+                            f"{label} ({unit})", int(lo), int(hi), int(value),
+                            key=f"cf_{term}"))
+                    else:
+                        after[term] = float(col.slider(
+                            f"{label} ({unit})", float(lo), float(hi), value,
+                            key=f"cf_{term}"))
+
+        parts = cf.evaluate(cmodel, before, after, circuit_name)
+        moved = float(parts.seconds.sum())
+        actual = float(lap3.lap_duration)
+
+        st.divider()
+        c1, c2, c3 = st.columns(3)
+        c1.metric("The lap as driven", f"{actual:.3f}s")
+        c2.metric("What the changes are worth", f"{moved:+.3f}s")
+        c3.metric("The lap it would have been", f"{actual + moved:.3f}s")
+
+        chart = cf.delta_chart(parts)
+        if chart is not None:
+            st.plotly_chart(chart, width="stretch",
+                            key=f"cf_{session_key}_{lap_number}_{focus}")
+        else:
+            st.info("Nothing has been changed yet. Move a control above, or "
+                    "press the button, to see what it would have been worth.")
+
+        for group, title in (("choice", "Choices, before and after"),
+                             ("condition", "Conditions, before and after")):
+            st.markdown(f"**{title}**")
+            st.dataframe(
+                cf.before_after(parts, group), hide_index=True,
+                width="stretch",
+                column_config={
+                    "Effect (s)": st.column_config.NumberColumn(
+                        format="%+.4f"),
+                    "Changed": st.column_config.CheckboxColumn(),
+                })
+
+        blocked3 = lf.blocked(lap3, lf.reference(int(session_key)))
+        resid_note = ""
+        if not blocked3:
+            coefs3 = lf.coefficients()
+            teams3 = sorted(laps.team_name.dropna().unique())
+            t3 = lf.summarise(lap3, lf.decompose(lap3, coefs3,
+                                                 lf.reference(int(session_key)),
+                                                 teams3),
+                              coefs3, lf.reference(int(session_key)), teams3)
+            resid_note = (
+                f" On this lap that unexplained part is "
+                f"{t3['unexplained']:+.3f}s, which is "
+                f"{abs(t3['unexplained'] / moved):.0f} times the "
+                f"{abs(moved):.3f}s above."
+                if abs(moved) > 1e-6 else
+                f" On this lap that unexplained part is "
+                f"{t3['unexplained']:+.3f}s.")
+
+        st.warning(
+            "**This is the real lap with the changes added to it, not a lap "
+            "rebuilt from scratch.** Everything the model cannot explain, "
+            "which is 76% of why laps differ, travels with the lap unchanged."
+            + resid_note
+        )
 
 render_footer()
