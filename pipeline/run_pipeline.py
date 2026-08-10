@@ -51,6 +51,7 @@ from __future__ import annotations
 
 import argparse
 import re
+import sqlite3
 import subprocess
 import sys
 import time
@@ -58,7 +59,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from config import LOGS_DIR  # noqa: E402
+from config import BRONZE_DB_PATH, DB_PATH, LOGS_DIR  # noqa: E402
 
 PIPELINE_DIR = Path(__file__).resolve().parent
 PYTHON = sys.executable
@@ -116,6 +117,58 @@ def rows_inserted(stdout: str) -> int:
     return int(m.group(1).replace(",", "")) if m else 0
 
 
+def stale_tables() -> list[str]:
+    """
+    Tables where bronze has grown since silver was last built from it.
+
+    Why this is not just `rows_inserted() > 0`. That number counts per-session
+    endpoint fetches only. The global tables (meetings, sessions, drivers) are
+    refreshed by full replace and never appear in it, so a change to the F1
+    calendar grows bronze while ingest truthfully reports zero new rows, and the
+    rebuild is skipped.
+
+    Found 2026-08-10, on the first real run after the gate learned to detect
+    this: OpenF1 published the 2026 Bahrain Grand Prix and its five sessions,
+    bronze took them, ingest reported 'new rows: 0', silver was left behind, and
+    the gate stopped the pipeline. The same blind spot also covers anything
+    s01_backfill.py writes, since it is not a pipeline step at all.
+
+    Reads the state s02_build_silver records rather than parsing stdout, so it
+    cannot be fooled by a step choosing not to mention something.
+    """
+    if not (DB_PATH.exists() and BRONZE_DB_PATH.exists()):
+        return []
+
+    con = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
+    try:
+        exists = con.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' "
+            "AND name='_silver_build_state'").fetchone()
+        if not exists:
+            # Never recorded, so nothing can be compared. The gate says so too.
+            return []
+
+        con.execute("ATTACH DATABASE ? AS bronze",
+                    (f"file:{BRONZE_DB_PATH.as_posix()}?mode=ro",))
+        behind = []
+        for name, at_build in con.execute(
+                "SELECT table_name, bronze_rows FROM _silver_build_state"):
+            try:
+                now = con.execute(
+                    f'SELECT COUNT(*) FROM bronze."{name}"').fetchone()[0]
+            except sqlite3.Error:
+                continue
+            if now > at_build:
+                behind.append(name)
+        return sorted(behind)
+    except sqlite3.Error:
+        # A rebuild decision is not worth crashing the run over. The gate checks
+        # the same thing and will fail loudly if this returned the wrong answer.
+        return []
+    finally:
+        con.close()
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="Run the F1 Reality Check pipeline.")
     ap.add_argument("--execute", action="store_true",
@@ -156,7 +209,15 @@ def main() -> int:
         runner.log(f"\nnew rows: {new_rows:,}")
 
     # --- 2 & 3. rebuild --------------------------------------------------------
-    should_rebuild = args.execute and (new_rows > 0 or args.force_rebuild)
+    # Two independent triggers. `new_rows` catches per-session fetches; `stale`
+    # catches everything that never passes through that counter, which is the
+    # global tables and anything s01_backfill.py wrote straight into bronze.
+    stale = stale_tables() if args.execute else []
+    if stale:
+        runner.log(f"\nSilver is behind bronze for: {', '.join(stale)}")
+        runner.log("Rebuilding, even though ingest reported no new rows.")
+
+    should_rebuild = args.execute and (new_rows > 0 or args.force_rebuild or stale)
 
     if not should_rebuild:
         reason = "dry run" if not args.execute else "no new data"

@@ -522,6 +522,33 @@ rate-limit headers, so the ceiling cannot be read in advance. A **429 does** car
 byte-identical to the real "no data" answer, which is why only endpoints on a known list
 are allowed a terminal verdict.
 
+### 46. A calendar change grows bronze while ingest truthfully reports zero new rows
+*Found 2026-08-10*
+
+`s01_ingest.py` refreshes the global tables (`meetings`, `sessions`, `drivers`) by **full
+replace**, and those rows are not counted in the `rows inserted:` figure it prints, which
+tracks per-session endpoint fetches only. `run_pipeline.py` used that figure alone to
+decide whether to rebuild silver.
+
+So when the F1 calendar changes, bronze takes the new rows, ingest correctly reports
+`new rows: 0`, and silver is never rebuilt. If the new sessions are in the future there is
+nothing to fetch for them either, so no other counter moves.
+
+Caught on the first real run after gate check [20] was added. OpenF1 published meeting
+1308, the 2026 Bahrain Grand Prix, with five sessions on 2 to 4 October. Bronze went to
+101 meetings and 495 sessions, silver stayed at 100 and 490, and the gate stopped the
+pipeline before the serving layers could be built on the mismatch.
+
+**Resolution:** `run_pipeline.py` now has a second, independent rebuild trigger. Alongside
+`rows_inserted()` it calls `stale_tables()`, which compares bronze against
+`_silver_build_state` and rebuilds when bronze is ahead. This also covers anything
+`s01_backfill.py` wrote, per entry 44, since that never passes through the ingest counter
+either.
+
+The general lesson, and it is the third time this project has hit it: **a step reporting
+"nothing happened" is not evidence that nothing happened.** Prefer comparing recorded
+state over parsing what a step chose to say about itself.
+
 
 ## Open questions
 
