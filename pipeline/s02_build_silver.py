@@ -583,6 +583,41 @@ def count(con: sqlite3.Connection, table: str, schema: str = "main"):
         return None
 
 
+def record_build_state(con: sqlite3.Connection, name: str,
+                       bronze_rows: int, silver_rows: int) -> None:
+    """
+    Record how much bronze this silver table was built from.
+
+    Why this exists. s01_backfill.py writes straight into bronze and is not a
+    pipeline step, so run_pipeline never learns that anything arrived: it decides
+    whether to rebuild from the row count s01_ingest prints. A backfill therefore
+    leaves silver silently behind bronze until somebody thinks to pass
+    --force-rebuild.
+
+    That is not hypothetical. On 2026-07-27 a backfill recovered 324,207 rows
+    into bronze, the diagnostic notebooks were then run against a silver that did
+    not contain them, and nothing anywhere reported a problem.
+
+    Storing the bronze count at build time turns that into something the gate can
+    check: if bronze holds more rows now than when silver was last built from it,
+    silver is stale, and it can say so by name.
+    """
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS _silver_build_state (
+            table_name   TEXT PRIMARY KEY,
+            bronze_rows  INTEGER NOT NULL,
+            silver_rows  INTEGER NOT NULL,
+            built_at     TEXT    NOT NULL
+        )
+    """)
+    con.execute("""
+        INSERT OR REPLACE INTO _silver_build_state
+            (table_name, bronze_rows, silver_rows, built_at)
+        VALUES (?, ?, ?, datetime('now'))
+    """, (name, bronze_rows, silver_rows))
+    con.commit()
+
+
 def build_table(con: sqlite3.Connection, name: str) -> tuple[bool, str]:
     """Runs one table's statements inside a transaction. Returns (ok, message)."""
     silver = f"silver_{name}"
@@ -603,6 +638,8 @@ def build_table(con: sqlite3.Connection, name: str) -> tuple[bool, str]:
         return False, f"{type(exc).__name__}: {exc}"
 
     after = count(con, silver)
+    # After the commit, so a rolled-back build never claims to have happened.
+    record_build_state(con, name, bronze, after)
     elapsed = time.time() - started
 
     delta = "" if before is None else f"  ({after - before:+,})"

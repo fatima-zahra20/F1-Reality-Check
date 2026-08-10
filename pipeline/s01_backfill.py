@@ -31,8 +31,14 @@ Usage
     python pipeline\\s01_backfill.py --execute        # actually re-fetch
     python pipeline\\s01_backfill.py --execute --sessions 11326 11334 11342
     python pipeline\\s01_backfill.py --execute --include-optional
+    python pipeline\\s01_backfill.py --execute --recheck-empty --include-optional
 
 After running, rebuild the affected silver tables and re-run the gate.
+
+--recheck-empty is worth an occasional run rather than a routine one. OpenF1
+backfills, so a confirmed absence can stop being one: the 2023 Belgian qualifying
+classification was recorded empty on a 404 in July 2026 and returned 20 rows when
+asked again in August.
 """
 
 from __future__ import annotations
@@ -41,6 +47,7 @@ import argparse
 import sqlite3
 import sys
 import time
+from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -52,6 +59,26 @@ from config import DB_PATH, BRONZE_DB_PATH  # noqa: E402
 BASE_URL = "https://api.openf1.org/v1"
 REQUEST_DELAY = 1.0          # seconds between calls, matching the original script
 RETRIES = 3
+
+# Rate limiting gets its own, far larger budget, and does NOT consume an
+# ordinary retry. A 429 is not an error: the request was well formed and will
+# succeed once we wait. Spending the 3-attempt budget on it converts a solvable
+# pause into a recorded failure, and under a sustained throttle that is every
+# pair in the plan.
+#
+# Measured 2026-08-10. A successful response carries no RateLimit headers, so the
+# ceiling cannot be read ahead of time and the ladder below is a conservative
+# guess. A 429 response, however, DOES carry Retry-After, and OpenF1 asks for 60
+# seconds: observed twice during an 81-pair recheck run, both honoured, both
+# succeeding on the retry. The old code would have slept 1s, 2s and 4s, then
+# recorded both as permanent failures.
+RATE_LIMIT_RETRIES = 6
+RATE_LIMIT_BACKOFF = [5, 15, 30, 60, 120, 300]
+RATE_LIMIT_MAX_WAIT = 300    # refuse to honour a Retry-After longer than this
+
+# Raised when the API throttles us, and kept raised for the rest of the run.
+# Dropping straight back to full speed after a pause just earns another pause.
+_delay = REQUEST_DELAY
 
 # Endpoints that should return rows for essentially any session that ran.
 CORE_ENDPOINTS = ["laps", "position", "weather", "race_control", "stints"]
@@ -68,6 +95,23 @@ OPTIONAL_ENDPOINTS = ["pit", "team_radio"]
 # where session_name is 'Day 1' / 'Day 2' / 'Day 3'.
 RESULT_ENDPOINT = "session_result"
 
+# Large enough to need per-driver paging. Declared here rather than beside
+# run_telemetry so KNOWN_ENDPOINTS below can see them.
+TELEMETRY_ENDPOINTS = ["location", "car_data"]
+
+# Every endpoint this script is allowed to conclude anything about.
+#
+# This exists because of an ambiguity in the API, confirmed 2026-08-10: a
+# MISSPELLED endpoint returns HTTP 404 with the body {"detail":"No results
+# found."}, which is byte for byte what a valid endpoint returns when it
+# genuinely holds no data. Since 'empty' is recorded as terminal and never
+# retried, a single typo would permanently write off real data with no error
+# anywhere. Only a recognised endpoint may be marked empty.
+KNOWN_ENDPOINTS = set(
+    CORE_ENDPOINTS + RACE_ONLY + QUALI_ONLY + OPTIONAL_ENDPOINTS
+    + TELEMETRY_ENDPOINTS + [RESULT_ENDPOINT]
+)
+
 RACE_SESSION_NAMES = {"Race", "Sprint"}
 QUALI_SESSION_NAMES = {"Qualifying", "Sprint Qualifying", "Sprint Shootout"}
 
@@ -82,6 +126,16 @@ def ensure_status_columns(con: sqlite3.Connection) -> None:
     empty response from a failed fetch, so failures were permanently cached as
     complete.
     """
+    # PRAGMA on a table that does not exist returns nothing rather than raising,
+    # so without this the ALTER TABLE below fails with a message that says
+    # nothing about the real cause.
+    if not con.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
+                       "AND name='_ingestion_progress'").fetchone():
+        raise RuntimeError(
+            "_ingestion_progress is missing from bronze. It is created by "
+            "openf1_ingestion.py; this script only ever amends it."
+        )
+
     existing = {r[1] for r in con.execute("PRAGMA table_info(_ingestion_progress)")}
     for col, decl in [
         ("status", "TEXT"),          # 'ok' | 'empty' | 'failed'
@@ -131,37 +185,110 @@ def ensure_progress_key(con: sqlite3.Connection) -> None:
 
 # --- HTTP ------------------------------------------------------------------------
 
+def retry_after_seconds(resp, pauses: int) -> float:
+    """
+    How long to wait after a 429.
+
+    Prefers the server's own Retry-After: it knows its window and we are only
+    guessing. Capped, because a header asking for an hour should be treated as a
+    reason to stop rather than something to sleep through. Falls back to a fixed
+    ladder, which is what actually happens today since OpenF1 sends no such
+    header.
+    """
+    raw = resp.headers.get("Retry-After")
+    if raw:
+        try:
+            # Delay-seconds is the common form. The HTTP-date form is also legal,
+            # but parsing it speculatively for an API that sends neither would be
+            # untested code on a path that never runs.
+            return max(0.0, min(float(raw.strip()), RATE_LIMIT_MAX_WAIT))
+        except ValueError:
+            print(f"      unparseable Retry-After: {raw!r}, using the ladder")
+    return RATE_LIMIT_BACKOFF[min(pauses, len(RATE_LIMIT_BACKOFF) - 1)]
+
+
 def fetch(endpoint: str, params: dict):
     """
     Returns (rows, status, http_status).
 
-    status is 'ok' when rows came back, 'empty' when the API answered 200 with
-    nothing, and 'failed' when we never got a usable answer. The original script
-    collapsed all three into [].
+    status is one of:
+      'ok'         rows came back
+      'empty'      a definitive "there is nothing here"
+      'too_large'  the request must be split per driver (HTTP 422)
+      'failed'     no usable answer, so nothing is concluded and it stays queued
+
+    The original script collapsed all four into [], which is the bug that let a
+    transient failure be cached forever as "complete".
     """
+    global _delay
     url = f"{BASE_URL}/{endpoint}"
     last_code = None
+    attempt = 0
+    pauses = 0
 
-    for attempt in range(RETRIES):
+    # A while loop rather than `for attempt in range(RETRIES)` so a rate-limit
+    # pause can continue without burning an attempt.
+    while attempt < RETRIES:
         try:
             resp = requests.get(url, params=params, timeout=60)
             last_code = resp.status_code
+
+            # Checked before raise_for_status, because 429 must not be treated as
+            # an error. It is the API telling us to slow down, and the correct
+            # response is to obey and try the same request again.
+            if resp.status_code == 429:
+                if pauses >= RATE_LIMIT_RETRIES:
+                    print(f"      still rate limited after {pauses} pauses, "
+                          "giving up on this pair (it stays queued)")
+                    return [], "failed", 429
+                wait = retry_after_seconds(resp, pauses)
+                pauses += 1
+                # Permanently slower for the rest of the run. Returning to full
+                # speed right after a throttle just earns the next throttle.
+                _delay = min(_delay * 1.5, 5.0)
+                print(f"      HTTP 429 rate limited, waiting {wait:.0f}s "
+                      f"(pause {pauses}/{RATE_LIMIT_RETRIES}, "
+                      f"base delay now {_delay:.1f}s)")
+                time.sleep(wait)
+                continue
+
             resp.raise_for_status()
             data = resp.json()
-            time.sleep(REQUEST_DELAY)
+            time.sleep(_delay)
+
+            # Every data endpoint answers with a JSON array. Anything else is a
+            # shape we do not understand, and insert_rows would crash on it, so
+            # it is a failure rather than something to write.
+            if not isinstance(data, list):
+                print(f"      unexpected response shape: {type(data).__name__}")
+                return [], "failed", last_code
+
             return data, ("ok" if data else "empty"), last_code
 
         except requests.exceptions.Timeout:
-            print(f"      timeout (attempt {attempt + 1}/{RETRIES})")
-            time.sleep(2 ** attempt)
+            attempt += 1
+            print(f"      timeout (attempt {attempt}/{RETRIES})")
+            if attempt < RETRIES:
+                time.sleep(2 ** attempt)
 
         except requests.exceptions.HTTPError as exc:
             code = exc.response.status_code
             last_code = code
-            print(f"      HTTP {code} (attempt {attempt + 1}/{RETRIES})")
-            # 404 is a definitive answer: this resource does not exist.
+
+            # 404 is OpenF1's genuine "no data" answer: body is
+            # {"detail":"No results found."}. Verified 2026-08-10 against six
+            # races with no pit stops and four with no radio.
+            #
+            # But see KNOWN_ENDPOINTS: a misspelled endpoint is indistinguishable
+            # from it, and 'empty' is terminal, so only a recognised endpoint
+            # earns that verdict.
             if code == 404:
+                if endpoint not in KNOWN_ENDPOINTS:
+                    print(f"      HTTP 404 on unrecognised endpoint "
+                          f"{endpoint!r}: refusing to record this as empty")
+                    return [], "failed", code
                 return [], "empty", code
+
             # 422 is also definitive, and it does not mean "no data". OpenF1
             # answers "you're likely asking for too much data at once" when a
             # whole-session telemetry request would be too large. Retrying is
@@ -169,11 +296,17 @@ def fetch(endpoint: str, params: dict):
             # status so the caller can page instead of giving up.
             if code == 422:
                 return [], "too_large", code
-            time.sleep(2 ** attempt)
+
+            attempt += 1
+            print(f"      HTTP {code} (attempt {attempt}/{RETRIES})")
+            if attempt < RETRIES:
+                time.sleep(2 ** attempt)
 
         except requests.exceptions.RequestException as exc:
-            print(f"      request error: {exc}")
-            time.sleep(2 ** attempt)
+            attempt += 1
+            print(f"      request error: {exc} (attempt {attempt}/{RETRIES})")
+            if attempt < RETRIES:
+                time.sleep(2 ** attempt)
 
     return [], "failed", last_code
 
@@ -323,12 +456,23 @@ def expected_endpoints(session_name: str, include_optional: bool) -> list[str]:
     return eps
 
 
-def build_plan(con, only_sessions=None, include_optional=False):
+def build_plan(con, only_sessions=None, include_optional=False,
+               recheck_empty=False):
     """
     Returns a list of (session_key, session_name, meeting_name, endpoint) to retry.
 
     A pair qualifies when it has rows_inserted = 0 for a session that was not
-    cancelled and whose start time is in the past — i.e. data should exist.
+    cancelled and whose start time is in the past, i.e. data should exist.
+
+    recheck_empty re-queries pairs already recorded as a definitive 'empty'.
+
+    That verdict is normally terminal, and for good reason: without it every run
+    re-asks the API about data that does not exist. But 'empty' means "OpenF1 had
+    nothing on the day we asked", and OpenF1 backfills. Found 2026-08-10: the
+    2023 Belgian Grand Prix qualifying classification was recorded empty on a 404
+    in July 2026 and now returns 20 rows. Terminal-forever silently locks in
+    whatever was missing upstream at first contact, so there has to be a way to
+    ask again.
     """
     now = datetime.now(timezone.utc).isoformat()
 
@@ -360,18 +504,20 @@ def build_plan(con, only_sessions=None, include_optional=False):
 
             # Retry only when no definitive answer was ever recorded: never
             # attempted, a legacy row with no status, or an explicit failure.
-            # A confirmed 'empty' is a real answer and is not re-queried.
+            # A confirmed 'empty' is a real answer and is not re-queried unless
+            # asked for, since re-asking it on every run is pure waste.
             if row is None:
                 plan.append((session_key, session_name, meeting_name, endpoint))
             elif row[0] == 0 and (row[1] is None or row[1] == "failed"):
+                plan.append((session_key, session_name, meeting_name, endpoint))
+            elif recheck_empty and row[0] == 0 and row[1] == "empty":
                 plan.append((session_key, session_name, meeting_name, endpoint))
 
     return plan
 
 
 # --- telemetry -------------------------------------------------------------------
-
-TELEMETRY_ENDPOINTS = ["location", "car_data"]
+# TELEMETRY_ENDPOINTS is declared with the other endpoint constants at the top.
 
 
 def run_telemetry(con, sessions, execute: bool) -> int:
@@ -462,6 +608,10 @@ def main() -> int:
                     help="restrict to specific session_keys")
     ap.add_argument("--include-optional", action="store_true",
                     help="also retry pit and team_radio, which are often legitimately empty")
+    ap.add_argument("--recheck-empty", action="store_true",
+                    help="re-ask about pairs already recorded as definitively "
+                         "empty. OpenF1 backfills its own data, so an absence "
+                         "confirmed months ago may no longer be one.")
     ap.add_argument("--telemetry", action="store_true",
                     help="fetch car_data and location for --sessions, paging "
                          "per driver. These are large: roughly 37k location "
@@ -486,7 +636,8 @@ def main() -> int:
     if args.telemetry:
         return run_telemetry(con, args.sessions, args.execute)
 
-    plan = build_plan(con, args.sessions, args.include_optional)
+    plan = build_plan(con, args.sessions, args.include_optional,
+                      args.recheck_empty)
 
     if not plan:
         print("Nothing to backfill.")
@@ -524,24 +675,38 @@ def main() -> int:
     print("EXECUTING")
     print("=" * 74)
 
-    counts = {"ok": 0, "empty": 0, "failed": 0}
+    # defaultdict rather than a fixed set of keys. The fixed version raised
+    # KeyError on any status it had not been told about, which turned an
+    # already-handled 422 into a crash that abandoned the rest of the plan.
+    counts: dict[str, int] = defaultdict(int)
     total_rows = 0
 
     for i, (session_key, session_name, meeting_name, endpoint) in enumerate(plan, 1):
         print(f"[{i}/{len(plan)}] {meeting_name} / {session_name} "
               f"(sk={session_key}) -> {endpoint}")
 
-        rows, status, http_status = fetch(endpoint, {"session_key": session_key})
+        # fetch_session rather than fetch, so a 422 pages per driver instead of
+        # escaping as a status this loop cannot account for.
+        drivers = session_drivers(con, session_key)
+        rows, status, http_status, calls = fetch_session(
+            endpoint, session_key, drivers)
 
         n = 0
         if status == "ok":
+            # Cleared first because insert_rows issues a plain INSERT. The pair
+            # is normally empty, but a progress row lost to the 2026-07-28 split
+            # can queue a pair that already holds rows, and inserting on top of
+            # those would silently double them.
+            removed = clear_session(con, endpoint, session_key)
             n = insert_rows(con, endpoint, rows)
             total_rows += n
-            print(f"      inserted {n:,} rows")
+            print(f"      inserted {n:,} rows"
+                  + (f" in {calls} calls" if calls > 1 else "")
+                  + (f", replaced {removed:,}" if removed else ""))
         elif status == "empty":
             print("      empty response (API has no data for this pair)")
         else:
-            print("      FAILED — left unmarked so a later run retries it")
+            print("      FAILED, left unmarked so a later run retries it")
 
         counts[status] += 1
 
@@ -553,8 +718,10 @@ def main() -> int:
     con.close()
 
     print("\n" + "=" * 74)
-    print(f"ok: {counts['ok']}  |  empty: {counts['empty']}  |  failed: {counts['failed']}")
+    print("  ".join(f"{k}: {v}" for k, v in sorted(counts.items())) or "nothing run")
     print(f"rows inserted: {total_rows:,}")
+    if _delay != REQUEST_DELAY:
+        print(f"note: the API throttled this run; delay ended at {_delay:.1f}s")
     print("=" * 74)
     print("\nNext: rebuild the affected silver tables, then run pipeline\\s03_verify.py")
 

@@ -20,13 +20,15 @@ Run:  python pipeline\\s03_verify.py       (from project root)
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 # Make `import config` work regardless of the current working directory.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from config import DB_PATH  # noqa: E402
+from config import BRONZE_DB_PATH, DB_PATH, OUTPUTS_DIR  # noqa: E402
 
 # --- expected silver tables (18) -------------------------------------------------
 EXPECTED_TABLES = [
@@ -53,11 +55,70 @@ REQUIRED_SPLIT_COLUMNS = {
     ],
 }
 
+# --- per-endpoint coverage -------------------------------------------------------
+# The gap this closes: every check above asks either "is this table empty overall"
+# or "do completed races have laps and results". Neither can see an endpoint that
+# vanished for a subset of sessions, which is exactly what a swallowed 404 or a
+# throttled backfill produces. The gate once passed clean while races had no pit
+# data at all.
+
+RACE_SESSION_NAMES = {"Race", "Sprint"}
+QUALI_SESSION_NAMES = {"Qualifying", "Sprint Qualifying", "Sprint Shootout"}
+
+ANY, RACE, QUALI, COMPETITIVE = "any", "race", "quali", "competitive"
+
+# Which session kinds should hold rows for each endpoint-backed table.
+ENDPOINT_SCOPE = {
+    "silver_laps": ANY,
+    "silver_position": ANY,
+    "silver_weather": ANY,
+    "silver_race_control": ANY,
+    "silver_stints": ANY,
+    "silver_intervals": RACE,
+    "silver_overtakes": RACE,
+    "silver_starting_grid": QUALI,
+    "silver_session_result": COMPETITIVE,
+    "silver_pit": RACE,
+    "silver_team_radio": ANY,
+}
+
+# Tiers, measured 2026-08-10 across 420 completed non-cancelled sessions.
+#
+# These come from what the data actually looks like, not from what would be
+# tidy. A gate that fails on a gap which has always been there is a gate people
+# learn to ignore, and a gate that never fails is decoration. So the absolute
+# thresholds are set where they hold today, and check_coverage_snapshot below is
+# what catches movement.
+#
+#   STRICT   complete today, and structurally must be. Any gap is an ingestion
+#            failure, so FAIL.
+#   RAGGED   legitimately absent upstream. Verified 2026-08-10 by asking the API
+#            directly: the races with no pit rows and the sessions with no radio
+#            answer 404 {"detail":"No results found."}, so the data does not
+#            exist rather than having been missed. INFO only.
+#   anything else  near-universal with a small known residue, so WARN with the
+#            count and leave the judgement to a human.
+STRICT_COVERAGE = {
+    "silver_position", "silver_weather", "silver_race_control",
+    "silver_stints", "silver_intervals", "silver_overtakes",
+}
+RAGGED_COVERAGE = {"silver_pit", "silver_team_radio"}
+
+SNAPSHOT_PATH = OUTPUTS_DIR / "coverage_snapshot.json"
+
+# A null rate has to move by more than this before it is worth a line of output.
+# Below it, ordinary week-to-week churn would bury a real signal in noise.
+NULL_DRIFT_THRESHOLD = 0.02
+
+
 class Report:
     def __init__(self) -> None:
         self.fails: list[str] = []
         self.warns: list[str] = []
         self.infos: list[str] = []
+        # Held rather than written immediately: see main(). Baking a regressed
+        # state into the baseline would hide the regression on the next run.
+        self.snapshot: dict | None = None
 
     def fail(self, msg: str) -> None:
         self.fails.append(msg)
@@ -379,8 +440,29 @@ def check_null_team_name(con, rep: Report) -> None:
     n = q1(con, "SELECT COUNT(*) FROM silver_drivers WHERE team_name IS NULL")
     if not n:
         rep.ok("no NULL team_name rows")
+        return
+
+    # Counted per session, not per row. The old message reported 14 rows against
+    # "1 session known" and read as though the problem had grown thirteenfold,
+    # when all 14 are the same documented session (verified 2026-08-10).
+    sessions = con.execute("""
+        SELECT s.year, m.meeting_name, s.session_name, COUNT(*)
+        FROM silver_drivers d
+        JOIN silver_sessions s ON s.session_key = d.session_key
+        JOIN silver_meetings m ON m.meeting_key = s.meeting_key
+        WHERE d.team_name IS NULL
+        GROUP BY d.session_key ORDER BY s.date_start
+    """).fetchall()
+
+    if len(sessions) == 1:
+        year, meeting, sname, rows = sessions[0]
+        rep.warn(f"{n} rows with NULL team_name, all in the 1 known session "
+                 f"({year} {meeting} / {sname})")
     else:
-        rep.warn(f"{n} rows with NULL team_name (1 session known — investigate if higher)")
+        rep.warn(f"{n} rows with NULL team_name across {len(sessions)} sessions "
+                 "(1 known) — investigate the rest")
+        for year, meeting, sname, rows in sessions:
+            rep.warn(f"    {year} {meeting} / {sname}: {rows} rows")
 
 
 def check_temporal_coverage(con, rep: Report) -> None:
@@ -428,6 +510,297 @@ def check_cadillac_exclusion(con, rep: Report) -> None:
     rep.info(f"Cadillac has {races} completed races, all in 2026 (test period only)")
     rep.info("excluded from the model: no 2023-25 history, trailing features undefined")
 
+def completed_sessions(con) -> list[tuple]:
+    """
+    Sessions that ran, were not cancelled, and are old enough to have published.
+
+    The 3-day grace matches check_completed_races_have_data: without it, a race
+    that ran this weekend is reported as a coverage gap every Monday.
+    """
+    return con.execute("""
+        SELECT s.session_key, s.year, s.session_name, m.meeting_name
+        FROM silver_sessions s
+        JOIN silver_meetings m ON m.meeting_key = s.meeting_key
+        WHERE s.is_cancelled = 0
+          AND s.date_start < datetime('now', '-3 days')
+        ORDER BY s.date_start
+    """).fetchall()
+
+
+def in_scope(scope: str, session_name: str) -> bool:
+    if scope == ANY:
+        return True
+    if scope == RACE:
+        return session_name in RACE_SESSION_NAMES
+    if scope == QUALI:
+        return session_name in QUALI_SESSION_NAMES
+    if scope == COMPETITIVE:
+        # Pre-season testing days produce no classification.
+        return not session_name.startswith("Day ")
+    raise ValueError(f"unknown scope {scope!r}")
+
+
+def null_fractions(con, table: str) -> dict[str, float]:
+    """
+    Fraction of NULLs per column, in one pass.
+
+    Costs roughly 6 to 8 seconds across all of silver, which is proportionate
+    for something that runs once per pipeline run and would otherwise let a
+    column quietly empty itself between rebuilds.
+    """
+    cols = columns_of(con, table)
+    if not cols:
+        return {}
+    expr = ", ".join(f'SUM("{c}" IS NULL)' for c in cols)
+    row = con.execute(f'SELECT COUNT(*), {expr} FROM "{table}"').fetchone()
+    total = row[0]
+    if not total:
+        return {c: 1.0 for c in cols}
+    # Rounded so float noise cannot manufacture a diff.
+    return {c: round(row[i + 1] / total, 4) for i, c in enumerate(cols)}
+
+
+def check_endpoint_coverage(con, rep: Report) -> None:
+    print("\n[18] Per-endpoint coverage — in-scope sessions holding zero rows")
+    if not table_exists(con, "silver_sessions"):
+        return
+
+    sessions = completed_sessions(con)
+    rep.info(f"completed, non-cancelled sessions in scope: {len(sessions)}")
+
+    for table, scope in ENDPOINT_SCOPE.items():
+        if not table_exists(con, table):
+            rep.fail(f"{table} missing entirely")
+            continue
+
+        have = {r[0] for r in con.execute(
+            f'SELECT DISTINCT session_key FROM "{table}"')}
+        scoped = [s for s in sessions if in_scope(scope, s[2])]
+        missing = [s for s in scoped if s[0] not in have]
+
+        if not missing:
+            rep.ok(f"{table:24s} {len(scoped):>4} in scope, all present")
+            continue
+
+        years: dict[int, int] = {}
+        kinds: dict[str, int] = {}
+        for _, year, name, _ in missing:
+            years[year] = years.get(year, 0) + 1
+            kinds[name] = kinds.get(name, 0) + 1
+        detail = (f"{len(missing)} of {len(scoped)} {scope} sessions have no rows"
+                  f" | by year {dict(sorted(years.items()))}"
+                  f" | by kind {dict(sorted(kinds.items(), key=lambda kv: -kv[1]))}")
+
+        if table in STRICT_COVERAGE:
+            rep.fail(f"{table}: {detail}")
+            for _, year, name, meeting in missing[:8]:
+                rep.fail(f"    {year} {meeting} / {name}")
+        elif table in RAGGED_COVERAGE:
+            rep.info(f"{table}: {detail} (absent upstream, not a fetch failure)")
+        else:
+            rep.warn(f"{table}: {detail}")
+            for _, year, name, meeting in missing[:8]:
+                rep.warn(f"    {year} {meeting} / {name}")
+
+
+def check_silver_matches_bronze(con, rep: Report) -> None:
+    """
+    Is silver actually built from the bronze that exists now?
+
+    The failure this catches is invisible by every other measure. s01_backfill.py
+    writes into bronze and is not a pipeline step, so run_pipeline never sees the
+    new rows: it decides whether to rebuild from what s01_ingest reports. Silver
+    then sits behind bronze, every table is present, every key is unique, every
+    invariant here passes, and the numbers are simply built on less data than the
+    project holds.
+
+    It has happened once already. A backfill on 2026-07-27 recovered 324,207 rows
+    into bronze; the diagnostic notebooks were run against a silver without them
+    and their stored conclusions drifted from the dashboard's.
+
+    Comparing row counts directly would not work, because the silver build types,
+    dedupes and filters, so silver is legitimately smaller by a ratio nobody has
+    written down. Instead s02_build_silver records the bronze count it read, and
+    this compares that against bronze now. Equal means current. Larger means a
+    rebuild is owed.
+    """
+    print("\n[20] Silver is built from the bronze that exists now")
+
+    if not BRONZE_DB_PATH.exists():
+        rep.info(f"bronze not found at {BRONZE_DB_PATH.name}; skipping")
+        return
+
+    if not table_exists(con, "_silver_build_state"):
+        rep.info("no build state recorded yet. Run pipeline\\s02_build_silver.py "
+                 "once to establish the baseline; until then a silver lagging "
+                 "bronze cannot be detected.")
+        return
+
+    try:
+        con.execute("ATTACH DATABASE ? AS bronze",
+                    (f"file:{BRONZE_DB_PATH.as_posix()}?mode=ro",))
+    except sqlite3.Error as exc:
+        rep.warn(f"could not attach bronze ({exc}); skipping the staleness check")
+        return
+
+    try:
+        recorded = con.execute("""
+            SELECT table_name, bronze_rows, silver_rows, built_at
+            FROM _silver_build_state ORDER BY table_name
+        """).fetchall()
+
+        stale = []
+        for name, bronze_at_build, silver_rows, built_at in recorded:
+            try:
+                now = con.execute(
+                    f'SELECT COUNT(*) FROM bronze."{name}"').fetchone()[0]
+            except sqlite3.Error:
+                rep.warn(f"{name}: recorded in build state but not in bronze")
+                continue
+
+            if now > bronze_at_build:
+                stale.append((name, bronze_at_build, now))
+                rep.fail(
+                    f"{name}: bronze has {now:,} rows, silver was built from "
+                    f"{bronze_at_build:,} ({now - bronze_at_build:+,}), "
+                    f"last built {built_at}"
+                )
+            elif now < bronze_at_build:
+                # Bronze does not normally shrink. Worth seeing, but it does not
+                # mean silver is missing anything.
+                rep.warn(f"{name}: bronze has {now:,} rows but silver was built "
+                         f"from {bronze_at_build:,}; did bronze get pruned?")
+
+        if stale:
+            rep.fail("silver is behind bronze. Rebuild with: "
+                     "python pipeline\\s02_build_silver.py --tables "
+                     + " ".join(n for n, _, _ in stale))
+        else:
+            rep.ok(f"all {len(recorded)} recorded tables match bronze")
+
+        # A table that has never been recorded is a blind spot, not a failure:
+        # it simply has not been rebuilt since this check was introduced.
+        known = {r[0] for r in recorded}
+        missing = sorted(t for t in EXPECTED_TABLES
+                         if t.removeprefix("silver_") not in known)
+        if missing:
+            rep.info(f"{len(missing)} table(s) have no build state yet: "
+                     + ", ".join(m.removeprefix('silver_') for m in missing))
+    finally:
+        con.execute("DETACH DATABASE bronze")
+
+
+def check_coverage_snapshot(con, rep: Report) -> None:
+    """
+    Compare this run's coverage and null rates against the previous run's.
+
+    This is the part that survives the calendar growing. An absolute threshold
+    rots: every new season shifts it, so it gets raised until it means nothing.
+    A diff does not, because the question it asks is "did something that used to
+    have data stop having data", and the answer is unambiguous.
+
+    Written by main() only when nothing failed, so a bad run cannot become the
+    baseline that hides itself next time.
+    """
+    print("\n[19] Coverage and null snapshot, diffed against the previous run")
+
+    sessions = completed_sessions(con)
+    tables: dict[str, dict] = {}
+    for table in sorted(set(EXPECTED_TABLES + DERIVED_TABLES)):
+        if not table_exists(con, table):
+            continue
+        entry: dict = {
+            "rows": q1(con, f'SELECT COUNT(*) FROM "{table}"'),
+            "nulls": null_fractions(con, table),
+        }
+        scope = ENDPOINT_SCOPE.get(table)
+        if scope:
+            have = {r[0] for r in con.execute(
+                f'SELECT DISTINCT session_key FROM "{table}"')}
+            scoped = [s for s in sessions if in_scope(scope, s[2])]
+            entry["scope"] = scope
+            entry["in_scope"] = len(scoped)
+            entry["missing_sessions"] = sum(
+                1 for s in scoped if s[0] not in have)
+        tables[table] = entry
+
+    payload = {
+        "written_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "sessions_in_scope": len(sessions),
+        "tables": tables,
+    }
+    rep.snapshot = payload
+
+    if not SNAPSHOT_PATH.exists():
+        rep.info(f"no previous snapshot at {SNAPSHOT_PATH.name}; "
+                 "this run becomes the baseline")
+        return
+
+    try:
+        previous = json.loads(SNAPSHOT_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        rep.warn(f"previous snapshot unreadable ({type(exc).__name__}), "
+                 "treating this run as a new baseline")
+        return
+
+    rep.info(f"comparing against {previous.get('written_at', 'unknown time')}")
+    old_tables = previous.get("tables", {})
+
+    gone = sorted(set(old_tables) - set(tables))
+    if gone:
+        rep.fail(f"tables present last run and missing now: {gone}")
+    added = sorted(set(tables) - set(old_tables))
+    if added:
+        rep.info(f"new tables since last run: {added}")
+
+    changed = False
+    for table in sorted(set(tables) & set(old_tables)):
+        now, before = tables[table], old_tables[table]
+
+        # The regression this whole check exists for.
+        old_missing = before.get("missing_sessions")
+        new_missing = now.get("missing_sessions")
+        if old_missing is not None and new_missing is not None:
+            if new_missing > old_missing:
+                rep.fail(f"{table}: sessions with no rows rose "
+                         f"{old_missing} -> {new_missing}")
+                changed = True
+            elif new_missing < old_missing:
+                rep.info(f"{table}: coverage improved, sessions with no rows "
+                         f"fell {old_missing} -> {new_missing}")
+                changed = True
+
+        # A shrinking table is usually a deliberate dedupe, occasionally a
+        # rebuild that lost rows. Worth seeing, not worth stopping the pipeline.
+        old_rows, new_rows = before.get("rows"), now.get("rows")
+        if isinstance(old_rows, int) and isinstance(new_rows, int):
+            if new_rows < old_rows:
+                rep.warn(f"{table}: row count fell {old_rows:,} -> {new_rows:,}")
+                changed = True
+            elif new_rows > old_rows:
+                rep.info(f"{table}: {new_rows - old_rows:+,} rows "
+                         f"({old_rows:,} -> {new_rows:,})")
+                changed = True
+
+        old_nulls = before.get("nulls", {})
+        for col, frac in sorted(now.get("nulls", {}).items()):
+            if col not in old_nulls:
+                rep.info(f"{table}.{col}: new column, {frac:.1%} null")
+                changed = True
+                continue
+            delta = frac - old_nulls[col]
+            if abs(delta) > NULL_DRIFT_THRESHOLD:
+                rep.warn(f"{table}.{col}: null rate {old_nulls[col]:.1%} -> "
+                         f"{frac:.1%} ({delta:+.1%})")
+                changed = True
+        for col in sorted(set(old_nulls) - set(now.get("nulls", {}))):
+            rep.warn(f"{table}.{col}: column has disappeared")
+            changed = True
+
+    if not changed:
+        rep.ok("nothing moved since the previous run")
+
+
 # --- main ------------------------------------------------------------------------
 
 CHECKS = [
@@ -446,7 +819,11 @@ CHECKS = [
     check_null_team_name,
     check_temporal_coverage,
     check_cadillac_exclusion,
-    check_lap_flags_fresh, 
+    check_lap_flags_fresh,
+    check_endpoint_coverage,
+    check_silver_matches_bronze,
+    # Last, so the snapshot it builds reflects everything the run has seen.
+    check_coverage_snapshot,
 ]
 
 
@@ -478,7 +855,21 @@ def main() -> int:
         print("\nPipeline should NOT proceed. Failures:")
         for f in rep.fails:
             print(f"  - {f}")
+        # Deliberately NOT written. Overwriting the baseline with a regressed
+        # state would make the next run compare bad against bad and report
+        # everything as fine, which is the failure mode this check exists to
+        # prevent.
+        print(f"\n{SNAPSHOT_PATH.name} left unchanged, so the next run still "
+              "compares against the last known-good state.")
         return 1
+
+    if rep.snapshot is not None:
+        SNAPSHOT_PATH.write_text(
+            json.dumps(rep.snapshot, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        print(f"\nCoverage snapshot written to "
+              f"{SNAPSHOT_PATH.relative_to(SNAPSHOT_PATH.parents[1])}")
     print("\nGate passed — safe to proceed to silver rebuild / feature build.")
     return 0
 

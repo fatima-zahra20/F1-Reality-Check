@@ -453,6 +453,76 @@ data problems. Versions are pinned in `environment-pipeline.yml` and `requiremen
 specifically to prevent a future `conda update` from doing this silently.
 
 
+### 43. The scheduled task never ran, for four months, silently
+*Found 2026-08-10*
+
+The weekly pipeline runs from Windows Task Scheduler, not from anything in this repo, so
+nothing in version control records that it exists. Its action had been entered as an
+unquoted path, and Task Scheduler split it at the space in the user folder name:
+
+```
+execute: C:\Users\Fatima
+args:    zahra\Projects\F1-Reality-Check\run_weekly.bat
+```
+
+Every run since 2026-08-03 returned `0x80070002`, "the system cannot find the file
+specified", in milliseconds. `run_weekly.bat` was never reached.
+
+**Why nobody noticed.** Task History was disabled, so the failures left no visible trace.
+And the batch file ends with a `MessageBox` success popup, which can only appear if the
+batch file runs, so its absence read as "no news" rather than "never started". The only
+evidence was indirect: no `logs/pipeline_*.log` newer than 2026-07-29.
+
+**Resolution:** quote the full path in Program/script and leave Add arguments empty.
+Re-enable Task History. If the pipeline appears not to have run, check
+`(Get-ScheduledTask -TaskName 'F1 Reality Check Pipeline' | Get-ScheduledTaskInfo)`
+for `LastTaskResult`, and treat "no new log file" as a failure signal in its own right.
+
+### 44. A backfill leaves silver behind bronze, and nothing says so
+*Found 2026-08-10*
+
+`run_pipeline.py` decides whether to rebuild silver from the row count it parses out of
+**`s01_ingest`**'s output. `s01_backfill.py` is not a pipeline step: it writes straight
+into bronze. So a backfill can recover any quantity of data and the pipeline will still
+conclude there is nothing new to rebuild.
+
+This is not hypothetical. On 2026-07-27 a backfill recovered 324,207 rows into bronze.
+The diagnostic notebooks were then executed against a silver that did not yet contain
+them, and their stored conclusions drifted from the dashboard's without anything
+reporting a fault. Every invariant in the gate passed the whole time, because every
+invariant was true: silver was internally consistent, just built on less data.
+
+**Resolution:** `s02_build_silver.py` now records the bronze row count it read into
+`_silver_build_state`, and gate check [20] compares that against bronze on every run.
+Bronze larger than the recorded figure means a rebuild is owed, and the check names the
+tables and prints the command. Comparing raw counts would not work, because the silver
+build types, dedupes and filters, so silver is legitimately smaller by a ratio nobody had
+written down.
+
+**After any manual `s01_backfill.py` run, rebuild silver.** The gate will now say so, but
+only on its next run.
+
+### 45. An `empty` verdict from OpenF1 is not permanent
+*Found 2026-08-10*
+
+`s01_backfill.py` records a definitive `empty` and never re-queries it, which is right for
+the common case: HTTP 404 with `{"detail":"No results found."}` is OpenF1's genuine "no
+data" answer, confirmed against races that really had no pit stops.
+
+But OpenF1 backfills its own data. The 2023 Belgian Grand Prix qualifying classification
+was recorded `empty` on a 404 in July 2026 and returned 20 rows when asked again in
+August. Terminal-forever quietly locks in whatever was missing upstream at first contact.
+
+**Resolution:** `--recheck-empty` re-queries confirmed-empty pairs. Worth an occasional
+run, not a routine one. Of 80 such pairs, 79 were still genuinely empty.
+
+Two related API facts, measured the same day. A successful response carries **no**
+rate-limit headers, so the ceiling cannot be read in advance. A **429 does** carry
+`Retry-After`, and OpenF1 asks for 60 seconds. A misspelled endpoint returns a 404
+byte-identical to the real "no data" answer, which is why only endpoints on a known list
+are allowed a terminal verdict.
+
+
 ## Open questions
 
 ### A. `caution_flag` under-detects Safety Car periods
