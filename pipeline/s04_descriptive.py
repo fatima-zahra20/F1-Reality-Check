@@ -44,7 +44,14 @@ nine.
 Usage
 -----
     python pipeline\\s04_descriptive.py
-    python pipeline\\s04_descriptive.py --no-csv     # write to gold_f1.db only
+    python pipeline\\s04_descriptive.py --tables dim_race fact_lap
+
+This step writes CSVs and nothing else. It once carried --no-csv ("write to
+gold_f1.db only") and --no-db, from a plan to write into a gold layer. That code
+was commented out and the database was never created, so --no-csv computed every
+table, wrote nothing anywhere, printed "Serving layer written to" and exited 0.
+Both flags are gone rather than fixed: when gold is built, its writer will be
+designed then, not resurrected from dead comments.
 """
 
 from __future__ import annotations
@@ -713,8 +720,6 @@ BUILDERS = {
 def main() -> int:
     ap = argparse.ArgumentParser(description="Build the descriptive serving layer.")
     ap.add_argument("--tables", nargs="*", default=None, help="subset to rebuild")
-    ap.add_argument("--no-csv", action="store_true", help="write to gold_f1.db only")
-    ap.add_argument("--no-db", action="store_true", help="write CSVs only")
     args = ap.parse_args()
 
     if not DB_PATH.exists():
@@ -734,11 +739,9 @@ def main() -> int:
     print("DESCRIPTIVE SERVING LAYER")
     print(f"silver: {DB_PATH}")
     print(f"csv:    {DASHBOARD_DIR}")
-    #print(f"gold:   {GOLD_DB_PATH}")
     print("=" * 74)
 
     con = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
-    #gold = None if args.no_db else sqlite3.connect(str(GOLD_DB_PATH))
 
     n_races = pd.read_sql(f"SELECT COUNT(*) AS n FROM ({RACE_SCOPE})", con)["n"].iloc[0]
     print(f"\nscope: {n_races} completed races\n")
@@ -756,18 +759,12 @@ def main() -> int:
         # Freshness stamp, so the dashboard can show how current it is.
         df["generated_at"] = generated_at
 
-        if not args.no_csv:
-            df.to_csv(DASHBOARD_DIR / f"{name}.csv", index=False)
-        #if gold is not None:
-            # Drop and rewrite: these are derived views, not a log.
-        #    df.to_sql(name, gold, if_exists="replace", index=False)
+        df.to_csv(DASHBOARD_DIR / f"{name}.csv", index=False)
 
         print(f"  {name:20s} {len(df):>8,} rows x {len(df.columns):>3} cols  "
               f"{time.time() - started:.1f}s")
 
     con.close()
-    #if gold is not None:
-    #    gold.close()
 
     print("\n" + "=" * 74)
     if failures:
