@@ -44,7 +44,7 @@ Two kinds of decision, tallied separately so the problem is not overstated:
 
 | Decision | Kind | Variants | Sites | State |
 |---|---|---|---|---|
-| Valid racing lap | conflict | 5 | 14 | **5 competing rules** |
+| Valid racing lap | conflict | 5 | 14 | **Resolved in `gold_lap`** |
 | Excluded teams | conflict | 3 | 19 | **3 competing rules** |
 | `stop_duration` year scope | conflict | 2 | 3 | **2 competing rules** |
 | Corrupt `n_gear` | conflict | 0 | 0 | **Never enforced** |
@@ -57,11 +57,72 @@ Two kinds of decision, tallied separately so the problem is not overstated:
 
 Decisions in genuine conflict: **3**.
 
+## Where this stands after gold was built
+
+`gold_f1.db` now exists: **17 tables, 739,055 rows, 149.4 MB**, from
+`pipeline/s07_build_gold.py`. Three dimensions, nine facts, five aggregates.
+
+**8 of the 10 decisions above are now defined in gold.** That is not the same as
+finished. A definition with call sites still beside it means the authoritative
+answer exists and nothing reads it yet, so the audit reports the two states
+separately and the goal is "OWNED BY GOLD with no call site left".
+
+Still unowned, deliberately:
+
+- **Excluded teams.** Three competing rules across 19 sites, and `config.py`'s
+  `EXCLUDED_TEAMS` never reaches `s05_diagnostic`, which redefines it locally.
+  Unowned because excluding Cadillac is a *modelling* decision (no 2023-25 history,
+  so trailing features are undefined), not a property of the data, and gold must not
+  encode either consumer's view. It belongs in the training assembly.
+- **Corrupt `n_gear`.** Lives in `car_data`, which exists in bronze only and covers
+  32 of 490 sessions. Nothing gold can own until that is promoted.
+
+The four open design questions are now three-quarters settled. Gold is **wide**,
+it **flags rather than filters**, and the **training matrix stays outside**. What
+remains is whether trailing features live in gold, which is the next real decision
+and the one that touches the predictive work.
+
+### Verification
+
+34 checks pass: row parity against every silver source, primary key uniqueness on
+all 11 keyed tables, conformed flags reproducing the hand-rolled filters exactly,
+and aggregates summing back to their facts. Both differences against the published
+serving layer were traced to cause rather than accepted:
+
+| Difference | Cause |
+|---|---|
+| `fact_lap` has 55 fewer race laps | `s04_descriptive.py:498` drops null `date_start`, which `merge_asof` needs. Gold keeps and flags them. |
+| `dim_race` has 15 fewer races | It scopes to completed races with laps and results. Gold keeps the calendar with `has_laps` and `is_cancelled`. |
+
+Speed on five questions the consumers actually ask: **1,676ms to 291ms, 5.8x**.
+The gain is concentrated in the lap-heavy ones (caution share by circuit went
+527ms to 1ms by becoming a table read); grid versus finish improved only 2.6x.
+
 ## The findings
 
 ### 1. Valid racing lap has no owner
 
-Five competing definitions across 14 sites:
+**Resolved 2026-08-11 in `pipeline/s07_build_gold.py`. The measurement is below;
+the outcome was not the one this section originally recommended.**
+
+Adopting the documented `60-300` window would have been wrong. The floor is inert
+(zero laps of 239,102 are under 60s, and the fastest lap in the dataset is 63.971s)
+and the ceiling turned out to be redundant with `neutralised`: on race laps already
+green and not pit-out, `60-200` removed 11 further laps, ten of which were lap 1 of
+the 2025 Belgian Grand Prix. That was not an outlier population, it was an undetected
+safety-car start (NOTES_LOG #48). After fixing it the window removes one lap in 81,689.
+
+`gold_lap` therefore carries `is_valid_lap` (`lap_duration IS NOT NULL`),
+`is_representative_lap` (valid, green, not pit-out) and `pace_ratio`, with no duration
+window anywhere. `is_representative_lap` is row-for-row identical to the filter
+`s05_diagnostic` writes by hand, so migration moves no published number.
+
+The racemap `1.15x` and the `story_driver` Tukey fence were confirmed as legitimate
+local exceptions rather than drift: they drop 10 to 12% of laps, which makes them
+"representative pace" filters for a specific question, not validity rules. They stay
+at their call sites, now stated as exceptions.
+
+*Original finding, kept for the record.* Five competing definitions across 14 sites:
 
 | Rule | Where |
 |---|---|

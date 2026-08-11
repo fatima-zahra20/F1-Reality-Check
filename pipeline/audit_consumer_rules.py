@@ -54,8 +54,20 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
-# Sources whose variants count. 'explore' is deliberately absent.
+# Sources whose variants count. 'explore' is deliberately absent, and so is
+# 'gold'.
+#
+# WHY 'gold' IS NOT WEIGHTED. This audit counts places where a decision is
+# RE-DECIDED. The gold builder is where a decision is decided ONCE, on purpose,
+# and every other site is supposed to read the result. Counting it as a variant
+# made building gold look like a regression: the first run after gold_lap landed
+# reported phantom stints going from 1 variant to 2 and stop_duration scope from
+# 2 to 3, purely because the authoritative definition now exists in a file.
+#
+# So gold is reported separately, as the owner. A decision defined in gold with
+# zero weighted sites left is the finished state this audit is measuring toward.
 WEIGHTED = {"pipeline", "consumer", "notebook", "sql"}
+GOLD_FILES = {"s07_build_gold.py"}
 
 SCAN = [
     "*.py", "pipeline/*.py", "dashboard/*.py", "dashboard/**/*.py",
@@ -68,6 +80,8 @@ def classify(path: Path) -> str:
     parts = {p.lower() for p in path.parts}
     if "data profiling" in parts or path.name.startswith("EDA_"):
         return "explore"
+    if path.name in GOLD_FILES:
+        return "gold"
     if "pipeline" in parts:
         return "pipeline"
     if "diagnostic analytics" in parts:
@@ -121,6 +135,32 @@ def scan_lines():
 
 
 DECISIONS: list[tuple[str, str, str, object]] = []
+
+# Which gold column owns each decision, named explicitly rather than inferred.
+#
+# Inferring ownership from the same regexes that find call sites does not work,
+# and reported the wrong thing once. Gold owns "valid racing lap" precisely by
+# NOT containing a duration window, so a pattern hunting for `BETWEEN 60 AND
+# 200` can never find it there. Same for team names: gold conforms them through
+# its own helper, not through `normalize_team_names`.
+#
+# An entry here is a claim that the column exists and is authoritative. The
+# check below verifies the identifier is actually present in the gold builder,
+# so a renamed or deleted column shows up as unowned instead of silently
+# continuing to look finished.
+GOLD_OWNER = {
+    "valid racing lap": "is_representative_lap",
+    "team name normalization": "TEAM_NAME_MAP",
+    "race scoping": "session_name",
+    "phantom stints": "is_phantom_stint",
+    "pit duration outliers": "is_green_race_stop",
+    "stop_duration year scope": "has_stop_duration",
+    "neutralisation flags": "neutralised",
+    "future calendar": "has_laps",
+    # Deliberately unowned so far, and named here so the gap stays visible:
+    #   excluded teams  -> still 3 competing rules across 19 sites
+    #   corrupt n_gear  -> lives in car_data, which is bronze only
+}
 
 
 def decision(name: str, kind: str, question: str):
@@ -299,28 +339,54 @@ def main() -> int:
     print("\n" + "=" * 78)
     print("SUMMARY (exploratory sources excluded)")
     print("=" * 78)
-    print(f"{'decision':28s} {'kind':9s} {'variants':>8} {'sites':>6}  verdict")
+    gold_path = PROJECT_ROOT / "pipeline" / "s07_build_gold.py"
+    gold_source = (gold_path.read_text(encoding="utf-8")
+                   if gold_path.exists() else "")
+    if not gold_source:
+        print("  [note] pipeline/s07_build_gold.py not found; "
+              "nothing can be reported as owned by gold")
+
+    print(f"{'decision':28s} {'kind':9s} {'variants':>8} {'sites':>6} "
+          f"{'gold':>5}  verdict")
     conflicts = 0
+    owned = 0
     for name, kind, _q, _fn in DECISIONS:
         real = {v: h for v, h in findings[name].items()
                 if any(x[0] in WEIGHTED for x in h)}
         sites = sum(len([x for x in h if x[0] in WEIGHTED])
                     for h in real.values())
+        # Is this decision defined in the gold builder? That is the owner, not
+        # another competing variant, so it is reported in its own column.
+        # Verified against the builder's actual text so a renamed column drops
+        # out of "owned" rather than staying there on the strength of a dict.
+        col = GOLD_OWNER.get(name)
+        in_gold = bool(col) and col in gold_source
+        if in_gold:
+            owned += 1
 
-        if not real:
+        if not real and not in_gold:
             verdict = "NOT ENFORCED"
+        elif not real and in_gold:
+            verdict = "OWNED BY GOLD, no call site left"
         elif kind == "conflict" and len(real) > 1:
             verdict = f"{len(real)} COMPETING RULES"
+            if in_gold:
+                verdict += " (gold owns it; migrate the rest)"
             conflicts += 1
         elif sites <= 2:
             verdict = "single-sourced"
         else:
             verdict = f"one rule, repeated {sites}x by hand"
-        print(f"{name:28s} {kind:9s} {len(real):>8} {sites:>6}  {verdict}")
+            if in_gold:
+                verdict += " (gold owns it; migrate the rest)"
+        print(f"{name:28s} {kind:9s} {len(real):>8} {sites:>6} "
+              f"{'yes' if in_gold else '-':>5}  {verdict}")
 
     print(f"\ndecisions in genuine conflict: {conflicts}")
-    print("Goal: every row single-sourced, i.e. defined in gold and read "
-          "everywhere else.")
+    print(f"decisions now defined in gold:  {owned} of {len(DECISIONS)}")
+    print("\nGoal: every decision OWNED BY GOLD with no call site left. A gold")
+    print("column with call sites still beside it means the definition exists")
+    print("but nothing reads it yet, which is progress and not completion.")
     return 0
 
 

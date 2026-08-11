@@ -803,6 +803,107 @@ def check_coverage_snapshot(con, rep: Report) -> None:
 
 # --- main ------------------------------------------------------------------------
 
+def check_unflagged_field_slowdowns(con, rep: Report) -> None:
+    """
+    Laps where the whole field ran slowly and nothing was flagged.
+
+    WHY THIS EXISTS. Caution periods are built from race control messages, and
+    three separate bugs have now been found where the message was there but
+    spelled in a way the parser did not match: 'RED FLAG ...' as prose, VSC
+    under two names, and a race starting behind the safety car with no
+    deployment message at all. Each one left real neutralised laps recorded as
+    green-flag racing, and each was invisible until someone went looking.
+
+    A missed caution has a signature that does not depend on knowing the
+    vocabulary: the ENTIRE FIELD slows at once. That is what this measures, so
+    the next spelling shows up as a number instead of waiting to be stumbled on.
+
+    Deliberately a WARN, not a FAIL. A field-wide slowdown is not proof of a
+    caution. Rain slows everyone too, and Zandvoort 2023 laps 1-3 look identical
+    on the median while the per-car spread gives it away: under a safety car the
+    field is bunched, in the wet it disperses as cars pit at different times.
+    Distinguishing them needs a human, so this reports rather than blocks.
+
+    Reference pace is the median of laps that ARE flagged green and are not
+    pit-out laps, taken over the whole session. That trusts the flags, but only
+    on the laps not in question, and only in aggregate.
+
+    Known residuals as of 2026-08-11, both being a safety car that came in
+    mid-lap while the closing message predates it:
+      Suzuka 2024 race lap 3, Miami 2025 sprint lap 3.
+    """
+    print("\n[21] No unexplained field-wide slowdowns left unflagged")
+    if not table_exists(con, "silver_lap_flags"):
+        rep.warn("silver_lap_flags missing, cannot check field slowdowns")
+        return
+
+    # Medians throughout, never means. One car parked at the side of the road
+    # drags a mean far enough to invent a field-wide event, which is the exact
+    # mistake the rejected RESTART_FACTOR rule made (NOTES_LOG #47). SQLite has
+    # no median aggregate, hence the row_number / count window pair.
+    rows = con.execute("""
+        WITH lap AS (
+            SELECT l.session_key, l.lap_number, l.lap_duration,
+                   COALESCE(l.is_pit_out_lap, 0) AS pit_out, f.neutralised
+            FROM silver_laps l
+            JOIN silver_lap_flags f
+              ON f.session_key = l.session_key
+             AND f.driver_number = l.driver_number
+             AND f.lap_number = l.lap_number
+            JOIN silver_sessions s ON s.session_key = l.session_key
+            WHERE s.session_name IN ('Race', 'Sprint')
+              AND l.lap_duration IS NOT NULL
+        ),
+        green_ranked AS (
+            SELECT session_key, lap_duration,
+                   ROW_NUMBER() OVER (PARTITION BY session_key
+                                      ORDER BY lap_duration) AS rn,
+                   COUNT(*)     OVER (PARTITION BY session_key) AS cnt
+            FROM lap WHERE neutralised = 0 AND pit_out = 0 AND lap_number >= 5
+        ),
+        ref AS (
+            SELECT session_key, AVG(lap_duration) AS green
+            FROM green_ranked
+            WHERE rn IN ((cnt + 1) / 2, (cnt + 2) / 2)
+            GROUP BY session_key
+        ),
+        lap_ranked AS (
+            SELECT session_key, lap_number, lap_duration, neutralised,
+                   ROW_NUMBER() OVER (PARTITION BY session_key, lap_number
+                                      ORDER BY lap_duration) AS rn,
+                   COUNT(*)     OVER (PARTITION BY session_key,
+                                      lap_number) AS cnt
+            FROM lap
+        ),
+        per_lap AS (
+            SELECT session_key, lap_number, MAX(cnt) AS cars,
+                   AVG(CASE WHEN rn IN ((cnt + 1) / 2, (cnt + 2) / 2)
+                            THEN lap_duration END) AS med,
+                   AVG(neutralised) AS flagged
+            FROM lap_ranked GROUP BY session_key, lap_number
+        )
+        SELECT p.session_key, p.lap_number, p.cars, p.med / ref.green AS ratio,
+               p.flagged
+        FROM per_lap p JOIN ref USING (session_key)
+        WHERE p.cars >= 10 AND p.med / ref.green >= 1.25 AND p.flagged < 0.5
+        ORDER BY ratio DESC
+    """).fetchall()
+
+    sessions = len({r[0] for r in rows})
+    if not rows:
+        rep.ok("no field-wide slowdown runs unflagged")
+        return
+
+    rep.warn(
+        f"{len(rows)} lap-event(s) across {sessions} session(s) where 10+ cars "
+        f"ran at 1.25x their own green pace with under half flagged. Check "
+        f"for a caution spelling the parser misses"
+    )
+    for session_key, lap_number, cars, ratio, flagged in rows[:12]:
+        rep.info(f"session {session_key} lap {lap_number}: {cars} cars at "
+                 f"{ratio:.2f}x, {flagged:.0%} flagged")
+
+
 CHECKS = [
     check_tables_present,
     check_split_columns,
@@ -820,6 +921,7 @@ CHECKS = [
     check_temporal_coverage,
     check_cadillac_exclusion,
     check_lap_flags_fresh,
+    check_unflagged_field_slowdowns,
     check_endpoint_coverage,
     check_silver_matches_bronze,
     # Last, so the snapshot it builds reflects everything the run has seen.

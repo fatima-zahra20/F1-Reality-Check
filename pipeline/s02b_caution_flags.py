@@ -106,6 +106,95 @@ def is_red_flag(row) -> bool:
     return str(row["message"] or "").strip().upper().startswith("RED FLAG")
 
 
+def safety_car_starts(con: sqlite3.Connection) -> list[dict]:
+    """
+    Races that begin behind the safety car, which leave no deployment message.
+
+    THE BUG THIS FIXES, found 2026-08-11 while auditing the 'valid lap' rule.
+    Every other caution opens on a 'SAFETY CAR DEPLOYED' message. When the race
+    STARTS behind the safety car the car is already on track before the session
+    begins, so that message is never sent and no period is ever opened. Spa 2025
+    ran its first four laps at 1.57-1.86x its own green pace with all 80 of them
+    recorded as green-flag racing.
+
+    This is the third variant of one recurring failure: the event is announced
+    in prose under category='Other' rather than as a flag. Compare is_red_flag()
+    and the VSC spellings in NOTES_LOG.
+
+    START is unambiguous: the session start, which is where lap 1 begins.
+
+    END is not. Three candidate rules were scored against the four sessions that
+    carry the announcement, using the per-car lap tables as ground truth:
+
+      (a) first ROLLING/STANDING START message after the session starts
+      (b) the restart_finder statistic, seeded at the session start
+      (c) end of the last field-wide slow lap
+
+    (b) fired on all four and was wrong on three, inventing periods for the two
+    sessions that need none. (c) needs a slowness threshold, which is the
+    mistake RESTART_FACTOR already made once. (a) fires on exactly the two
+    sessions that need a period, gets Spa 2025 exactly right, and stays silent
+    otherwise, so it is never wrong in the direction of over-flagging.
+
+    Its one known shortfall is Miami 2025 sprint lap 3, where the safety car
+    came in mid-lap and the message predates that. Laps 1-2 are flagged, lap 3
+    is not. Under-flagging one lap-event is preferred to rule (b)'s two invented
+    periods, and check [21] in s03_verify reports the residual rather than
+    letting it hide.
+    """
+    rc = pd.read_sql("""
+        SELECT session_key, "date", UPPER(TRIM(message)) AS msg
+        FROM silver_race_control
+    """, con)
+    if rc.empty:
+        return []
+    rc["date"] = pd.to_datetime(rc["date"], format="ISO8601", utc=True)
+
+    # 'FORMATION LAP WILL BE STARTED BEHIND THE SAFETY CAR' and 'RACE WILL START
+    # BEHIND THE SAFETY CAR' are the two spellings present; one carries an
+    # 'ON WET-WEATHER TYRES' suffix, so this matches on the phrase, not equality.
+    announced = rc[rc.msg.str.contains(r"START(?:ED)?\s+BEHIND THE SAFETY CAR",
+                                       regex=True, na=False)]
+    if announced.empty:
+        return []
+
+    starts = pd.read_sql("""
+        SELECT session_key, MIN(date_start) AS session_start
+        FROM silver_laps WHERE lap_number = 1 AND date_start IS NOT NULL
+        GROUP BY session_key
+    """, con)
+    starts["session_start"] = pd.to_datetime(starts.session_start,
+                                             format="ISO8601", utc=True)
+    session_start = dict(zip(starts.session_key, starts.session_start))
+
+    periods = []
+    for session_key in sorted(announced.session_key.unique()):
+        begin = session_start.get(session_key)
+        if begin is None or pd.isna(begin):
+            continue
+        grp = rc[rc.session_key == session_key]
+        # The procedure message ends the neutralisation. Spa 2023's sprint logs
+        # it BEFORE the session starts, meaning the car came in during the
+        # delay, so requiring 'after the start' correctly yields no period.
+        closing = grp[(grp["date"] > begin)
+                      & grp.msg.str.contains(r"\b(?:ROLLING|STANDING) START\b",
+                                             regex=True, na=False)]
+        if closing.empty:
+            continue
+        periods.append({
+            "session_key": int(session_key),
+            "kind": "SC",
+            "date_start": begin,
+            "date_end": closing["date"].min(),
+            "start_message": "RACE STARTED BEHIND THE SAFETY CAR (inferred)",
+            "closed_by": "start_procedure",
+        })
+
+    print(f"  safety-car starts detected: {len(periods)} "
+          f"(announced in {announced.session_key.nunique()} sessions)")
+    return periods
+
+
 def effective_session_end(con: sqlite3.Connection) -> dict:
     """
     When did each session actually stop, as opposed to when it was scheduled to?
@@ -273,7 +362,10 @@ def build_periods(con: sqlite3.Connection) -> pd.DataFrame:
 
     rc["date"] = pd.to_datetime(rc["date"], format="ISO8601", utc=True)
 
-    periods = []
+    # Seeded before the message walk because a safety-car start is bounded by
+    # the session start, not by any deployment, so it cannot be produced by the
+    # open/close state machine below.
+    periods = safety_car_starts(con)
 
     for session_key, grp in rc.groupby("session_key", sort=False):
         grp = grp.sort_values("date")

@@ -657,6 +657,154 @@ what a per-lap validity flag is for, not what a caution flag is for.
 **Consequence:** any analysis that filtered on `neutralised` before this date was built
 on a contaminated population and needs re-running.
 
+### 48. A race that starts behind the safety car is never flagged
+
+*2026-08-11. Found while auditing the "valid lap" rule, not while looking for it.*
+
+The fourth caution bug, and the third instance of one recurring failure: the event is
+announced in prose under `category='Other'` instead of as a flag, so the parser never
+sees it.
+
+Every other caution opens on `SAFETY CAR DEPLOYED`. When the race *starts* behind the
+safety car, the car is already on track before the session begins and that message is
+never sent. No period is opened, so the laps are recorded as green-flag racing.
+
+Spa 2025 ran its first four laps at 1.57 to 1.86x its own green pace with all 80 of them
+green. Race control said `RACE WILL START BEHIND THE SAFETY CAR` at 14:15:01 and
+`ROLLING START` at 14:29:35; the red-flag period was closed at 14:20:00 and lap 1 begins
+65 milliseconds later.
+
+**How the end of the period was chosen.** The start is unambiguous. The end is not, so
+three candidate rules were scored against the four sessions carrying the announcement,
+using the per-car lap tables as ground truth:
+
+| Rule | Fires on | Correct |
+|---|---|---|
+| (a) first `ROLLING`/`STANDING START` message after the session starts | 2 of 4 | Spa exact, Miami 2 laps of 3 |
+| (b) the restart_finder statistic, seeded at the session start | 4 of 4 | 1 of 4 |
+| (c) end of the last field-wide slow lap | n/a | needs a slowness threshold |
+
+(b) invented periods for the two sessions that need none. (c) would have reintroduced
+exactly the kind of free constant that #47 removed. (a) was adopted: it is silent unless
+race control logged both ends, and where it fires it never over-flags.
+
+Result: 2 periods, 118 laps. `neutralised` 11,679 to 11,797. **0 of 29 diagnostic
+verdicts flipped**; 8 moved numerically, the largest being T11b p 0.0069 to 0.0104, still
+significant.
+
+**Known residual, deliberately left.** Miami 2025 sprint lap 3 and Suzuka 2024 race lap 3
+are both a safety car coming in mid-lap while the closing message predates it. Under-
+flagging two lap-events was preferred to rule (b)'s two invented periods.
+
+**Zandvoort 2023 is not a fifth bug.** Its laps 1-3 look identical on the median but the
+per-car spread gives it away: 86.8 to 119.0s, bimodal as cars pit for wet tyres. Under a
+safety car the field is bunched; in the wet it disperses. Correctly unflagged.
+
+**The general defence.** A missed caution has one signature that does not depend on
+knowing the vocabulary: the entire field slows at once. `s03_verify` check [21] now
+measures that directly, in medians rather than means, and reports 29 lap-events across
+11 sessions as a WARN. It warns rather than fails because rain produces the same median.
+
+### 49. The 60-300 second "valid lap" window was a patch over #48
+
+*2026-08-11. The first conformed column in the gold layer.*
+
+`GOLD_INVENTORY.md` found "which laps count" answered five ways across 14 sites, with the
+documented `BETWEEN 60 AND 300` used at none of them. The obvious move was to adopt the
+documented rule. Measuring it first showed that would have repeated the RESTART_FACTOR
+mistake.
+
+**The floor is inert.** Zero laps of 239,102 are under 60 seconds. The fastest lap in the
+dataset is 63.971s at Spielberg, so the floor sits below the physical limit of the sport
+and can never fire. Every rule's floor is decoration.
+
+**The ceiling was redundant.** On race laps already not neutralised and not pit-out, the
+`60-200` window removed 11 further laps of 81,769. **Ten of the eleven were lap 1 of the
+2025 Belgian Grand Prix**, which is not an outlier population, it is #48. After fixing
+that detection the window removes **exactly one lap in 81,689**.
+
+So the window was never a validity rule. It was a patch over a caution-detection bug, and
+it was covering roughly a tenth of it.
+
+**What replaced it**, in `pipeline/s07_build_gold.py`:
+
+| Column | Definition | Rows |
+|---|---|---|
+| `is_valid_lap` | `lap_duration IS NOT NULL`, the lap completed and was timed | 229,873 (96.1%) |
+| `is_representative_lap` | valid, not neutralised, not pit-out | 195,898 (81.9%) |
+| `pace_ratio` | `lap_duration / session green median` | all |
+
+`is_representative_lap` is **row-for-row identical** to the filter `s05_diagnostic`
+writes by hand, so migrating a consumer to it moves no published number.
+
+`pace_ratio` is the flag-not-filter principle applied to the one case where filtering was
+still doing something: Melbourne 2026 car 18 lap 33 now reads 13.8x instead of being
+silently deleted. Adopting gold therefore moves exactly one team-year mean, Aston Martin
+2026, by 1.2568s. That is a visible consequence of keeping the lap, not a regression.
+
+**Rejected:** sector-sum consistency as a third validity term. Only 50 laps of 212,033
+disagree with their own sectors by over a second, and the tolerance would be one more
+free parameter to defend for no measurable gain.
+
+### 50. The gold layer, and the four things measuring changed
+
+*2026-08-11. 17 tables, 739,055 rows, 149.4 MB, in `pipeline/s07_build_gold.py`.*
+
+Three dimensions, nine facts, five aggregates. The layer obeys three rules: it flags
+rather than filters, it holds no constant that decides an answer, and it does not hold
+the training matrix.
+
+**A driver number is not a driver, and I built that table wrong first.** `gold_driver`
+was keyed on `driver_number` with the most recent name winning. **34 of 57 numbers
+belong to more than one person**: number 1 is Verstappen 2023-2025, Paul Aron for one
+2023 session and Norris in 2026; number 3 is Ricciardo, then O'Sullivan, then
+Verstappen. Joining that table would have relabelled every Verstappen lap as Norris,
+and nothing would have reported it. Re-keyed on `(driver_number, full_name)`, 97 rows,
+with `shares_number` flagging the ambiguous ones. `(driver_number, year)`, which
+`dim_driver` uses, is also not unique: number 1 in 2023 is two people.
+
+**`lane_duration` is `pit_duration` twice.** Byte-identical across all 22,898 populated
+rows, maximum absolute difference 0.0. Only one is carried.
+
+**The pit duration outliers are red flags, not errors.** The inventory listed "up to
+16,921s" as something gold should filter. 96.4% of race stops over 60 seconds happened
+under a caution, 92% under a red flag, and the extreme tail is Zandvoort 2023 laps 63-64
+with the field parked in the pit lane. Scope the session type, attach the lap's own
+caution flag, and green race stops sit at a 23.3s median with a 41.2s 99th percentile.
+No fence is baked in anywhere. The Tukey fence at `pit_stops_05.sql` was re-derived and
+is population dependent (36.76s over all race stops, 29.65s over green ones), so it is a
+local choice and stays at its call site.
+
+**`STOP_DURATION_MIN_YEAR = 2024` overstates what exists.** It reads as "usable from
+2024". Actual race coverage is 0%, 18.1%, 85.5%, 33.8% by year. Comparing 2024 with 2025
+on that column compares an 18% sample with an 85% one. Gold carries
+`has_stop_duration` rather than a year cutoff.
+
+**One measurement I got wrong and caught.** A first pass reported 13,959 of 34,567
+stints overlapping the previous one. Flagging 40% of a table as broken is almost always
+the test being wrong: a stint ends on the lap the car pits and the next begins on that
+same lap, so `lap_start <= prev_end` matches the convention. Only `<` is a real overlap.
+**42, not 13,959**, plus 56 coverage gaps, all in practice and testing.
+
+**Verification.** 34 checks, all passing: row parity against every silver source, primary
+key uniqueness on all 11 keyed tables, the conformed flags reproducing the hand-rolled
+filters exactly, and aggregates summing back to their facts. Two differences against the
+published serving layer were chased to their cause rather than accepted:
+
+- `fact_lap` has 55 fewer race laps because `s04_descriptive.py:498` drops laps with a
+  null `date_start`, which `merge_asof` needs a key for. Gold keeps them flagged.
+- `dim_race` has 15 fewer races because it scopes to completed races with laps and
+  results. Gold keeps the whole calendar with `has_laps` and `is_cancelled`.
+
+**Speed**, on five questions the dashboard and notebooks actually ask: 1,676ms to 291ms
+in total, a 5.8x improvement. Caution share by circuit went 527ms to 1ms because it
+became a table read. Grid versus finish improved only 2.6x, so the aggregates earn their
+place on the lap-heavy questions rather than uniformly.
+
+**Not carried:** `silver_intervals` (2.1M rows, a sub-second time series that would
+roughly double the layer for questions nothing currently asks) and `silver_team_radio`
+(audio URLs with no transcription, per open question D).
+
 
 ## Open questions
 

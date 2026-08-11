@@ -216,3 +216,6 @@ tree.txt
 # not, and it must stay out of git — s06 publishes it as a GitHub Release asset
 # precisely so a 5 MB file rewritten every run never enters the history.
 outputs/dashboard/*.gz
+
+# gold_f1.db is caught by the *.db rule above. It is 100 MB and fully derived,
+# so it is rebuilt rather than stored: pipeline/s07_build_gold.py --execute
