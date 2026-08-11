@@ -549,6 +549,114 @@ The general lesson, and it is the third time this project has hit it: **a step r
 "nothing happened" is not evidence that nothing happened.** Prefer comparing recorded
 state over parsing what a step chose to say about itself.
 
+### 47. Caution periods were wrong in three separate ways
+*Found and fixed 2026-08-11, while trying to choose a lap-validity rule*
+
+`silver_lap_flags.neutralised` is read at 121 sites and is the one decision this project
+had single-sourced. It was also wrong.
+
+**(a) The fallback end was the SCHEDULED session end.** `build_periods` closed an
+unterminated period with `silver_sessions.date_end`. But **326 of 495 sessions run past
+their scheduled end**, and a red-flagged race always does. Eighteen periods therefore
+ended before they began, durations to **-2,226 seconds**, and the lap-to-period overlap
+join matched nothing at all. Melbourne 2023 lap 57: ten cars averaging 1,997 seconds,
+every one recorded as green-flag racing.
+
+The eighteen negatives were the visible half. Another 36 periods closed the same way were
+merely **truncated**, leaving the tail of a real caution flagged green at times that look
+entirely plausible and would never surface in an outlier search.
+
+**(b) Extending to the TRUE session end was worse.** That was the first fix, and it
+over-corrected badly. Monaco 2024 logs a RED FLAG at 13:04:08 and never logs the restart,
+yet the race resumed and ran to full distance. The period ran 2.4 hours and flagged
+**all 1,237 laps of the race**. Caught only because the newly flagged laps had a median
+ratio of 1.00x against green-flag pace, which is not what a caution lap looks like.
+
+The laps themselves carry the answer, but **not** in the obvious way, and the obvious way
+was tried and rejected on evidence.
+
+*Rejected: "the first lap after the stoppage that runs at a plausible pace."* It is
+decided by whichever single car does something unusual, and it is not robust to the
+cutoff it requires. Japan 2024: after the red flag the whole field records lap 2 at about
+1,711s (17.5x the session median) because they were parked, while **car 22 alone records
+203.186s (2.08x)**. Moving the cutoff from 2.0x to 2.5x admits that one lap and drags the
+inferred restart **25 minutes** earlier. Requiring several cars to agree did not rescue
+it either:
+
+| Rule | Cutoffs tested | Worst-case disagreement |
+|---|---|---|
+| First car past cutoff | 1.5x to 10x | 1,530s |
+| Requiring 2 cars | 1.5x to 10x | 2,824s |
+| Requiring 3 cars | 1.5x to 10x | 2,648s |
+| Requiring 5 cars | 1.5x to 10x | 2,228s |
+
+A constant that moves the answer by 25 minutes is a decision in disguise, not a
+parameter.
+
+*Adopted: a quantity that needs no cutoff.* A car stopped by a red flag is still on a
+lap, and that lap does not end until the race restarts and the car completes it. Its end
+time is therefore an observation of the restart.
+
+```
+restart = median over cars of (first lap started after the stoppage + its duration)
+          minus one session-median lap
+```
+
+The median across cars is what makes it robust: no single car can move it and no
+threshold decides who is included. Recorded as `closed_by = 'restart_inferred'`, used 19
+times. Its two remaining free choices were tested and neither decides the answer:
+
+| Choice | Range tested | Max effect |
+|---|---|---|
+| `MIN_CARS_FOR_RESTART` | 2, 3, 5, 8 | **0.0s** (every stoppage has 10 to 20 cars, so it never binds) |
+| "minus one lap" | 0 to 2.0x median | **113.6s** |
+
+Stable to within about one lap, which is the resolution the flag needs, against 1,530s
+or worse for the rejected rule.
+
+**(c) A third spelling of "red flag" was never detected.** From 2026, OpenF1 also logs
+suspensions as `category='Other'`, no `flag` column, message `RED FLAG - RACE SUSPENDED`.
+There are 21, and one is the **Monaco 2026 race**, whose stoppage was invisible: 17 laps
+of roughly 2,260 seconds sat in the data flagged as green.
+
+Matched on the message START, not a substring: 27 messages contain `RED FLAG
+INFRINGEMENT`, a stewards' note about a driver, and matching those would invent periods.
+Same shape as the VSC problem in item A: an event hiding under a category that looks
+unrelated.
+
+**Evidence the fix is an improvement rather than a change**
+
+| | Before | After |
+|---|---|---|
+| Laps flagged `red_flag` | 3,540 at **1.01x** session median | 122 at **1.93x** |
+| Flagged laps not actually slowed (<1.05x) | 3,123 (**37.6%**) | ~180 (under 4%) |
+| Clean race laps, standard deviation | 24.707s | **11.933s** |
+| Periods with impossible duration | 18 | 0 |
+| Longest period | 17,956s | 5,910s |
+
+Flags now behave as their names claim: green 1.00x the session median, VSC 1.23x,
+Safety Car 1.45x, red 1.93x. Those match the figures recorded independently in open
+question A.
+
+**Verified before publishing:** none of the 29 diagnostic tests changed its verdict.
+Eleven moved numerically, mostly larger samples, and none crossed 0.05.
+
+A flag carried by 3,540 laps running at green-flag pace was not measuring anything. The
+standard deviation halving is contamination leaving the clean-lap population; the mean
+barely moved, which is what removing outliers looks like rather than shifting a
+distribution.
+
+`neutralised` went from 17,076 laps to 11,484.
+
+**Still open.** 410 unflagged race laps run over 1.30x the session median. Some are wet
+weather, traffic or damage rather than missed cautions, and they have not been separated.
+One green lap remains over 3x: Australia 2026 lap 33, a single car at 1,168s. That one is
+correct to leave unflagged, because one car stopping is not a session-wide caution. It is
+what a per-lap validity flag is for, not what a caution flag is for.
+
+**Consequence:** any analysis that filtered on `neutralised` before this date was built
+on a contaminated population and needs re-running.
+
 
 ## Open questions
 

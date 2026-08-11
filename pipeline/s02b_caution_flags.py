@@ -59,6 +59,10 @@ from config import DB_PATH  # noqa: E402
 # the restart, so the message timestamp alone would end the period too early.
 GREEN_LOOKAHEAD_SECONDS = 300
 
+# A restart is a field event, so it takes at least this many cars to call one.
+# Used to reject a single car circulating during a stoppage.
+MIN_CARS_FOR_RESTART = 3
+
 # Fallback lap length when lap_duration is NULL and there is no following lap.
 DEFAULT_LAP_SECONDS = 120
 
@@ -79,15 +83,188 @@ def classify(message: str) -> tuple[str | None, str | None]:
     return None, None
 
 
+def is_red_flag(row) -> bool:
+    """
+    Is this race control message a race suspension?
+
+    THREE SPELLINGS, and the third was invisible until 2026-08-11. The usual one
+    is category='Flag', flag='RED', scope='Track'. From 2026 OpenF1 also logs
+    category='Other' with no flag column at all and the message 'RED FLAG -
+    RACE SUSPENDED'. There are 21 of those, and one of them is the Monaco 2026
+    race, whose stoppage was therefore never detected: 17 laps of 2,260 seconds
+    each sat in the data flagged as green-flag racing.
+
+    This is the same shape as the VSC problem in NOTES_LOG: a category that
+    looks unrelated carrying the event under a different name.
+
+    Matched on the message START rather than a substring, because 27 messages
+    contain 'RED FLAG INFRINGEMENT', which is a stewards' note about a driver
+    and not a suspension. Matching those would invent red flag periods.
+    """
+    if row["category"] == "Flag" and row["flag"] == "RED":
+        return True
+    return str(row["message"] or "").strip().upper().startswith("RED FLAG")
+
+
+def effective_session_end(con: sqlite3.Connection) -> dict:
+    """
+    When did each session actually stop, as opposed to when it was scheduled to?
+
+    THE BUG THIS FIXES. A period with no closing message used to be closed with
+    silver_sessions.date_end, which is the SCHEDULED end. Any race that overruns
+    ends after that, and a red-flagged race always overruns, so the fallback
+    could land before the period's own start.
+
+    Found 2026-08-11: 18 of 422 periods had date_end < date_start, down to
+    -2,226 seconds. Melbourne 2023 suspended the race at 07:37:06 and the period
+    was closed at 07:00:00. The lap-to-period overlap join then matched nothing,
+    so ten cars averaging 1,997 seconds on lap 57 were recorded as green-flag
+    racing.
+
+    The 18 negatives were the visible half. Another 36 periods closed the same
+    way were merely TRUNCATED, silently leaving the tail of a real caution
+    flagged green at times that look perfectly plausible and would never show up
+    in an outlier search.
+
+    So the fallback becomes the latest thing actually observed in that session:
+    the last race control message, the last lap started, or the scheduled end,
+    whichever is furthest along.
+    """
+    df = pd.read_sql("""
+        SELECT s.session_key,
+               s.date_end AS scheduled_end,
+               (SELECT MAX(rc."date") FROM silver_race_control rc
+                 WHERE rc.session_key = s.session_key) AS last_message,
+               (SELECT MAX(l.date_start) FROM silver_laps l
+                 WHERE l.session_key = s.session_key)  AS last_lap_start
+        FROM silver_sessions s
+    """, con)
+
+    for col in ("scheduled_end", "last_message", "last_lap_start"):
+        df[col] = pd.to_datetime(df[col], format="ISO8601", utc=True,
+                                 errors="coerce")
+
+    df["effective_end"] = df[
+        ["scheduled_end", "last_message", "last_lap_start"]
+    ].max(axis=1)
+
+    later = int((df.effective_end > df.scheduled_end).sum())
+    print(f"  sessions running past their scheduled end: {later} "
+          f"of {len(df)}")
+    return dict(zip(df.session_key, df.effective_end))
+
+
+def restart_finder(con: sqlite3.Connection):
+    """
+    Returns f(session_key, after_ts) -> when racing demonstrably resumed.
+
+    WHY INFERENCE IS NEEDED. Closing a period at the session end is only correct
+    when the session really ended under caution. When the closing message is
+    simply missing, it swallows the rest of the race.
+
+    Monaco 2024 is the case that forced this. Race control logs a RED FLAG at
+    13:04:08 and never logs the restart, yet the race resumed and ran to full
+    distance. Extending to the true session end flagged all 1,237 laps of the
+    race as neutralised. Extending to the SCHEDULED end, which is what the code
+    did before, happened to flag fewer laps, but only by accident.
+
+    HOW, AND WHY NOT WITH A THRESHOLD. The obvious rule is "the first lap after
+    the stoppage that runs at a plausible pace". That was tried and rejected on
+    evidence: it is decided by whichever single car does something unusual, and
+    it is not robust to the threshold it needs.
+
+    Japan 2024 is the case. After the red flag the whole field records lap 2 at
+    about 1,711 seconds, 17.5x the session median, because they were parked.
+    Car 22 alone records 203.186s, 2.08x. Moving the cutoff from 2.0x to 2.5x
+    admits that one lap and drags the inferred restart 25 minutes earlier.
+    Requiring several cars to agree did not help either: across cutoffs from
+    1.5x to 10x, and corroboration from 1 to 5 cars, worst-case disagreement was
+    between 1,530 and 2,824 seconds. A constant that moves the answer by 25
+    minutes is a decision in disguise, not a parameter.
+
+    So the estimate is taken from a quantity that needs no cutoff. A car
+    stopped by a red flag is still "on" a lap, and that lap does not end until
+    the race restarts and the car completes it. Its END time is therefore an
+    observation of the restart, give or take the time to finish the lap.
+
+        restart  =  median over cars of (first lap start after the stoppage
+                                         + that lap's duration)
+                    minus one session-median lap
+
+    The median across cars is what makes it robust: one car doing something
+    unusual cannot move it, and no threshold decides who is included.
+
+    Precision is roughly one lap, which is the resolution the flag needs, since
+    the result is only used to decide which laps overlap the period.
+    """
+    laps = pd.read_sql("""
+        SELECT session_key, driver_number, date_start, lap_duration
+        FROM silver_laps
+        WHERE date_start IS NOT NULL AND lap_duration IS NOT NULL
+        ORDER BY session_key, date_start
+    """, con)
+    laps["date_start"] = pd.to_datetime(laps["date_start"], format="ISO8601",
+                                        utc=True, errors="coerce")
+    laps = laps.dropna(subset=["date_start"])
+    laps["date_end"] = laps["date_start"] + pd.to_timedelta(
+        laps["lap_duration"], unit="s")
+
+    medians = laps.groupby("session_key").lap_duration.median()
+    by_session = {
+        key: grp.sort_values("date_start")
+        for key, grp in laps.groupby("session_key", sort=False)
+    }
+
+    def find(session_key, after_ts):
+        grp = by_session.get(session_key)
+        med = medians.get(session_key)
+        if grp is None or med is None or pd.isna(med):
+            return None
+
+        later = grp[grp.date_start > after_ts]
+        if later.empty:
+            return None
+
+        # One lap per car: the first it began after the stoppage started. That
+        # is the lap holding the stoppage, and it cannot end before the restart.
+        first_each = later.groupby("driver_number", sort=False).first()
+        if len(first_each) < MIN_CARS_FOR_RESTART:
+            return None
+
+        # Median across cars, so no single car and no cutoff decides it.
+        restart = first_each["date_end"].median() - pd.Timedelta(seconds=med)
+        # It cannot precede the stoppage itself.
+        return max(restart, after_ts)
+
+    return find
+
+
 def build_periods(con: sqlite3.Connection) -> pd.DataFrame:
     """Pairs deployment messages with their closing messages, per session."""
+    ends = effective_session_end(con)
+    find_restart = restart_finder(con)
+
+    def fallback_end(session_key, start_ts):
+        """
+        Close a period whose ending was never logged.
+
+        Prefers evidence of racing resuming over the session end, and never
+        returns something earlier than the start.
+        """
+        restart = find_restart(session_key, start_ts)
+        if restart is not None:
+            return restart, "restart_inferred"
+        end = ends.get(session_key)
+        if end is None or pd.isna(end) or end < start_ts:
+            return start_ts, "unclosed"
+        return end, "session_end"
+
     rc = pd.read_sql("""
-        SELECT rc.session_key, rc."date", rc.category, rc.flag, rc.scope, rc.message,
-               s.date_end AS session_end
+        SELECT rc.session_key, rc."date", rc.category, rc.flag, rc.scope, rc.message
         FROM silver_race_control rc
-        JOIN silver_sessions s ON s.session_key = rc.session_key
         WHERE rc.category = 'SafetyCar'
            OR (rc.category = 'Flag' AND rc.flag IN ('RED', 'GREEN') AND rc.scope = 'Track')
+           OR UPPER(TRIM(rc.message)) LIKE 'RED FLAG%'
         ORDER BY rc.session_key, rc."date"
     """, con)
 
@@ -95,13 +272,11 @@ def build_periods(con: sqlite3.Connection) -> pd.DataFrame:
         return pd.DataFrame()
 
     rc["date"] = pd.to_datetime(rc["date"], format="ISO8601", utc=True)
-    rc["session_end"] = pd.to_datetime(rc["session_end"], format="ISO8601", utc=True)
 
     periods = []
 
     for session_key, grp in rc.groupby("session_key", sort=False):
         grp = grp.sort_values("date")
-        session_end = grp["session_end"].iloc[0]
 
         greens = grp.loc[
             (grp["category"] == "Flag") & (grp["flag"] == "GREEN"), "date"
@@ -118,18 +293,22 @@ def build_periods(con: sqlite3.Connection) -> pd.DataFrame:
             ts = row["date"]
 
             # --- red flag: session suspended -------------------------------
-            if row["category"] == "Flag" and row["flag"] == "RED":
+            if is_red_flag(row):
                 if open_period is not None:
                     close(open_period, ts, "superseded_by_red")
                     open_period = None
                 nxt = [g for g in greens if g > ts]
+                if nxt:
+                    end_ts, closed_by = nxt[0], "green_flag"
+                else:
+                    end_ts, closed_by = fallback_end(session_key, ts)
                 periods.append({
                     "session_key": session_key,
                     "kind": "RED",
                     "date_start": ts,
-                    "date_end": nxt[0] if nxt else session_end,
+                    "date_end": end_ts,
                     "start_message": row["message"],
-                    "closed_by": "green_flag" if nxt else "session_end",
+                    "closed_by": closed_by,
                 })
                 continue
 
@@ -171,7 +350,9 @@ def build_periods(con: sqlite3.Connection) -> pd.DataFrame:
         # Deployments with no closing message — a race finishing under Safety
         # Car, or one superseded by session end.
         if open_period is not None:
-            close(open_period, session_end, "session_end")
+            end_ts, closed_by = fallback_end(session_key,
+                                             open_period["date_start"])
+            close(open_period, end_ts, closed_by)
 
     df = pd.DataFrame(periods)
     if df.empty:
@@ -179,10 +360,29 @@ def build_periods(con: sqlite3.Connection) -> pd.DataFrame:
 
     df = df.sort_values(["session_key", "date_start"]).reset_index(drop=True)
     df["period_id"] = range(1, len(df) + 1)
+
+    # A period cannot end before it starts. This is the invariant that was
+    # violated for two and a half years without anything noticing, so it is
+    # asserted here rather than left to be rediscovered: a negative duration
+    # makes the lap overlap join match nothing, which reads as "no caution"
+    # rather than as an error.
+    backwards = df["date_end"] < df["date_start"]
+    if backwards.any():
+        print(f"  [WARN] {int(backwards.sum())} period(s) still end before they "
+              "start; clamping to zero length")
+        for _, row in df[backwards].iterrows():
+            print(f"         session {row.session_key} {row.kind} "
+                  f"{row.date_start} -> {row.date_end} ({row.closed_by})")
+        df.loc[backwards, "date_end"] = df.loc[backwards, "date_start"]
+
     df["duration_seconds"] = (df["date_end"] - df["date_start"]).dt.total_seconds()
 
     # A period running to session end can be absurdly long if the closing
     # message was simply never logged; flag rather than silently trust.
+    longest = df.nlargest(3, "duration_seconds")
+    print(f"  periods: {len(df)}  "
+          f"negative: {int((df.duration_seconds < 0).sum())}  "
+          f"longest: {longest.duration_seconds.iloc[0]:,.0f}s")
     return df
 
 
