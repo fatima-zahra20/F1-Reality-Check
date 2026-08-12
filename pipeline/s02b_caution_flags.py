@@ -195,6 +195,27 @@ def safety_car_starts(con: sqlite3.Connection) -> list[dict]:
     return periods
 
 
+def start_procedures(con: sqlite3.Connection) -> dict:
+    """
+    Per session, the timestamps of every restart-procedure message.
+
+    A red-flagged race does not resume when the track goes green, it resumes
+    when the field is released from the grid or from behind the safety car.
+    Race control logs that as 'STANDING START' or 'ROLLING START'.
+    """
+    df = pd.read_sql("""
+        SELECT session_key, "date"
+        FROM silver_race_control
+        WHERE UPPER(message) LIKE '%ROLLING START%'
+           OR UPPER(message) LIKE '%STANDING START%'
+    """, con)
+    if df.empty:
+        return {}
+    df["date"] = pd.to_datetime(df["date"], format="ISO8601", utc=True)
+    return {k: sorted(g["date"].tolist())
+            for k, g in df.groupby("session_key", sort=False)}
+
+
 def effective_session_end(con: sqlite3.Connection) -> dict:
     """
     When did each session actually stop, as opposed to when it was scheduled to?
@@ -332,21 +353,65 @@ def build_periods(con: sqlite3.Connection) -> pd.DataFrame:
     """Pairs deployment messages with their closing messages, per session."""
     ends = effective_session_end(con)
     find_restart = restart_finder(con)
+    procedures = start_procedures(con)
 
-    def fallback_end(session_key, start_ts):
+    def fallback_end(session_key, start_ts, kind="RED", before=None):
         """
         Close a period whose ending was never logged.
 
         Prefers evidence of racing resuming over the session end, and never
         returns something earlier than the start.
+
+        THEN TAKES THE LATER OF THAT AND THE RESTART PROCEDURE, added
+        2026-08-12 for Monaco 2026. The stoppage there was inferred to end at
+        15:11:35, but race control logged STANDING START at 15:14:26, and laps
+        69 and 70 fall in between: the field forming up on the grid, lap 70 at
+        157s against a 77s racing pace, all sixteen cars, recorded as green.
+        Check [21] had it as the loudest unexplained slowdown in the dataset at
+        2.02x.
+
+        WHY max() AND NOT "PREFER THE MESSAGE". Both signals are lower bounds on
+        when racing actually resumed, so the later one is the safer claim, and
+        that single rule handles two opposite cases without a threshold:
+
+          Monaco 2026 logs a bare 'STANDING START', which is the event itself
+          and lands 171s AFTER the inference. The message wins.
+
+          Melbourne 2023 logs 'RACE WILL RESUME AT 15:33 - STANDING START
+          PROCEDURE', which is an announcement of a future time and lands 208s
+          BEFORE the inference. The inference wins.
+
+        Preferring the message outright would have shortened 18 periods.
+        Measured across all 53 weakly-closed red periods, max() extends exactly
+        one: Monaco 2026, by 171 seconds.
+
+        `before` bounds the search at the next GREEN track flag, because a green
+        flag is itself proof racing had resumed, so a procedure message after it
+        belongs to a later event. Without that bound, testing-day periods
+        extended by up to 31,361 seconds by picking up an unrelated message
+        hours later.
         """
         restart = find_restart(session_key, start_ts)
         if restart is not None:
-            return restart, "restart_inferred"
-        end = ends.get(session_key)
-        if end is None or pd.isna(end) or end < start_ts:
-            return start_ts, "unclosed"
-        return end, "session_end"
+            end, closed_by = restart, "restart_inferred"
+        else:
+            end = ends.get(session_key)
+            if end is None or pd.isna(end) or end < start_ts:
+                return start_ts, "unclosed"
+            closed_by = "session_end"
+
+        # RED only. A restart procedure is how a SUSPENDED race resumes. A
+        # safety car ends with 'SAFETY CAR IN THIS LAP' and a green flag, so
+        # letting a procedure message extend an SC period would attach the
+        # wrong event to it.
+        if kind != "RED":
+            return end, closed_by
+
+        later = [p for p in procedures.get(session_key, [])
+                 if p > start_ts and (before is None or p <= before)]
+        if later and later[0] > end:
+            return later[0], "start_procedure"
+        return end, closed_by
 
     rc = pd.read_sql("""
         SELECT rc.session_key, rc."date", rc.category, rc.flag, rc.scope, rc.message
@@ -393,6 +458,8 @@ def build_periods(con: sqlite3.Connection) -> pd.DataFrame:
                 if nxt:
                     end_ts, closed_by = nxt[0], "green_flag"
                 else:
+                    # No green flag follows, so nothing bounds the procedure
+                    # search except the period itself.
                     end_ts, closed_by = fallback_end(session_key, ts)
                 periods.append({
                     "session_key": session_key,
@@ -443,7 +510,8 @@ def build_periods(con: sqlite3.Connection) -> pd.DataFrame:
         # Car, or one superseded by session end.
         if open_period is not None:
             end_ts, closed_by = fallback_end(session_key,
-                                             open_period["date_start"])
+                                             open_period["date_start"],
+                                             kind=open_period["kind"])
             close(open_period, end_ts, closed_by)
 
     df = pd.DataFrame(periods)

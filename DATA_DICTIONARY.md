@@ -1,8 +1,23 @@
 # F1 Reality Check: Data Dictionary
- 
-Reference document for the **silver layer** of `f1.db`. All 18 tables described in the order I'll typically join them in.
- 
-Silver is the cleaned, typed, PK-enforced view of the raw OpenF1 data. Bronze (the unprefixed source tables) is preserved but not queried directly for analysis. For each table below: prose intro, note on what changed from bronze, column table, and any quirks worth knowing before i write queries against it.
+
+Reference document for the **silver layer** of `f1.db`, described in the order I'll typically join them in.
+
+Silver is the cleaned, typed, PK-enforced view of the raw OpenF1 data. Bronze (the unprefixed source tables in `bronze_f1.db`) is preserved but not queried directly for analysis. For each table below: prose intro, note on what changed from bronze, column table, and any quirks worth knowing before i write queries against it.
+
+> ## Read this first: analysis should query gold, not silver
+>
+> Since 2026-08-11 there is a **gold layer** at `DATA INGESTION/gold_f1.db`, built by `pipeline/s07_build_gold.py`. 18 tables, 741k rows, 158 MB. It is the layer every analytical, diagnostic and predictive question should read.
+>
+> Silver remains the source of truth about *what the API said*. Gold is the source of truth about *what the data means*: the decisions that are properties of the data rather than of whoever is querying, made once and carried as columns.
+>
+> **Several recommendations in this document were written before gold existed and have since been measured and reversed.** Where that has happened it is called out inline, in a block like this one. The two that matter most:
+>
+> - the `lap_duration BETWEEN 60 AND 300` window under [`silver_laps`](#silver_laps), **withdrawn**
+> - "filter pit duration outliers in gold" under [`silver_pit`](#silver_pit), **withdrawn**
+>
+> Both turned out to be patches over caution-detection bugs rather than data-quality rules. See [The gold layer](#the-gold-layer) and NOTES_LOG #48 through #51.
+>
+> **Row counts throughout this document are as-of the date beside them and are maintained by hand.** Treat a count as an order of magnitude, not a current fact. `pipeline/s03_verify.py` reports live counts on every run.
 
 ## Table of Contents
  
@@ -27,9 +42,10 @@ Silver is the cleaned, typed, PK-enforced view of the raw OpenF1 data. Bronze (t
 - [Championship Standings](#championship-standings)
   - [silver_championship_drivers](#silver_championship_drivers)
   - [silver_championship_teams](#silver_championship_teams)
-- [Telemetry](#telemetry)
-  - [silver_car_data](#silver_car_data)
-  - [silver_location](#silver_location)
+- [Telemetry](#telemetry) *(bronze only)*
+  - [car_data](#car_data-bronze)
+  - [location](#location-bronze)
+- [The gold layer](#the-gold-layer)
 - [The Story of a Season](#the-story-of-a-season)
 
 
@@ -54,8 +70,8 @@ erDiagram
     silver_sessions ||--o{ silver_weather : "measures"
     silver_sessions ||--o{ silver_championship_drivers : "snapshots"
     silver_sessions ||--o{ silver_championship_teams : "snapshots"
-    silver_sessions ||--o{ silver_car_data : "telemetry"
-    silver_sessions ||--o{ silver_location : "telemetry"
+    silver_sessions ||--o{ car_data : "telemetry (bronze only)"
+    silver_sessions ||--o{ location : "telemetry (bronze only)"
  
     silver_meetings {
         INTEGER meeting_key PK
@@ -193,7 +209,26 @@ country_code availability: populated for 2023–2024 (with 14 systemic nulls in 
  
 **Null pattern**: sector times and speed traps are recorded by separate systems. duration_sector_N nulls do NOT imply corresponding iN_speed nulls, or vice versa. Each column's null status should be checked independently.
 
-**Data quality note:** the 3,510-second "lap" is real — it's a car sitting under a red flag. Don't filter these in silver; filter in gold with `WHERE lap_duration BETWEEN 60 AND 300` or similar depending on the analysis.
+**Data quality note:** the 3,510-second "lap" is real, a car sitting under a red flag. Don't filter these in silver.
+
+> **This entry recommended `WHERE lap_duration BETWEEN 60 AND 300` until 2026-08-11. That advice was wrong and is withdrawn. Do not use a duration window.**
+>
+> It was never used at any call site, and measuring it showed why it should not be:
+>
+> - **The floor cannot fire.** Zero laps of 239,102 are under 60 seconds. The fastest lap in the dataset is 63.971s at Spielberg, so a 60s floor sits below the physical limit of the sport.
+> - **The ceiling was redundant.** On race laps already flagged green and not pit-out, a 60-200s window removed 11 further laps of 81,769, and **ten of those eleven were lap 1 of the 2025 Belgian Grand Prix**. That was not an outlier population, it was a race that started behind the safety car and was never detected. After fixing that (NOTES_LOG #48), the window removes **one lap in 81,689**.
+>
+> So the window was never a validity rule. It was a patch over a caution-detection bug, covering about a tenth of it.
+>
+> **Use `gold_lap` instead**, which answers this as conformed columns:
+>
+> | Column | Meaning |
+> |---|---|
+> | `is_valid_lap` | `lap_duration IS NOT NULL`: the lap completed and was timed |
+> | `is_representative_lap` | valid, not neutralised, not a pit-out lap |
+> | `pace_ratio` | `lap_duration / session green median`, so an outlier is visible rather than deleted |
+>
+> `is_representative_lap` is what fourteen call sites were each approximating by hand. See NOTES_LOG #49.
  
 
 ### `silver_stints`
@@ -213,7 +248,11 @@ country_code availability: populated for 2023–2024 (with 14 systemic nulls in 
 | `compound` | TEXT | Yes | `SOFT`, `MEDIUM`, `HARD`, `INTERMEDIATE`, `WET`, `UNKNOWN`, `TEST_UNKNOWN`. 80 nulls |
 | `tyre_age_at_start` | INTEGER | Yes | Laps already on this tyre set when the stint began. 22 nulls |
  
-**Quirk:** Normal to see rows where `lap_end < lap_start` (24 rows total). Two patterns: (a) `lap_end = lap_start - 1` means the stint started a lap but the driver retired/pitted before completing it; (b) `lap_start = 1, lap_end = 0` are phantom stints from cancelled sessions. Both are real, silver preserves them, gold should filter with `WHERE lap_end >= lap_start` for "real" stints.
+**Quirk:** Normal to see rows where `lap_end < lap_start` (**27** rows as of 2026-08-12). Two patterns: (a) `lap_end = lap_start - 1` means the stint started a lap but the driver retired or pitted before completing it; (b) `lap_start = 1, lap_end = 0` are phantom stints. Both are real and silver preserves them. `gold_stint` flags them as `is_phantom_stint` rather than filtering, so a consumer can opt out with `WHERE is_phantom_stint = 0`.
+
+**The boundary convention, which cost a wrong measurement to find.** A stint ends on the lap the car pits and the next stint begins on that **same** lap. So a test for overlap written as `lap_start <= previous lap_end` matches **13,914 perfectly normal stints**, and reports 40% of the table as broken. Only `lap_start < previous lap_end` is a real overlap, and there are **42**, plus 56 coverage gaps, all in practice and testing sessions. `gold_stint` exposes `overlaps_previous` and `gap_from_previous` so this does not have to be rediscovered.
+
+`is_valid_stint` combines all three: a usable lap range, not phantom, not overlapping. Note it is **stricter** than the `lap_end >= lap_start` filter used elsewhere, so a stint count built on it will be lower.
 
 ### `silver_pit`
  
@@ -228,11 +267,30 @@ country_code availability: populated for 2023–2024 (with 14 systemic nulls in 
 | `lap_number` | INTEGER PK | No | Lap on which the pit occurred |
 | `meeting_key` | INTEGER | No | Denormalized |
 | `date` | TEXT | No | ISO 8601 UTC of the stop |
-| `stop_duration` | REAL | Yes | Stationary time in the pit box (tyre change proper). 25,830 nulls — F1 timing doesn't always report this separately |
-| `lane_duration` | REAL | Yes | Total time in the pit lane (entry to exit). 6,046 nulls |
-| `pit_duration` | REAL | Yes | Total time lost vs staying on track. 6,046 nulls |
- 
-**Quirk:** `pit_duration` max is **16,921 seconds** (~4.7 hours). That's a car sitting in the pit lane during a red-flag suspension. Real value with a special meaning; filter in gold if it distorts averages.
+| `stop_duration` | REAL | Yes | Stationary time in the pit box (tyre change proper). Only 1,038 of 29,573 rows populated. See the coverage warning below |
+| `lane_duration` | REAL | Yes | **A duplicate of `pit_duration`.** Byte-identical across all 22,898 populated rows, maximum absolute difference 0.0. Not carried into gold. Prefer `pit_duration` |
+| `pit_duration` | REAL | Yes | Total time in the pit lane, entry to exit. 6,675 nulls |
+
+**`stop_duration` coverage is far thinner than `STOP_DURATION_MIN_YEAR = 2024` implies.** That constant reads as "usable from 2024". Actual race coverage by year:
+
+| Year | Race stops with `stop_duration` |
+|---|---|
+| 2023 | 0% |
+| 2024 | 18.1% |
+| 2025 | 85.5% |
+| 2026 | 33.8% |
+
+Comparing 2024 with 2025 on this column compares an 18% sample against an 85% one. `gold_pit` carries `has_stop_duration` per row instead of a year cutoff, so the gap is visible rather than assumed away.
+
+**Quirk, and the advice reversed:** `pit_duration` max is **16,921 seconds** (~4.7 hours). This entry used to say "filter in gold if it distorts averages". **Do not filter it.** Measuring the tail showed it is not an error population:
+
+- **96.4%** of race stops over 60 seconds happened under a caution, **92%** under a red flag.
+- The extreme tail is Zandvoort 2023 laps 63-64, the whole field parked in the pit lane during a stoppage.
+- Once the session type is scoped and the lap's own caution flag attached, green race stops sit at a **23.3s median and a 41.2s 99th percentile**, and there is nothing left to fence off.
+
+`gold_pit` therefore has no duration threshold anywhere. It carries `under_caution`, `is_race_stop` and `is_green_race_stop`, the last being the conformed population for "how long does a pit stop take".
+
+The Tukey fence at `DESCRIPTIVE ANALYTICS/pit_stops_05.sql` was re-derived and is population dependent: **36.76s** over all race stops, **29.65s** over green ones only. A number that moves with the query is a local choice, so it stays at that call site rather than becoming a property of the data.
 
 ### `silver_position`
  
@@ -416,12 +474,22 @@ country_code availability: populated for 2023–2024 (with 14 systemic nulls in 
 | `points_current` | REAL | No | Max observed: 860 |
 
 ## Telemetry
- 
-### `silver_car_data`
- 
-**Per-tick car telemetry**, ~3.7Hz per driver per session. 9,365,942 rows. Only 32/490 sessions have this data — OpenF1's historical telemetry isn't comprehensive.
- 
-**What changed from bronze:** everything cast to INTEGER; no CHECK constraints on `n_gear` (~600 rows have corrupt values above 8, preserved for gold to filter).
+
+> **These two live in BRONZE only. There are no `silver_car_data` or `silver_location` tables.**
+>
+> Their silver copies were **dropped in the 2026-07-28 split**, which took `f1.db` from 6.4 GB to 352 MB. They cover 32 of 490 sessions, so they cannot be model features or appear in season-wide aggregates, and carrying 35M rows of them through silver bought nothing.
+>
+> Query them from `bronze_f1.db` under their unprefixed names, `car_data` and `location`. `s05b_perfect`, `s05c_racemap` and `s05d_telemetry` do exactly that. The column documentation below still applies; only the location changed.
+>
+> They are also **not in gold**, for the same coverage reason. `config.INCLUDE_TELEMETRY_IN_WEEKLY` is `False`, so the scheduled run skips them entirely.
+
+### `car_data` (bronze)
+
+**Per-tick car telemetry**, ~3.7Hz per driver per session. 9,365,942 rows. Only 32 of 490 sessions have this data; OpenF1's historical telemetry isn't comprehensive.
+
+**What changed from bronze:** nothing, this *is* bronze. When silver copies existed, everything was cast to INTEGER with no CHECK constraint on `n_gear`.
+
+**`n_gear` has ~600 corrupt rows above 8.** This entry used to say they were "preserved for gold to filter". **Gold does not filter them, and cannot**, because gold is built from silver and these tables are not in silver. The only reference to the constraint anywhere in the codebase is a comment in `DATA PROFILING/EDA_05.sql`. If you query `car_data` directly, filter `n_gear BETWEEN 1 AND 8` yourself.
  
 | Column | Type | Nullable | Notes |
 |---|---|---|---|
@@ -436,9 +504,11 @@ country_code availability: populated for 2023–2024 (with 14 systemic nulls in 
 | `n_gear` | INTEGER | No | 0-8 for real values; ~600 rows show 9-128 (telemetry corruption) |
 | `drs` | INTEGER | Yes | 0/1/8 = disabled, 10/12/14 = active, 9 = undocumented. 570,856 nulls |
 
-### `silver_location`
- 
-**Per-tick x/y/z coordinates**, same sampling as car_data. 25,849,231 rows — the largest table by far. Only some sessions have telemetry.
+### `location` (bronze)
+
+**Per-tick x/y/z coordinates**, same sampling as `car_data`. 25,849,231 rows, the largest table in the project by far. Only some sessions have telemetry. Bronze only, see the note at the top of this section.
+
+This is the source for `map_measured_xy` and `map_circuit_outline` in the dashboard bundle, built by `s05c_racemap.py`. Those two are the reason the bundle is 67 MB rather than 30.
  
 **Coordinates are in millimeters relative to the circuit's local origin.** Observed ranges: x ±17m, y ±18m, z -0.25 to 22m. z includes elevation (kerbs, hills, banking).
  
@@ -452,6 +522,70 @@ country_code availability: populated for 2023–2024 (with 14 systemic nulls in 
 | `y` | INTEGER | No | mm |
 | `z` | INTEGER | No | mm (elevation) |
 
+## The gold layer
+
+`DATA INGESTION/gold_f1.db`, built by `pipeline/s07_build_gold.py --execute`. Rebuilt on every pipeline run, before the serving layers, because it is fully derived and a stale gold layer would be analysed as if current.
+
+*As of 2026-08-12: 18 tables, 741,118 rows, 158.0 MB. Smaller than silver's 368 MB.*
+
+### The three rules it obeys
+
+**1. It flags, it does not filter.** Every row in the silver source survives. A red-flag lap, a 2,485-second pit stop and a phantom stint are all real records of real events, and some later question will ask about them. A consumer that wants them gone selects on a flag. The one place this has a visible cost: keeping Melbourne 2026 car 18 lap 33 (1,168s, one car, `pace_ratio` 13.8) moves the Aston Martin 2026 mean lap by 1.2568s relative to filtering it. That is the design working.
+
+**2. No constant that decides the answer.** Every threshold was measured or removed. Twice a rule was replaced rather than tuned because its constant moved the result: `RESTART_FACTOR` (NOTES_LOG #47) and the lap duration window (#49).
+
+**3. It does not hold the training matrix.** That is assembled outside the database, because which seasons, which lag and which target are modelling decisions gold must not take sides on. For the same reason `EXCLUDED_TEAMS` is **not** a gold column: excluding Cadillac is a modelling decision (no 2023-25 history, so trailing features are undefined), not a property of the data.
+
+### Tables
+
+**Dimensions**
+
+| Table | Grain | Notes |
+|---|---|---|
+| `gold_session` | `session_key` | Session + meeting + circuit on one row. Carries the scope predicate as columns: `has_laps`, `has_result`, `is_completed`, `is_analysable`. Plus race-level derived counts: `dnf_count`, `sc_periods`, `vsc_periods`, `red_flag_periods`, `avg_track_temp`, `pct_samples_wet`, `is_wet_race`, `round`, `total_laps`, `green_median_lap_s` |
+| `gold_driver` | `(driver_number, full_name)` | **A driver number is not a driver.** 34 of 57 numbers belong to more than one person: #1 is Verstappen 2023-25, Paul Aron for one 2023 session, Norris in 2026. `shares_number` flags the ambiguous ones. Do not join facts through here; use `gold_entry` |
+| `gold_entry` | `(session_key, driver_number)` | Who drove for whom, with `team_name` conformed and `team_name_raw` beside it |
+
+**Facts**
+
+| Table | Grain | Notes |
+|---|---|---|
+| `gold_lap` | `(session_key, driver_number, lap_number)` | The wide lap fact. Session, meeting, team and driver context on the row, so the laps-to-sessions-to-meetings join disappears. Carries `is_valid_lap`, `is_representative_lap`, `pace_ratio`, the caution flags, tyre `compound` and `tyre_age`, and lap-start state (`position`, both gaps) |
+| `gold_stint` | `(session_key, driver_number, stint_number)` | `is_phantom_stint`, `overlaps_previous`, `gap_from_previous`, `has_known_compound`, `is_valid_stint` |
+| `gold_pit` | one row per stop | `under_caution`, `is_race_stop`, `is_green_race_stop`, `has_stop_duration`. No duration threshold anywhere |
+| `gold_session_result` | `(session_key, driver_number)` | Result plus the grid it started from, which needs a hop out to the meeting and back into Qualifying. `positions_gained`, `classified`, `has_grid` |
+| `gold_weather` | `(session_key, date)` | |
+| `gold_overtake` | one row per pass | Both drivers' teams conformed, plus `same_team` |
+| `gold_position` | `(session_key, driver_number, date)` | |
+| `gold_race_control` | `id` | With the classification the caution builder uses: `is_red_flag_message`, `is_safety_car_message`, `is_sc_start_announcement` |
+| `gold_championship` | `(session_key, entity)` | Drivers and constructors in one table, split by `entity_type` |
+
+**Aggregates**, built from the facts above rather than from silver, so a defect fixed once is fixed everywhere.
+
+| Table | Grain |
+|---|---|
+| `gold_agg_interval` | `(session_key, driver_number)`: close-running share from the full interval series |
+| `gold_agg_driver_session` | `(session_key, driver_number)`: pace over representative laps, stints, pit work |
+| `gold_agg_driver_race` | `(session_key, driver_number)` for races and sprints: result, grid, pace, tyres, pit work, standings, overtakes, teammate deltas |
+| `gold_agg_driver_season` | `(year, driver_number)` |
+| `gold_agg_team_season` | `(year, team_name)` |
+| `gold_agg_circuit_season` | `(year, circuit_short_name)` |
+
+### What is not carried, and why
+
+- **`silver_intervals` and `silver_position` raw.** 2.4M rows of sub-second series. They enter at the two grains anything actually asks for: one reading per lap on `gold_lap`, and a close-running share in `gold_agg_interval`. The lap reading uses `direction="backward"`, the state as the lap *began*, because `"nearest"` can return a sample from after the lap started and a predictive feature built on that is leakage.
+- **`lane_duration`.** Byte-identical to `pit_duration` across all 22,898 populated rows.
+- **`silver_team_radio`.** Audio URLs with no transcription.
+- **Telemetry.** `car_data` and `location` are bronze-only and cover 32 of 490 sessions. `s05b_perfect`, `s05c_racemap` and `s05d_telemetry` keep a bronze connection for them, correctly.
+- **Two-pass medians.** Both `s04` and `s05` normalise against a median taken *after* trimming laps above `LAP_OUTLIER_FACTOR`. Gold's `session_green_median_s` is single-pass, which is the right denominator for `pace_ratio` (using the trimmed median to decide the trim would be circular) but the wrong one for normalisation. Shipping a `lap_vs_median` off the single-pass median would differ from the published column on 23,046 of 90,053 race laps while looking like the same thing, so it is deliberately absent. Consumers compute it in two lines.
+
+### Provenance
+
+`_gold_build_state` records rows, columns and build time per table, so a stale gold layer can be spotted the way `_silver_build_state` lets the gate spot a stale silver one.
+
+`pipeline/audit_consumer_rules.py` reports which modelling decisions gold now owns and how many call sites still make their own. As of 2026-08-12: **8 of 10 owned**, 3 still in genuine conflict.
+
+
 ## The Story of a Season
  
 Follow one row of data from creation to storage. This is how a single season lives inside `f1.db`.
@@ -460,7 +594,7 @@ Follow one row of data from creation to storage. This is how a single season liv
  
 **Day 1 of testing begins.** A single test session is created — one row in `silver_sessions` with `session_type = 'Practice'`, `session_name = 'Day 1'`. Ten teams roll their cars out. Twenty (sometimes more) driver entries populate `silver_drivers` — one row per driver per session, capturing their car number, team, colour. Reserve drivers get their turn on Day 2 and Day 3 — new rows in `silver_drivers` for the same drivers under new session_keys.
  
-**A car goes out on track.** As the car reaches the pit exit, `silver_car_data` starts writing — 3-4 rows per second per driver, capturing throttle, brake, rpm, speed, gear. At the same moment, `silver_location` starts writing x/y/z coordinates at the same rate. Every 60 seconds or so, `silver_weather` gets a fresh row: air temp, track temp, humidity, whether it's raining. The car crosses the start/finish line for the first time — a row lands in `silver_laps` with lap_number = 1, sector times, i1/i2/st speeds, and `is_pit_out_lap = 1`. A `silver_stints` row registers the tyres they went out on. If the driver messages the pit wall over the radio, `silver_team_radio` records the audio URL.
+**A car goes out on track.** As the car reaches the pit exit, `car_data` starts writing, 3-4 rows per second per driver, capturing throttle, brake, rpm, speed, gear. At the same moment, `location` starts writing x/y/z coordinates at the same rate. Every 60 seconds or so, `silver_weather` gets a fresh row: air temp, track temp, humidity, whether it's raining. The car crosses the start/finish line for the first time and a row lands in `silver_laps` with lap_number = 1, sector times, i1/i2/st speeds, and `is_pit_out_lap = 1`. A `silver_stints` row registers the tyres they went out on. If the driver messages the pit wall over the radio, `silver_team_radio` records the audio URL.
  
 **Race control flags a moment.** A yellow flag in Sector 2? A row goes into `silver_race_control` with `category = 'Flag'`, `flag = 'YELLOW'`, `scope = 'Sector'`, `sector = 2`. Later that day: `flag = 'CHEQUERED'`, marking the end of the day's running.
  
@@ -468,7 +602,7 @@ Follow one row of data from creation to storage. This is how a single season liv
  
 **Qualifying happens on Saturday.** Fastest lap per driver per Q1/Q2/Q3 gets tracked in `silver_laps`. Race control logs when Q1 starts/ends (`qualifying_phase = 1`), same for Q2 and Q3. At the end, `silver_session_result` records where each driver finished — no points here, just finishing positions and their fastest lap time in `duration`. That result determines the grid for tomorrow — a fresh set of 20 rows in `silver_starting_grid` with `position` 1 through 20 and each driver's qualifying `lap_duration`.
  
-**Sunday morning: the race.** The formation lap begins — `silver_car_data` and `silver_location` start streaming for the race session. Lights go out at ~14:00 local time. First lap: chaos in Turn 1. A driver overtakes three cars at once through the run to Turn 2 — three rows in `silver_overtakes`, all with the same `date` (timestamp resolution can't separate them), each row a distinct `overtaking → overtaken` pair. Same event triggers rows in `silver_position` for every affected driver, each capturing their new position.
+**Sunday morning: the race.** The formation lap begins and `car_data` and `location` start streaming for the race session. Lights go out at ~14:00 local time. First lap: chaos in Turn 1. A driver overtakes three cars at once through the run to Turn 2, giving three rows in `silver_overtakes`, all with the same `date` (timestamp resolution can't separate them), each row a distinct `overtaking → overtaken` pair. Same event triggers rows in `silver_position` for every affected driver, each capturing their new position.
  
 **Lap by lap.** Every driver completes a lap — one row each in `silver_laps` with sector times and speeds. Every ~4 seconds, `silver_intervals` captures the gap to the car ahead (`interval_seconds`) and to the leader (`gap_to_leader_seconds`). If a driver gets lapped by the leader, their next `silver_intervals` row shows `gap_to_leader_seconds = NULL` and `gap_to_leader_laps = 1` instead.
  

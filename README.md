@@ -70,22 +70,21 @@ first-order design decision rather than a detail.
 |---|---|
 | **Source** | [OpenF1 API](https://openf1.org) — unofficial public F1 data |
 | **Coverage** | 2023 – 2026 |
-| **Store** | SQLite (`DATA INGESTION/f1.db`, ~6.5 GB) |
-| **Layers** | Bronze (raw ingested tables) → Silver (18 typed, PK-enforced tables) |
-| **Grain** | Per driver, per lap, per session — down to ~3.7 Hz telemetry where available |
+| **Store** | SQLite, three files: `bronze_f1.db` 3.0 GB, `f1.db` 368 MB (silver), `gold_f1.db` 158 MB |
+| **Layers** | Bronze (raw) → Silver (18 typed, PK-enforced) → Gold (18 conformed, what analysis reads) |
+| **Grain** | Per driver, per lap, per session, down to ~3.7 Hz telemetry where available |
 
-Scale of the silver layer:
+Scale of the silver layer. *Counts as of 2026-08-12; `s03_verify` reports them live on
+every run.*
 
 | Table | Rows |
 |---|---:|
-| `silver_location` | 25,849,231 |
-| `silver_car_data` | 9,365,942 |
 | `silver_intervals` | 2,131,182 |
 | `silver_position` | 310,397 |
 | `silver_laps` | 239,102 |
 | `silver_weather` | 47,726 |
 | `silver_stints` | 34,567 |
-| `silver_pit` | 26,791 |
+| `silver_pit` | 29,573 |
 | `silver_race_control` | 22,423 |
 | `silver_overtakes` | 22,438 |
 | `silver_team_radio` | 15,575 |
@@ -130,51 +129,69 @@ to 70 when the backfill recovered four previously-missing races.
 
 ## Architecture
 
+### What exists and runs
+
 ```
 OpenF1 API
     │
     ▼
-[ openf1_ingestion / s01_backfill ]  ──▶  bronze tables
+[ s01_ingest / s01_backfill ]  ──▶  bronze_f1.db      3.0 GB, raw
     │
     ▼
-[ s02_build_silver ]  ──▶  18 typed, PK-enforced silver tables
+[ s02_build_silver ]  ──▶  f1.db                      368 MB, 18 typed, PK-enforced
     │
     ▼
-[ s02b_caution_flags ]
+[ s02b_caution_flags ]  ──▶  silver_caution_periods, silver_lap_flags
     │
     ▼
-[ s03_verify ]  ──▶  invariant gate: FAIL halts the run
-    │
-    ├──▶ [ s04_descriptive ]  ──▶  aggregate output tables
-    ├──▶ [ s05_diagnostic ]   ──▶  recomputed statistics
+[ s03_verify ]  ──▶  21-check invariant gate: FAIL halts the run
     │
     ▼
-[ s06_features ]  ──▶  training table (strictly trailing features)
+[ s07_build_gold ]  ──▶  gold_f1.db                   158 MB, 18 conformed tables
+    │                    every question below reads this, not silver
     │
-    ▼
-[ s07_train ]  ──▶  model + metrics, versioned
-    │
-    ▼
-[ s08_predict ]  ──▶  win probabilities for the next race
-    │
-    ▼
-[ s09_export ]  ──▶  outputs/*.csv  ──▶  Tableau dashboard
+    ├──▶ [ s04_descriptive ]  ──▶  7 fact/dim tables, written into the bundle
+    ├──▶ [ s05_diagnostic ]   ──▶  29 statistical tests           ──▶ csv
+    ├──▶ [ s05b_perfect ]     ──▶  perfect-lap model              ──▶ csv
+    ├──▶ [ s05c_racemap ]     ──▶  circuit geometry (bronze telemetry) ──▶ csv
+    └──▶ [ s05d_telemetry ]   ──▶  tow and DRS effects            ──▶ csv
+                   │
+                   ▼
+        [ s06_publish ]  ──▶  dashboard.db (21 tables) ──▶ gzip ──▶ GitHub Release
+                                                                        │
+                                                                        ▼
+                                                          Streamlit app downloads it
 ```
 
+`s07` runs **before** `s04` and `s05` and halts the run if it fails. Gold is fully
+derived, so a run that rebuilt silver and skipped gold would analyse the previous week's
+data and report success. That is the same failure shape as the scheduled task dying
+silently for four months (NOTES_LOG #43).
+
+### What does not exist yet
+
+The predictive layer. A training table, a model, and a prediction step are the next
+phase and are **not built**. Earlier versions of this diagram showed them as
+`s06_features` / `s07_train` / `s08_predict` / `s09_export`, which was aspirational and
+also collided with the real `s07_build_gold`. When they arrive they will read gold and
+assemble the training matrix **outside** the database, because which seasons, which lag
+and which target are modelling decisions gold must not take sides on.
+
 Each step is an independent, idempotent Python entry point. `run_pipeline.py` sequences
-them and exits non-zero on failure. The orchestrator is therefore a swappable detail —
-currently Windows Task Scheduler, trivially replaceable with Airflow, Prefect, or
+them and exits non-zero on failure. The orchestrator is therefore a swappable detail,
+currently Windows Task Scheduler, trivially replaceable with Airflow, Prefect or
 Dagster because the task boundaries are already clean.
 
 **Scheduling is calendar-driven, not fixed-weekday.** A race weekend is bursty, not a
-steady drip: results land early in the week, and grid position — the single strongest
-individual predictor — does not exist until Saturday. Runs are therefore triggered off
+steady drip: results land early in the week, and grid position, the single strongest
+individual predictor, does not exist until Saturday. Runs are therefore triggered off
 the session calendar in `silver_sessions`.
 
-**Telemetry is excluded from the scheduled run.** `silver_car_data` and
-`silver_location` account for ~35M of the database's rows but cover only 32 of 490
-sessions, making them unusable as model features. They are refreshed manually on
-demand.
+**Telemetry lives in bronze only.** `car_data` (9.4M rows) and `location` (25.8M) cover
+32 of 490 sessions, so they cannot be model features or appear in season-wide
+aggregates. Their silver copies were **dropped in the 2026-07-28 split**, which took
+`f1.db` from 6.4 GB to 352 MB. `s05b`, `s05c` and `s05d` read them from bronze directly.
+They are excluded from the scheduled run and refreshed manually.
 
 ---
 
@@ -312,34 +329,52 @@ events, it very likely will not.
 ```
 F1-Reality-Check/
 ├── DATA INGESTION/
-│   ├── f1.db                      SQLite store (gitignored)
+│   ├── bronze_f1.db               raw API output, 3.0 GB (gitignored)
+│   ├── f1.db                      silver, 368 MB (gitignored)
+│   ├── gold_f1.db                 gold, 158 MB (gitignored, rebuilt by s07)
 │   └── openf1_ingestion.py        API ingestion
 ├── SCHEMA MODELING/
-│   └── to_silver.sql              bronze → silver build
+│   └── to_silver.sql              reference only; s02 is the executable build
 ├── DATA PROFILING/
-│   ├── EDA_01–07.sql              PK verification, column profiling,
+│   ├── EDA_01-07.sql              PK verification, column profiling,
 │   │                              completeness, domain integrity,
 │   │                              consistency, cardinality, temporal coverage
 │   └── EDA_08.ipynb
 ├── DESCRIPTIVE ANALYTICS/         10 SQL files, one per story-of-a-race theme
 ├── DIAGNOSTIC ANALYTICS/          7 notebooks (statistical tests + regressions)
+├── dashboard/                     Streamlit app: views, story pages, race map
 ├── pipeline/
 │   ├── config.py                  single source of truth for all paths
+│   ├── run_pipeline.py            sequences everything, exits non-zero on failure
+│   ├── s01_ingest.py              weekly incremental ingest
 │   ├── s01_backfill.py            targeted re-ingestion of failed fetches
-│   ├── s02_build_silver.py        bronze → silver build driver
+│   ├── s02_build_silver.py        bronze -> silver build driver
 │   ├── s02b_caution_flags.py      range-based SC / VSC / RED periods
-│   └── s03_verify.py              invariant gate
-├── outputs/                       pipeline outputs consumed by Tableau
+│   ├── s03_verify.py              21-check invariant gate
+│   ├── s07_build_gold.py          silver -> gold, 18 conformed tables
+│   ├── s04_descriptive.py         7 fact/dim tables, written into the bundle
+│   ├── s05_diagnostic.py          29 statistical tests
+│   ├── s05b_perfect.py            perfect-lap model
+│   ├── s05c_racemap.py            circuit geometry from bronze telemetry
+│   ├── s05d_telemetry.py          tow and DRS effects
+│   ├── s06_publish.py             bundle + upload to the GitHub Release
+│   └── audit_consumer_rules.py    which decisions gold owns vs re-decided
+├── outputs/dashboard/             the bundle, plus 18 analysis-output CSVs
 ├── models/                        serialized models + metrics, versioned
 ├── logs/
 ├── data_prep.py                   shared loaders and cleaning utilities
-├── DATA_DICTIONARY.md             column-level documentation, all 18 tables
+├── streamlit_app.py               dashboard entrypoint
+├── DATA_DICTIONARY.md             column-level documentation, silver and gold
+├── GOLD_INVENTORY.md              the audit that motivated the gold layer
 ├── NOTES_LOG.md                   data-quality findings + decisions
 ├── environment-pipeline.yml
 └── requirements.txt
 ```
 
-Steps `s04`–`s09` from the architecture diagram are not yet written.
+`s07` is numbered after `s06` but **runs before `s04` and `s05`**, because they read
+gold. The numbering is historical: `s07` was going to be a training step.
+
+The predictive layer is not yet written.
 
 ---
 
@@ -360,15 +395,17 @@ or with pip:
 pip install -r requirements.txt
 ```
 
-**The database is not in version control.** It is 6.5 GB of regenerable output, not
-source. Rebuild it from the API:
+**No database is in version control.** All three are regenerable output, not source, and
+`*.db` is gitignored. Rebuild from the API:
 
 ```bash
 python "DATA INGESTION/openf1_ingestion.py"     # first-time ingest
-python pipeline/s01_backfill.py                 # dry run — shows the plan
+python pipeline/s01_backfill.py                 # dry run, shows the plan
 python pipeline/s01_backfill.py --execute       # add --include-optional for pit/team_radio
+python pipeline/s01_backfill.py --recheck-empty # an "empty" verdict is not permanent
 python pipeline/s02_build_silver.py
 python pipeline/s02b_caution_flags.py           # derived caution tables
+python pipeline/s07_build_gold.py --execute     # gold: what analysis reads
 ```
 
 **Verify before trusting anything.** The gate re-checks every invariant established
@@ -378,15 +415,81 @@ during profiling and exits non-zero on failure:
 python pipeline/s03_verify.py
 ```
 
-It reports three tiers: **FAIL** (an invariant broke — the pipeline must stop), **WARN**
-(a known, accepted quirk worth re-seeing each run), and **INFO** (drift monitoring —
+It reports three tiers: **FAIL** (an invariant broke, the pipeline must stop), **WARN**
+(a known, accepted quirk worth re-seeing each run), and **INFO** (drift monitoring,
 row counts and coverage, logged and diffed week over week).
+
+**Or run the whole thing.** `run_pipeline.py` sequences everything, skips the serving
+layers if the gate fails, and stops if gold fails:
+
+```bash
+python pipeline/run_pipeline.py                  # dry run: plans ingest, builds nothing
+python pipeline/run_pipeline.py --execute
+python pipeline/run_pipeline.py --execute --publish   # also refresh the live dashboard
+```
+
+`--publish` needs `GITHUB_TOKEN` with `contents:write`. Note that the deployed Streamlit
+app caches the downloaded bundle in its container's temp directory, so **publishing takes
+effect on Reboot, not on Clear cache**.
+
+**Which layer to query.** Silver is the source of truth about what the API said. Gold is
+where the decisions live, and is what every analysis should read. Two audits keep that
+honest:
+
+```bash
+python pipeline/audit_consumer_rules.py    # which decisions gold owns vs re-decided at call sites
+python pipeline/s07_build_gold.py --list   # the 18 gold tables
+```
 
 ---
 
 ## Data quality register
 
 these gaps were found and fixed, not standing
+
+**Caution periods were wrong in five separate ways, and every one of them left real
+neutralised laps recorded as green-flag racing.** Found 2026-08-11 and 2026-08-12. The
+recurring shape: race control announces the event **in prose under
+`category='Other'`** rather than as a flag, so a parser looking for flags never sees it.
+
+| # | Bug | Effect |
+|---|---|---|
+| 1 | `RED FLAG - RACE SUSPENDED` as message text, not `flag='RED'` | 20 pre-season red flags missed; Monaco 2026 ran 17 laps of 2,260s each as green |
+| 2 | Unclosed periods closed at the **scheduled** session end | any race that overran closed early; 18 periods had `date_end < date_start`, 36 more silently truncated |
+| 3 | Restarts inferred with an untested `RESTART_FACTOR = 2.0` | moving it to 2.5 shifted one restart by 25 minutes, decided by a single car |
+| 4 | A race that **starts** behind the safety car sends no deployment message | Spa 2025 ran its first four laps at 1.57-1.86x pace, all 80 recorded green |
+| 5 | A red flag resuming with a **standing start** closed before the grid formed | Monaco 2026 lap 70, sixteen cars at 2.02x, unflagged |
+
+Bug 3 was **replaced rather than tuned**: a constant that changes the answer is a
+decision in disguise. The rule became the median across cars of (first lap started after
+the stoppage + its duration) minus one session-median lap. Sensitivity across
+`MIN_CARS` 2/3/5/8 is **0.0s**, against 1,530-2,824s for the rule it replaced.
+
+`neutralised` went from 17,076 laps to 11,830, and the flags now behave as their names
+claim: green 1.00x, VSC 1.23x, SC 1.45x, red 1.93x. **Any analysis that filtered on
+`neutralised` before 2026-08-11 was built on a contaminated population.**
+
+**A duration window was hiding bug 4.** `DATA_DICTIONARY` recommended
+`lap_duration BETWEEN 60 AND 300`, used at no call site. Its floor can never fire (zero
+laps of 239,102 are under 60s; the fastest ever recorded here is 63.971s) and its ceiling
+removed 11 race laps of 81,769, **ten of which were lap 1 of the 2025 Belgian Grand
+Prix**. It was a patch over a caution bug, covering about a tenth of it. Withdrawn;
+`gold_lap.is_representative_lap` replaces it.
+
+**A missing teammate was being treated as a zero.** `fact_driver_race` built its teammate
+deltas as `own - (groupby_sum - own)`, and pandas `transform("sum")` skips NaN. A
+teammate who retired therefore contributed 0 rather than nothing, so the published
+`teammate_finish_delta` equalled the driver's **own finishing position** on 162 of 162
+rows where the teammate did not finish. Sainz finished 4th in Bahrain 2023 and it read as
+beating Leclerc by four places. Also 46 pace deltas and 3 grid deltas. Fixed 2026-08-12
+by requiring both cars to have recorded the value.
+
+**A driver number is not a driver.** 34 of 57 numbers in this dataset belong to more than
+one person: #1 is Verstappen 2023-25, Paul Aron for one 2023 session, and Norris in 2026.
+Keying a driver dimension on `driver_number` alone merged Verstappen's races into
+Norris's row. `dim_driver` is grained by `(driver_number, year)` and `gold_driver` by
+`(driver_number, full_name)`; neither is a safe join key on its own, so facts resolve the
+driver per session through `gold_entry`.
 
 **Silent type corruption.** `silver_session_result.duration` and `gap_to_leader` mixed
 scalar and JSON values in the raw data. `CAST(... AS REAL)` corrupted these without
@@ -402,9 +505,21 @@ Sprint Qualifying sessions, not Race and Sprint.
 three-column hypothesis is violated by 2,225 rows, because a driver can pass several
 cars at the same recorded timestamp in a first-lap melee.
 
-**`stop_duration` is effectively unusable.** Measured coverage: 2023 0.0%, 2024 1.4%,
-2025 7.9%, 2026 3.3%. Use `lane_duration`, which is identical to `pit_duration` in all
-20,745 rows where both are populated.
+**`stop_duration` is thin, and `STOP_DURATION_MIN_YEAR = 2024` overstates it.** That
+constant reads as "usable from 2024". Race-only coverage is 2023 0%, 2024 18.1%, 2025
+**85.5%**, 2026 33.8%, so comparing 2024 with 2025 on this column compares an 18% sample
+against an 85% one. `gold_pit` carries `has_stop_duration` per row instead of a year
+cutoff. Overall coverage across all session types is 3.5% (1,038 of 29,573 rows).
+
+**Use `pit_duration`, not `lane_duration`.** They are byte-identical across all 22,898
+populated rows, maximum absolute difference 0.0. `lane_duration` is not carried into gold.
+
+**Pit duration "outliers" are cautions, not errors.** The 16,921-second maximum used to
+be listed as something to filter. 96.4% of race stops over 60 seconds happened under a
+caution and 92% under a red flag, with the extreme tail being Zandvoort 2023 laps 63-64,
+the whole field parked during a stoppage. Scope the session type, join the lap's own
+caution flag, and green race stops sit at a 23.3s median and a 41.2s 99th percentile.
+`gold_pit` has no duration threshold anywhere.
 
 **Ingestion cached failures as completions — the root cause, now fixed.** The original
 `openf1_ingestion.py` recorded an (endpoint, session) pair as complete whether the fetch
@@ -500,21 +615,35 @@ the diagnostic and predictive layers, where the choice is explicit and documente
   VSC as a full Safety Car
 - Re-verified all diagnostic notebook conclusions against their stored outputs
 
+- Fixed 404/429 handling in `s01_backfill.py`; 429 now honours `Retry-After`, and an
+  `empty` verdict is no longer permanent (`--recheck-empty`)
+- Extended the gate to 21 checks: per-endpoint coverage, a run-over-run coverage
+  snapshot, bronze-versus-silver divergence, and `[21]`, which watches for the one
+  signature a missed caution always has regardless of spelling, the whole field slowing
+  at once
+- Found and fixed **five** caution-detection bugs (see the data quality register)
+- Built the **gold layer**: 18 conformed tables, `s07_build_gold.py`
+- Migrated `s04_descriptive` and `s05_diagnostic` onto gold. Verified as a pure refactor:
+  0 of 29 verdicts, 42 coefficients and 189 group statistics moved
+- Cut 7 duplicated CSVs and 25.2 MB; dropped 4 bundle tables nothing read
+
 **Near term**
-- Fix 404/429 handling in `s01_backfill.py`, re-run with `--include-optional`, then
-  rebuild silver so the recovered `pit` / `team_radio` rows land
-- Extend the gate: per-endpoint coverage checks (it passed clean while 14 races had no
-  pit data), plus a null/coverage snapshot written to `outputs/` and diffed run over run
-- Re-run the diagnostic notebooks — several cells hold results that predate the caution
-  fix, and a few carry figures with no stored output behind them
+- **Migrate the remaining consumers onto gold.** 8 of 10 modelling decisions are now
+  defined there, but the old call sites still sit beside them: 26 per-test queries in
+  `s05_diagnostic`, the seven diagnostic notebooks, and the dashboard modules.
+  `audit_consumer_rules.py` measures the gap
+- **Resolve the last three conflicts:** `EXCLUDED_TEAMS` defined twice and hardcoded at
+  15 more sites, `STOP_DURATION_MIN_YEAR` imported nowhere, and corrupt `n_gear` enforced
+  nowhere
+- **`LAP_OUTLIER_FACTOR = 2.0`** rests on a comment claiming it removes red-flag queues.
+  It runs after `neutralised = 0`, so it cannot. Decide what it is actually for
 - Decide the leakage-sensitive design questions before building the training table: a
   canonical race-ordering table (`session_key` is not monotonic with date), a per-feature
   "known as of when" contract, the `race_had_rain` leak, cold-start policy for new
   entrants, and whether Sprints count as training events
-- Write `s04_descriptive` as parameterized, year-agnostic queries emitting output tables
-- Build the training table with strictly trailing features
+- Build the training table with strictly trailing features, **outside** the database
 - Baseline multinomial model, rolling-origin validation, calibration analysis
-- Publish the dashboard, including a public prediction track record
+- A public prediction track record on the dashboard
 
 **Later**
 - Transcribe team radio (15,575 audio URLs, currently no text) to enable content-level

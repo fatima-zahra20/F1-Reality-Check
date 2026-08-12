@@ -69,7 +69,12 @@ LOGS_DIR = PROJECT_ROOT / "logs"
 SEASONS = [2023, 2024, 2025, 2026]
 TRAIN_SEASONS = [2023, 2024, 2025]
 TEST_SEASONS = [2026]
-EXCLUDED_TEAMS = ["Cadillac"]          # partial 2026 season, n≈8-10
+# Partial 2026 season only (n≈8-10 races), so there is no 2023-25 history:
+# every trailing feature is undefined and every multi-year comparison is
+# unbalanced. A modelling decision, not a data one, which is why gold carries
+# the team and lets consumers exclude rather than dropping the rows itself.
+# This is the single definition. s05_diagnostic imports it; do not redeclare.
+EXCLUDED_TEAMS = ["Cadillac"]
 STOP_DURATION_MIN_YEAR = 2024          # zero coverage in 2023
 
 # --- telemetry (excluded from the weekly pipeline) ---

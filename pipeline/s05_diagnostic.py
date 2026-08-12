@@ -70,7 +70,8 @@ import pandas as pd
 from scipy import stats
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from config import DB_PATH, GOLD_DB_PATH, OUTPUTS_DIR  # noqa: E402
+from config import (DB_PATH, EXCLUDED_TEAMS, GOLD_DB_PATH,  # noqa: E402
+                    OUTPUTS_DIR)
 
 import statsmodels.api as sm  # noqa: E402
 import statsmodels.formula.api as smf  # noqa: E402
@@ -88,10 +89,6 @@ TEAM_NAME_MAP = {
     "Kick Sauber": "Sauber Family",
     "Audi": "Sauber Family",
 }
-
-# No 2023-25 history, so every trailing feature is undefined and every
-# multi-year comparison is unbalanced. A modelling decision, not a data one.
-EXCLUDED_TEAMS = ["Cadillac"]
 
 ALPHA = 0.05
 
@@ -1507,6 +1504,13 @@ def a18_within_stint_pace(d: Diagnostics, ctx) -> None:
     lap_number. The outcome here is lap time against the session median
     instead of raw seconds: a raw lap time is dominated by which circuit it
     was set on, which would swamp every other term (NOTES_LOG #35).
+
+    The tyre_age coefficient in this pooled model is NOT a degradation rate,
+    and the wording deliberately never calls it one. tyre_age and lap_number
+    are collinear by construction inside a stint, so the term is identified
+    only from between-stint variation, which carries stint selection with it.
+    T11a is the within-stint estimate and the two will not agree. That is
+    expected: they estimate different quantities.
     """
     con = ctx["con"]
     laps = ctx["clean_laps"]
@@ -1544,14 +1548,18 @@ def a18_within_stint_pace(d: Diagnostics, ctx) -> None:
 
     age = fit.params.get("tyre_age", np.nan)
     age_p = fit.pvalues.get("tyre_age", np.nan)
+    age_lo, age_hi = fit.conf_int().loc["tyre_age"]
     fuel = fit.params.get("lap_number", np.nan)
     temp = fit.params.get("track_temperature", np.nan)
     max_vif = max(vifs.values()) if vifs else np.nan
 
+    # Deliberately NOT phrased as "tyre age costs Xs per lap". This term is a
+    # between-stint contrast, not a degradation rate; see the caveat.
     age_clause = (
-        f"tyre age adds {age:+.3f}s per lap"
+        f"the tyre age term reads {age:+.3f}s per lap of age"
         if age_p < ALPHA else
-        f"tyre age carries no detectable effect of its own (p={age_p:.2f})"
+        f"the tyre age term is indistinguishable from zero "
+        f"(p={age_p:.2f}, 95% CI [{age_lo:+.4f}, {age_hi:+.4f}]s)"
     )
     d.add_test(
         "T18", "pace",
@@ -1562,14 +1570,25 @@ def a18_within_stint_pace(d: Diagnostics, ctx) -> None:
         f"Together these explain {fit.rsquared:.1%} of how far a lap sits from its "
         f"session median. Fuel load dominates: every lap completed takes "
         f"{abs(fuel):.3f}s off the lap time. Each degree of track temperature adds "
-        f"{temp:+.3f}s, and once fuel is in the model {age_clause}. Compound "
-        f"matters more than either, with intermediates a different kind of lap "
-        f"entirely.",
-        f"Tyre age and lap number rise together within any stint, so they can only "
-        f"be separated because stints start at different points in the race; VIF "
-        f"peaks at {max_vif:.2f}. Compound is chosen by teams, never assigned, so "
-        f"its coefficients carry a selection effect. The outcome is normalised to "
-        f"the session median, so this describes relative pace, not lap times.",
+        f"{temp:+.3f}s, and compound matters more than either, with intermediates "
+        f"a different kind of lap entirely. Once fuel is in the model "
+        f"{age_clause}, which is a statement about stint choice rather than about "
+        f"rubber. For the degradation rate itself, read T11a.",
+        f"The tyre age term here is a BETWEEN-stint contrast and must not be read "
+        f"as a degradation rate. Within any single stint, tyre age and lap number "
+        f"differ by a constant, so no model holding both can separate them. What "
+        f"identifies this coefficient is the comparison of laps at the same point "
+        f"in the race on tyres of different ages, which is a comparison between "
+        f"cars that chose different stint lengths: longer stints go with harder "
+        f"compounds and managed pace, so stint selection is inside the estimate. "
+        f"VIF peaks at {max_vif:.2f}, low precisely because pooling across stints "
+        f"is what breaks the collinearity, so this is a well-determined estimate "
+        f"of the wrong quantity. T11a measures degradation the other way round, "
+        f"within stints and after subtracting a separately estimated fuel term, "
+        f"and that is the number to use. Compound is chosen by teams, never "
+        f"assigned, so its coefficients carry a selection effect too. The outcome "
+        f"is normalised to the session median, so this describes relative pace, "
+        f"not lap times.",
     )
 
 
