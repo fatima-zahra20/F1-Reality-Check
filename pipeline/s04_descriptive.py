@@ -69,6 +69,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from config import DB_PATH, OUTPUTS_DIR  # noqa: E402 
 
 DASHBOARD_DIR = OUTPUTS_DIR / "dashboard"
+BUNDLE_DB = DASHBOARD_DIR / "dashboard.db"
 
 # A clean lap longer than this multiple of its session's median clean lap is a
 # car sitting in a red-flag queue, not a lap. Derived per session rather than
@@ -404,14 +405,35 @@ def build_fact_driver_race(con) -> pd.DataFrame:
     df["pace_vs_session_median"] = (df["mean_clean_lap"] - df["session_median_lap"]).round(3)
 
     # --- teammate deltas ---
-    df["teammate_count"] = df.groupby(["session_key", "team_name"])["driver_number"].transform("count")
+    #
+    # A MISSING TEAMMATE IS NOT A ZERO. This was wrong until 2026-08-12.
+    #
+    # The delta is own - other, with other derived as (group sum - own). pandas
+    # transform("sum") SKIPS NaN, so a teammate who did not finish contributed
+    # 0 rather than nothing, and `other` became 0. The published
+    # teammate_finish_delta therefore equalled the driver's OWN finishing
+    # position on all 162 rows where the teammate retired: Sainz 4th in Bahrain
+    # 2023 read as beating Leclerc by four places, and Leclerc did not finish.
+    # story_driver.py renders that as an "Against teammate" metric.
+    #
+    # Requiring both cars to have recorded the value is the fix. It turns 162
+    # finish deltas, 46 pace deltas and 3 grid deltas from a wrong number into
+    # null, and those call sites already guard on pd.notna, so the metric stops
+    # rendering rather than breaking.
+    #
+    # teammate_points_delta is unchanged: a DNF genuinely scores zero, so
+    # treating it as zero happened to be correct there.
+    grp = df.groupby(["session_key", "team_name"])
+    df["teammate_count"] = grp["driver_number"].transform("count")
     for src, dst in [("grid_position", "teammate_grid_delta"),
                      ("finish_position", "teammate_finish_delta"),
                      ("points", "teammate_points_delta"),
                      ("mean_clean_lap", "teammate_pace_delta")]:
-        team_total = df.groupby(["session_key", "team_name"])[src].transform("sum")
+        team_total = grp[src].transform("sum")
+        both_present = grp[src].transform("count") == 2
         other = team_total - df[src]
-        df[dst] = (df[src] - other).where(df["teammate_count"] == 2).round(3)
+        df[dst] = (df[src] - other).where(
+            (df["teammate_count"] == 2) & both_present).round(3)
 
     return df
 
@@ -720,6 +742,8 @@ BUILDERS = {
 def main() -> int:
     ap = argparse.ArgumentParser(description="Build the descriptive serving layer.")
     ap.add_argument("--tables", nargs="*", default=None, help="subset to rebuild")
+    ap.add_argument("--csv", action="store_true",
+                    help="also write CSVs, for inspecting a table outside SQL")
     args = ap.parse_args()
 
     if not DB_PATH.exists():
@@ -738,7 +762,7 @@ def main() -> int:
     print("=" * 74)
     print("DESCRIPTIVE SERVING LAYER")
     print(f"silver: {DB_PATH}")
-    print(f"csv:    {DASHBOARD_DIR}")
+    print(f"target: {BUNDLE_DB}")
     print("=" * 74)
 
     con = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
@@ -746,33 +770,53 @@ def main() -> int:
     n_races = pd.read_sql(f"SELECT COUNT(*) AS n FROM ({RACE_SCOPE})", con)["n"].iloc[0]
     print(f"\nscope: {n_races} completed races\n")
 
+    # WRITTEN STRAIGHT INTO THE BUNDLE, NOT TO CSV.
+    #
+    # These seven tables used to be written as CSV and then read back by
+    # s06_publish to build dashboard.db, which meant every value existed twice
+    # with nothing checking the copies agreed. The CSV was never the product;
+    # it was an intermediate. s06 now packs the analysis-output CSVs (which are
+    # genuinely produced elsewhere) around these, and replaces tables in place
+    # rather than deleting the file, so writing here first is safe.
+    #
+    # --csv still exists because reading a table in a spreadsheet is a
+    # reasonable thing to want. It is off by default so the duplicate does not
+    # come back by accident.
     failures = []
-    for name in targets:
-        started = time.time()
-        try:
-            df = BUILDERS[name](con)
-        except Exception as exc:
-            print(f"  [FAIL] {name}: {type(exc).__name__}: {exc}")
-            failures.append(name)
-            continue
+    out = sqlite3.connect(BUNDLE_DB)
+    try:
+        for name in targets:
+            started = time.time()
+            try:
+                df = BUILDERS[name](con)
+            except Exception as exc:
+                print(f"  [FAIL] {name}: {type(exc).__name__}: {exc}")
+                failures.append(name)
+                continue
 
-        # Freshness stamp, so the dashboard can show how current it is.
-        df["generated_at"] = generated_at
+            # Freshness stamp, so the dashboard can show how current it is.
+            df["generated_at"] = generated_at
 
-        df.to_csv(DASHBOARD_DIR / f"{name}.csv", index=False)
+            df.to_sql(name, out, index=False, if_exists="replace")
+            if args.csv:
+                df.to_csv(DASHBOARD_DIR / f"{name}.csv", index=False)
 
-        print(f"  {name:20s} {len(df):>8,} rows x {len(df.columns):>3} cols  "
-              f"{time.time() - started:.1f}s")
-
-    con.close()
+            print(f"  {name:20s} {len(df):>8,} rows x {len(df.columns):>3} cols  "
+                  f"{time.time() - started:.1f}s")
+        out.commit()
+    finally:
+        out.close()
+        con.close()
 
     print("\n" + "=" * 74)
     if failures:
         print(f"FAILED: {failures}")
         print("=" * 74)
         return 1
-    print(f"Built {len(targets)} table(s).")
-    print(f"Serving layer written to {DASHBOARD_DIR}")
+    print(f"Built {len(targets)} table(s) into {BUNDLE_DB.name}.")
+    if not args.csv:
+        print("No CSVs written: these tables live in the bundle only. "
+              "Use --csv if you need one.")
     print("=" * 74)
     return 0
 

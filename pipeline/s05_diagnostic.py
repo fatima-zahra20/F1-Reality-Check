@@ -70,7 +70,7 @@ import pandas as pd
 from scipy import stats
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from config import DB_PATH, OUTPUTS_DIR  # noqa: E402
+from config import DB_PATH, GOLD_DB_PATH, OUTPUTS_DIR  # noqa: E402
 
 import statsmodels.api as sm  # noqa: E402
 import statsmodels.formula.api as smf  # noqa: E402
@@ -104,6 +104,10 @@ LAP_OUTLIER_FACTOR = 2.0
 MIN_PAIR_SESSIONS = 8
 
 # Same dynamic scope as s04 — no year list to maintain.
+#
+# Kept for the query sites still reading silver directly. The gold form below is
+# the same 81 races, verified identical with zero divergence either way, and is
+# what the shared loaders use.
 RACE_SCOPE = """
     SELECT s.session_key, s.meeting_key
     FROM silver_sessions s
@@ -112,6 +116,12 @@ RACE_SCOPE = """
       AND s.date_start < datetime('now')
       AND EXISTS (SELECT 1 FROM silver_laps l WHERE l.session_key = s.session_key)
       AND EXISTS (SELECT 1 FROM silver_session_result r WHERE r.session_key = s.session_key)
+"""
+
+# The four-part predicate above, precomputed as a column in gold_session.
+GOLD_RACE_SCOPE = """
+    SELECT session_key, meeting_key FROM gold_session
+    WHERE session_name = 'Race' AND is_analysable = 1
 """
 
 
@@ -310,76 +320,86 @@ def mean_ci(s: pd.Series):
 
 # --- shared data loaders ---------------------------------------------------------
 
-def load_clean_laps(con) -> pd.DataFrame:
+def load_clean_laps(gold) -> pd.DataFrame:
     """
     Race laps that are genuinely representative of racing pace.
 
-    Three filters, in order:
-      1. neutralised = 0 — excludes SC / VSC / red flag. NULL is excluded too,
-         because 480 laps have no flag row and unknown is not clean.
-      2. not a pit-out lap — pit-lane time is not racing time.
-      3. duration <= 2x the session's median clean lap — the derived bound.
-         Computed AFTER filters 1-2 so the median itself is not dragged upward,
-         and from the median rather than the mean because the outliers being
-         removed are exactly what would corrupt a mean.
+    NOW READ FROM GOLD. The first three filters are `is_representative_lap`,
+    which is a conformed column rather than a WHERE clause repeated at 14 sites,
+    and `team_name` arrives already conformed instead of needing
+    normalize_teams(). Verified to select the identical 81,689 laps the old SQL
+    did, then the trim below takes it to the identical 81,677.
+
+    The filters, in order:
+      1-3. is_representative_lap: lap_duration present, neutralised = 0
+         (NULL excluded too, since 480 laps have no flag row and unknown is not
+         clean), and not a pit-out lap.
+      4. duration <= LAP_OUTLIER_FACTOR x the session's median clean lap.
+
+    FILTER 4 IS AN ANALYSIS CHOICE, NOT A DATA PROPERTY, which is why it stays
+    here rather than moving into gold. It uses gold's precomputed pace_ratio so
+    the arithmetic is shared, but the threshold belongs to this layer.
+
+    Its original comment claimed it removed "red-flag queues". That cannot be
+    true: it runs after neutralised = 0, so red flags are already gone. What it
+    actually removes now is 12 laps of 81,689, and six of those are Monaco 2026
+    lap 70, where sixteen cars ran at 2.02x with nothing flagged. That is a
+    missed caution, and s03_verify check [21] tracks it. So this filter is partly
+    compensating for a caution bug, exactly as the 60-200s window was
+    (NOTES_LOG #49). It is left at 2.0 deliberately: fixing that caution and
+    changing this threshold in one step would make it impossible to attribute
+    whatever moves.
+
+    Sensitivity, for when that is picked up: 1.5x drops 118 laps, 1.8x drops 28,
+    2.0x drops 12, 2.5x drops 1.
     """
     laps = pd.read_sql(f"""
-        WITH scope AS ({RACE_SCOPE})
+        WITH scope AS ({GOLD_RACE_SCOPE})
         SELECT l.session_key, l.driver_number, l.lap_number,
-               l.date_start, l.lap_duration,
-               d.team_name
+               l.date_start, l.lap_duration, l.team_name, l.pace_ratio,
+               l.session_green_median_s AS session_median_lap
         FROM scope
-        JOIN silver_laps l ON l.session_key = scope.session_key
-        JOIN silver_lap_flags f
-          ON  f.session_key   = l.session_key
-          AND f.driver_number = l.driver_number
-          AND f.lap_number    = l.lap_number
-        JOIN silver_drivers d
-          ON  d.session_key   = l.session_key
-          AND d.driver_number = l.driver_number
-        WHERE l.lap_duration IS NOT NULL
-          AND f.neutralised = 0
-          AND COALESCE(l.is_pit_out_lap, 0) = 0
-    """, con)
+        JOIN gold_lap l ON l.session_key = scope.session_key
+        WHERE l.is_representative_lap = 1
+    """, gold)
 
-    med = laps.groupby("session_key")["lap_duration"].median().rename("session_median_lap")
-    laps = laps.merge(med, on="session_key", how="left")
-    laps = laps[laps["lap_duration"] <= LAP_OUTLIER_FACTOR * laps["session_median_lap"]].copy()
+    laps = laps[laps["pace_ratio"] <= LAP_OUTLIER_FACTOR].copy()
 
     # Recompute after trimming so the normalisation baseline is itself clean.
     laps["session_median_lap"] = laps.groupby("session_key")["lap_duration"].transform("median")
     laps["lap_vs_median"] = laps["lap_duration"] - laps["session_median_lap"]
-    return normalize_teams(laps)
+    # gold conforms team_name already; this only drops the null-team rows, which
+    # measured as 0 in race scope. Kept so the contract does not depend on that
+    # staying 0.
+    return normalize_teams(laps.drop(columns="pace_ratio"))
 
 
-def load_driver_race(con, laps: pd.DataFrame) -> pd.DataFrame:
+def load_driver_race(gold, laps: pd.DataFrame) -> pd.DataFrame:
     """
     One row per driver per race: result, grid, pace, stops.
 
-    Grid is paired on session_name ('Race' <-> 'Qualifying'), never session_type,
-    which groups Sprint Qualifying in and fans the join out (NOTES_LOG #26).
+    NOW READ FROM GOLD. The grid hop is the part worth noting. A grid is
+    published against the session that SET it, so attaching a race to its grid
+    means going out to the meeting and back in to Qualifying, paired on
+    session_name and never session_type, which would group Sprint Qualifying in
+    and fan the join out (NOTES_LOG #26). gold_session_result did that once, so
+    grid_position is a column here rather than two more LEFT JOINs.
     """
     df = pd.read_sql(f"""
-        WITH scope AS ({RACE_SCOPE})
-        SELECT r.session_key, r.driver_number, d.team_name, d.full_name,
-               m.year, m.meeting_name, m.circuit_type, m.circuit_short_name,
-               s.date_start,
-               g."position"   AS grid_position,
-               g.lap_duration AS quali_lap,
-               r."position"   AS finish_position,
+        WITH scope AS ({GOLD_RACE_SCOPE})
+        SELECT r.session_key, r.driver_number, r.team_name,
+               r.driver_full_name AS full_name,
+               r.year, r.circuit_short_name,
+               s.meeting_name, s.circuit_type, s.session_date_start AS date_start,
+               r.grid_position,
+               r.grid_lap_duration AS quali_lap,
+               r."position"        AS finish_position,
                r.dnf, r.dns, r.dsq, r.points,
                r.gap_to_leader_laps
         FROM scope
-        JOIN silver_session_result r ON r.session_key = scope.session_key
-        JOIN silver_sessions s ON s.session_key = scope.session_key
-        JOIN silver_meetings m ON m.meeting_key = s.meeting_key
-        JOIN silver_drivers d
-          ON d.session_key = r.session_key AND d.driver_number = r.driver_number
-        LEFT JOIN silver_sessions q
-          ON q.meeting_key = s.meeting_key AND q.session_name = 'Qualifying'
-        LEFT JOIN silver_starting_grid g
-          ON g.session_key = q.session_key AND g.driver_number = r.driver_number
-    """, con)
+        JOIN gold_session_result r ON r.session_key = scope.session_key
+        JOIN gold_session s        ON s.session_key = scope.session_key
+    """, gold)
     df = normalize_teams(df)
 
     pace = (laps.groupby(["session_key", "driver_number"])
@@ -407,15 +427,18 @@ def load_driver_race(con, laps: pd.DataFrame) -> pd.DataFrame:
     df["session_median_lap"] = df.groupby("session_key")["mean_clean_lap"].transform("median")
     df["pace_vs_median"] = df["mean_clean_lap"] - df["session_median_lap"]
 
+    # lane_duration is not carried in gold: it was byte-identical to
+    # pit_duration across all 22,898 populated rows, maximum absolute difference
+    # 0.0, so the column name changes and the numbers cannot.
     pits = pd.read_sql(f"""
-        WITH scope AS ({RACE_SCOPE})
+        WITH scope AS ({GOLD_RACE_SCOPE})
         SELECT p.session_key, p.driver_number,
                COUNT(*) AS pit_count,
-               AVG(p.lane_duration) AS mean_lane_duration,
+               AVG(p.pit_duration) AS mean_lane_duration,
                MIN(p.lap_number) AS first_pit_lap
-        FROM scope JOIN silver_pit p ON p.session_key = scope.session_key
+        FROM scope JOIN gold_pit p ON p.session_key = scope.session_key
         GROUP BY p.session_key, p.driver_number
-    """, con)
+    """, gold)
     df = df.merge(pits, on=["session_key", "driver_number"], how="left")
 
     df["position_change"] = df["grid_position"] - df["finish_position"]
@@ -425,7 +448,7 @@ def load_driver_race(con, laps: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def load_race_weather(con) -> pd.DataFrame:
+def load_race_weather(gold) -> pd.DataFrame:
     """
     Per race: did it rain at all, and what share of samples were wet.
 
@@ -433,13 +456,13 @@ def load_race_weather(con) -> pd.DataFrame:
     can be averaged but never summed as an amount.
     """
     return pd.read_sql(f"""
-        WITH scope AS ({RACE_SCOPE})
+        WITH scope AS ({GOLD_RACE_SCOPE})
         SELECT w.session_key,
                MAX(w.rainfall)                          AS race_had_rain,
                1.0 * SUM(w.rainfall) / COUNT(*)         AS pct_samples_wet
-        FROM scope JOIN silver_weather w ON w.session_key = scope.session_key
+        FROM scope JOIN gold_weather w ON w.session_key = scope.session_key
         GROUP BY w.session_key
-    """, con)
+    """, gold)
 
 
 def teammate_pairs(df: pd.DataFrame, value_cols: list[str]) -> pd.DataFrame:
@@ -2052,6 +2075,10 @@ def main() -> int:
     if not DB_PATH.exists():
         print(f"[FAIL] silver database not found at {DB_PATH}")
         return 1
+    if not GOLD_DB_PATH.exists():
+        print(f"[FAIL] gold database not found at {GOLD_DB_PATH}\n"
+              "       build it with: python pipeline\\s07_build_gold.py --execute")
+        return 1
 
     targets = args.tables or TABLES
     unknown = [t for t in targets if t not in BUILDERS]
@@ -2076,19 +2103,25 @@ def main() -> int:
     print("=" * 74)
 
     con = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
+    gold = sqlite3.connect(f"file:{GOLD_DB_PATH}?mode=ro", uri=True)
 
-    n_races = pd.read_sql(f"SELECT COUNT(*) AS n FROM ({RACE_SCOPE})", con)["n"].iloc[0]
+    # Both connections stay open during the migration onto gold. The three
+    # shared loaders below read gold; the per-test query sites still read
+    # silver through ctx["con"] and are moved over one at a time so each move
+    # can be checked against the 29 verdicts on its own.
+    n_races = pd.read_sql(f"SELECT COUNT(*) AS n FROM ({GOLD_RACE_SCOPE})",
+                          gold)["n"].iloc[0]
     print(f"\nscope: {n_races} completed races")
 
     started = time.time()
-    clean_laps = load_clean_laps(con)
-    driver_race = load_driver_race(con, clean_laps)
-    weather = load_race_weather(con)
+    clean_laps = load_clean_laps(gold)
+    driver_race = load_driver_race(gold, clean_laps)
+    weather = load_race_weather(gold)
     print(f"shared frames: {len(clean_laps):,} clean laps, "
           f"{len(driver_race):,} driver-races  ({time.time() - started:.1f}s)\n")
 
-    ctx = {"con": con, "clean_laps": clean_laps, "driver_race": driver_race,
-           "weather": weather}
+    ctx = {"con": con, "gold": gold, "clean_laps": clean_laps,
+           "driver_race": driver_race, "weather": weather}
     d = Diagnostics()
 
     failures = []
@@ -2105,6 +2138,7 @@ def main() -> int:
         print(f"  {tid:5s} ok  {time.time() - t0:6.1f}s")
 
     con.close()
+    gold.close()
 
     # These tables are drop-and-rewrite, so writing after a subset run would
     # replace a complete table with a fragment. Inspecting one analysis is a

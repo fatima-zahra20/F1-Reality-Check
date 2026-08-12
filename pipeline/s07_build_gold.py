@@ -58,6 +58,13 @@ stop_duration is kept but its coverage is published rather than assumed.
 coverage is 0%, 18.1%, 85.5%, 33.8% by year. Comparing 2024 against 2025 on
 this column compares an 18% sample against an 85% one.
 
+Time series. silver_position (310k rows) and silver_intervals (2.1M) are not
+carried raw. They enter gold at the two grains anything actually asks for: one
+reading per lap on gold_lap (position and both gaps as the lap began), and a
+close-running share per driver-session in gold_agg_interval. That is 239k plus
+1.6k rows instead of 2.4M, and it removes the last non-telemetry reason a
+consumer had to reach past gold into silver.
+
 Stints. 27 phantoms (lap_end < lap_start), 42 genuine overlaps and 56 coverage
 gaps, all flagged, none removed. An apparent 13,959 overlaps turned out to be
 the convention that a stint ends on the lap the car pits and the next begins on
@@ -183,14 +190,81 @@ def build_session(con) -> pd.DataFrame:
         FROM silver_caution_periods GROUP BY session_key
     """, con)
 
+    # Race-level facts every consumer derives for itself. These are properties
+    # of the session, not conclusions about it, so they belong here.
+    results = pd.read_sql("""
+        SELECT session_key,
+               COUNT(*)                                        AS n_results,
+               SUM(CASE WHEN dnf = 1 THEN 1 ELSE 0 END)        AS dnf_count,
+               SUM(CASE WHEN dns = 1 THEN 1 ELSE 0 END)        AS dns_count,
+               SUM(CASE WHEN dsq = 1 THEN 1 ELSE 0 END)        AS dsq_count
+        FROM silver_session_result GROUP BY session_key
+    """, con)
+
+    kinds = pd.read_sql("""
+        SELECT session_key,
+               SUM(CASE WHEN kind = 'SC'  THEN 1 ELSE 0 END) AS sc_periods,
+               SUM(CASE WHEN kind = 'VSC' THEN 1 ELSE 0 END) AS vsc_periods,
+               SUM(CASE WHEN kind = 'RED' THEN 1 ELSE 0 END) AS red_flag_periods
+        FROM silver_caution_periods GROUP BY session_key
+    """, con)
+
+    # rainfall is a 0/1 state per sample, never millimetres (NOTES_LOG #17), so
+    # it is averaged into a share and never summed as an amount.
+    wx = pd.read_sql("""
+        SELECT session_key,
+               ROUND(AVG(track_temperature), 1)              AS avg_track_temp,
+               ROUND(AVG(air_temperature), 1)                AS avg_air_temp,
+               ROUND(100.0 * SUM(rainfall) / COUNT(*), 1)    AS pct_samples_wet
+        FROM silver_weather GROUP BY session_key
+    """, con)
+
+    laps_max = pd.read_sql("""
+        SELECT session_key, MAX(lap_number) AS total_laps
+        FROM silver_laps GROUP BY session_key
+    """, con)
+
     out = (s.merge(stats, on="session_key", how="left")
              .merge(green, on="session_key", how="left")
-             .merge(periods, on="session_key", how="left"))
+             .merge(periods, on="session_key", how="left")
+             .merge(results, on="session_key", how="left")
+             .merge(kinds, on="session_key", how="left")
+             .merge(wx, on="session_key", how="left")
+             .merge(laps_max, on="session_key", how="left"))
     for c in ("n_laps", "n_drivers", "n_neutralised_laps", "n_sc_laps",
               "n_vsc_laps", "n_red_laps", "n_representative_laps",
-              "n_caution_periods"):
+              "n_caution_periods", "n_results", "dnf_count", "dns_count",
+              "dsq_count", "sc_periods", "vsc_periods", "red_flag_periods"):
         out[c] = out[c].fillna(0).astype(int)
+    out["total_laps"] = out.total_laps.fillna(0).astype(int)
+    out["is_wet_race"] = (out.pct_samples_wet.fillna(0) > 0).astype(int)
+
+    # --- the scope predicate, as columns ----------------------------------
+    # "Which sessions count" is rewritten 117 times across the project, always
+    # as the same four-part predicate with two EXISTS subqueries. Expressing it
+    # here turns those 117 rewrites into `WHERE is_analysable = 1`.
+    #
+    # Deliberately three columns and not one, because the parts are not always
+    # wanted together: a calendar view wants the unrun future races that
+    # is_analysable excludes, and a data-coverage check wants exactly the
+    # sessions where has_laps and has_result disagree.
     out["has_laps"] = (out.n_laps > 0).astype(int)
+    out["has_result"] = (out.n_results > 0).astype(int)
+    started = pd.to_datetime(out.session_date_start, format="ISO8601",
+                             utc=True, errors="coerce")
+    out["is_completed"] = (started < pd.Timestamp.now(tz="UTC")).astype(int)
+    out["is_analysable"] = ((out.is_cancelled.fillna(0) == 0)
+                            & (out.is_completed == 1)
+                            & (out.has_laps == 1)
+                            & (out.has_result == 1)).astype(int)
+
+    # Round number within a season, derived rather than stored, and ranked over
+    # analysable races only so an unrun future race does not shift the numbering
+    # of the ones already run.
+    races = out[(out.session_name == "Race") & (out.is_analysable == 1)]
+    rank = (races.groupby("year").session_date_start
+            .rank(method="dense").astype(int).rename("round"))
+    out = out.join(rank)
     return out
 
 
@@ -280,6 +354,121 @@ def build_entry(con) -> pd.DataFrame:
 # FACTS
 # ============================================================================
 
+def attach_state_at_lap_start(con, df: pd.DataFrame,
+                              start_ts: pd.Series) -> pd.DataFrame:
+    """
+    Race position and gaps as they stood when each lap began.
+
+    WHY THESE LIVE ON THE LAP ROW. silver_position (310k rows) and
+    silver_intervals (2.1M rows) are time series sampled every ~3.8 seconds.
+    Four consumers currently reduce them to one reading per lap with their own
+    merge_asof, which is both slow and the reason silver_intervals looked like
+    it had to enter gold wholesale. One reading per lap is the quantity every
+    one of them actually wants, so gold computes it once.
+
+    DIRECTION IS "BACKWARD", AND THAT IS A DECISION. s04_descriptive uses
+    backward; s05_diagnostic's overtaking-opportunity test uses "nearest". Those
+    are different quantities and nothing has ever reported the divergence.
+    Backward means the last sample at or before the lap began, which is the
+    state the driver actually started the lap in. Nearest can return a sample
+    from AFTER the lap started, so a feature built on it knows something that
+    had not happened yet. Gold has to feed the predictive layer, and a
+    lookahead feature is leakage, so backward wins.
+
+    Measured cost of that choice on race laps: the two rules agree on 98.7% of
+    88,652 laps. Backward finds no sample on 1,401 laps against nearest's 11,
+    because a lap starting before the first sample has nothing behind it. Around
+    the 2.0s threshold that test filters on, 328 laps of 88,652 (0.37%) fall on
+    the other side. Whether that moves a published verdict is verified, not
+    assumed, when the consumer is migrated.
+    """
+    pos = pd.read_sql("""
+        SELECT session_key, driver_number, "date", "position"
+        FROM silver_position WHERE "date" IS NOT NULL
+    """, con)
+    iv = pd.read_sql("""
+        SELECT session_key, driver_number, "date",
+               gap_to_leader_seconds, gap_to_leader_laps,
+               interval_seconds, interval_laps
+        FROM silver_intervals WHERE "date" IS NOT NULL
+    """, con)
+
+    left = (df[["session_key", "driver_number", "lap_number"]]
+            .assign(_ts=start_ts).dropna(subset=["_ts"])
+            .sort_values("_ts"))
+    BY = ["session_key", "driver_number"]
+
+    for src, cols in ((pos, ["position"]),
+                      (iv, ["gap_to_leader_seconds", "gap_to_leader_laps",
+                            "interval_seconds", "interval_laps"])):
+        src = src.copy()
+        src["date"] = pd.to_datetime(src["date"], format="ISO8601", utc=True,
+                                     errors="coerce")
+        src = src.dropna(subset=["date"]).sort_values("date")
+        left = pd.merge_asof(left, src[BY + ["date"] + cols],
+                            left_on="_ts", right_on="date", by=BY,
+                            direction="backward").drop(columns="date")
+
+    out = df.merge(
+        left.drop(columns="_ts"),
+        on=["session_key", "driver_number", "lap_number"], how="left")
+    # A lap with no date_start cannot be placed in time, so it gets no state
+    # rather than a value borrowed from a neighbouring lap.
+    return out
+
+
+def attach_stint(con, df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Which tyre was on the car, and how old it was, for each lap.
+
+    THE JOIN THAT WAS WRONG ONCE, recorded in s04_descriptive so the fix is not
+    lost. Joining laps to stints on (session, driver) fans each lap out to one
+    row per stint the driver ran, so the MATCHING row has to be chosen before
+    deduplicating. Blanking non-matching rows first and then keeping the first of
+    each group silently kept a blanked one, because the frame arrives in stint
+    order: every lap got its stint-1 row whether or not the lap was in stint 1.
+    That left tyre data on 27,923 of 90,053 laps, all before the driver's first
+    pit stop, and it read as OpenF1 not recording compound rather than as a join
+    defect.
+
+    Sorting matching rows to the front fixes it. Ties break on the lowest stint
+    number, because a lap appearing in two stints is the in-lap: it was driven on
+    the older tyre and the stop happened at the end of it. That is the same
+    boundary convention that makes 13,914 stints look like overlaps until you
+    test for it.
+
+    Phantom stints are excluded from the join. A stint with lap_end < lap_start
+    covers no laps by definition, so it can only contribute a wrong match.
+    """
+    stints = pd.read_sql("""
+        SELECT session_key, driver_number, stint_number, compound,
+               tyre_age_at_start, lap_start, lap_end
+        FROM silver_stints
+        WHERE lap_start IS NOT NULL AND lap_end IS NOT NULL
+          AND lap_end >= lap_start
+    """, con)
+
+    key = ["session_key", "driver_number", "lap_number"]
+    merged = df[key].merge(stints, on=["session_key", "driver_number"],
+                           how="left")
+    merged["_in_stint"] = ((merged.lap_number >= merged.lap_start)
+                           & (merged.lap_number <= merged.lap_end)).fillna(False)
+    merged = merged.sort_values(
+        ["session_key", "driver_number", "lap_number", "_in_stint",
+         "stint_number"],
+        ascending=[True, True, True, False, True])
+    merged = merged.drop_duplicates(subset=key, keep="first")
+    merged.loc[~merged._in_stint,
+               ["stint_number", "compound", "tyre_age_at_start",
+                "lap_start"]] = pd.NA
+    merged["tyre_age"] = (merged.tyre_age_at_start
+                          + (merged.lap_number - merged.lap_start))
+
+    return df.merge(
+        merged[key + ["stint_number", "compound", "tyre_age_at_start",
+                      "tyre_age"]], on=key, how="left")
+
+
 @builds("gold_lap")
 def build_lap(con) -> pd.DataFrame:
     """
@@ -335,12 +524,26 @@ def build_lap(con) -> pd.DataFrame:
     df["session_green_median_s"] = df.session_key.map(green)
     df["pace_ratio"] = df.lap_duration / df.session_green_median_s
 
+    start_ts = pd.to_datetime(df.date_start, format="ISO8601", utc=True,
+                              errors="coerce")
     df["date_end"] = (
-        pd.to_datetime(df.date_start, format="ISO8601", utc=True,
-                       errors="coerce")
-        + pd.to_timedelta(df.lap_duration, unit="s")
+        start_ts + pd.to_timedelta(df.lap_duration, unit="s")
     ).dt.strftime("%Y-%m-%dT%H:%M:%S.%f%z")
 
+    df = attach_state_at_lap_start(con, df, start_ts)
+    df = attach_stint(con, df)
+
+    # NO lap_vs_median COLUMN HERE, deliberately. Both s04 and s05 normalise
+    # against a TWO-PASS median: trim laps above LAP_OUTLIER_FACTOR x the
+    # session median, then re-take the median of what is left. gold's
+    # session_green_median_s is the single-pass median, which is the right
+    # denominator for pace_ratio (using the trimmed median to decide the trim
+    # would be circular) but the wrong one for normalisation.
+    #
+    # Shipping a lap_vs_median computed off the single-pass median would differ
+    # from the published column on 23,046 of 90,053 race laps while looking like
+    # the same thing. The two-pass median depends on an analysis constant, so it
+    # stays with the analysis: consumers compute it from gold in two lines.
     return df[[
         "session_key", "driver_number", "lap_number", "meeting_key",
         "year", "session_type", "session_name", "session_date_start",
@@ -352,6 +555,9 @@ def build_lap(con) -> pd.DataFrame:
         "sc_flag", "vsc_flag", "red_flag", "yellow_sector_flag", "neutralised",
         "is_valid_lap", "is_representative_lap",
         "session_green_median_s", "pace_ratio",
+        "position", "gap_to_leader_seconds", "gap_to_leader_laps",
+        "interval_seconds", "interval_laps",
+        "stint_number", "compound", "tyre_age_at_start", "tyre_age",
     ]]
 
 
@@ -626,6 +832,43 @@ def build_championship(con) -> pd.DataFrame:
 # defect fixed once is fixed everywhere.
 # ============================================================================
 
+@builds("gold_agg_interval")
+def build_agg_interval(con) -> pd.DataFrame:
+    """
+    Close-running share per driver per session, from the full interval series.
+
+    THE ONE USE OF silver_intervals THAT CANNOT BECOME A LAP COLUMN. The DRS
+    "fighting" measure is the proportion of ~3.8 second samples where the gap to
+    the car ahead was under 1.0s. A proportion of samples cannot be
+    reconstructed from one reading per lap, so reducing it to lap grain would
+    silently answer a different question.
+
+    So this is the shape the 2.1M row series takes in gold: not carried raw, but
+    aggregated to the grain the only question about it actually asks. 1,620
+    driver-sessions instead of 2.1M rows.
+
+    The 1.0s threshold is not mine and is not free: it is the DRS activation
+    distance, a rule of the sport, recorded in NOTES_LOG #32. Kept as a named
+    column rather than a filter so a different threshold stays possible.
+    """
+    return pd.read_sql("""
+        SELECT i.session_key, i.driver_number,
+               s.year, s.session_name,
+               COUNT(*)                                       AS interval_samples,
+               SUM(CASE WHEN i.interval_seconds < 1.0
+                        THEN 1 ELSE 0 END)                    AS close_samples,
+               SUM(CASE WHEN i.interval_seconds < 1.0
+                        THEN 1.0 ELSE 0.0 END) / COUNT(*)     AS close_share,
+               MIN(i.interval_seconds)                        AS min_interval_s,
+               AVG(i.interval_seconds)                        AS mean_interval_s,
+               AVG(i.gap_to_leader_seconds)                   AS mean_gap_leader_s
+        FROM silver_intervals i
+        JOIN silver_sessions s ON s.session_key = i.session_key
+        WHERE i.interval_seconds IS NOT NULL
+        GROUP BY i.session_key, i.driver_number
+    """, con)
+
+
 @builds("gold_agg_driver_session")
 def build_agg_driver_session(gold: dict) -> pd.DataFrame:
     """
@@ -660,7 +903,11 @@ def build_agg_driver_session(gold: dict) -> pd.DataFrame:
     out = ctx.join(allx).join(pace).reset_index()
 
     st = gold["gold_stint"]
-    st_agg = st[st.is_valid_stint == 1].groupby(
+    # Filtered on the lap range only, NOT on is_valid_stint, which also excludes
+    # the 42 overlapping stints. An overlapping stint is a real record of a real
+    # tyre, so counting it is correct; is_valid_stint exists for the analyses
+    # that need a strictly clean sequence.
+    st_agg = st[(st.has_lap_range == 1) & (st.is_phantom_stint == 0)].groupby(
         ["session_key", "driver_number"]).agg(
         n_stints=("stint_number", "size"),
         compounds_used=("compound", lambda s: ",".join(
@@ -677,6 +924,11 @@ def build_agg_driver_session(gold: dict) -> pd.DataFrame:
         total_green_pit_s=("pit_duration", "sum"))
     out = (out.merge(pit_all, on=["session_key", "driver_number"], how="left")
               .merge(pit_green, on=["session_key", "driver_number"], how="left"))
+
+    iv = gold["gold_agg_interval"][
+        ["session_key", "driver_number", "interval_samples", "close_samples",
+         "close_share", "min_interval_s"]]
+    out = out.merge(iv, on=["session_key", "driver_number"], how="left")
 
     for c in ("n_stints", "n_pit_stops"):
         out[c] = out[c].fillna(0).astype(int)
@@ -696,9 +948,14 @@ def build_agg_driver_race(gold: dict) -> pd.DataFrame:
     res = res[res.session_name.isin(["Race", "Sprint"])].copy()
 
     agg = gold["gold_agg_driver_session"]
+    # n_stints and compound_sequence are NOT inherited from the per-session
+    # table. That table is grained on lap presence, so a driver with a stint
+    # record but no lap rows has no row in it, and three drivers are exactly
+    # that. Taking stints from gold_stint directly keeps them.
     keep = [c for c in agg.columns if c not in
             ("year", "session_name", "circuit_short_name", "meeting_name",
-             "team_name", "driver_full_name", "driver_acronym", "meeting_key")]
+             "team_name", "driver_full_name", "driver_acronym", "meeting_key",
+             "n_stints", "compounds_used")]
     out = res.merge(agg[keep], on=["session_key", "driver_number"], how="left")
 
     champ = gold["gold_championship"]
@@ -715,8 +972,83 @@ def build_agg_driver_race(gold: dict) -> pd.DataFrame:
 
     sess = gold["gold_session"][
         ["session_key", "green_median_lap_s", "n_neutralised_laps",
-         "n_caution_periods", "session_date_start"]]
-    return out.merge(sess, on="session_key", how="left")
+         "n_caution_periods", "session_date_start", "total_laps", "round",
+         "is_wet_race", "circuit_type", "meeting_name"]]
+    out = out.merge(sess, on="session_key", how="left")
+
+    # --- overtakes, both directions ---------------------------------------
+    ot = gold["gold_overtake"]
+    made = (ot.groupby(["session_key", "overtaking_driver_number"]).size()
+            .rename("overtakes_made").reset_index()
+            .rename(columns={"overtaking_driver_number": "driver_number"}))
+    suff = (ot.groupby(["session_key", "overtaken_driver_number"]).size()
+            .rename("overtakes_suffered").reset_index()
+            .rename(columns={"overtaken_driver_number": "driver_number"}))
+    for extra in (made, suff):
+        extra["driver_number"] = extra.driver_number.astype("Int64")
+        out = out.merge(extra, on=["session_key", "driver_number"], how="left")
+    for c in ("overtakes_made", "overtakes_suffered"):
+        out[c] = out[c].fillna(0).astype(int)
+
+    # --- the tyres: how many, and in what order ---------------------------
+    # Ordered by stint_number explicitly. s04 used SQLite GROUP_CONCAT, whose
+    # ordering is not defined by the standard and happens to follow rowid here.
+    # Relying on that would be a silent dependency on insertion order.
+    st = gold["gold_stint"]
+    st = st[(st.has_lap_range == 1) & (st.is_phantom_stint == 0)]
+    n_st = (st.groupby(["session_key", "driver_number"]).size()
+            .rename("n_stints").reset_index())
+    seq = (st[st.compound.notna()].sort_values("stint_number")
+           .groupby(["session_key", "driver_number"]).compound
+           .apply(" > ".join).rename("compound_sequence").reset_index())
+    out = out.merge(n_st, on=["session_key", "driver_number"], how="left")
+    out = out.merge(seq, on=["session_key", "driver_number"], how="left")
+
+    # --- teammate deltas ---------------------------------------------------
+    # A driver's result only means something against the same car. Computed here
+    # rather than at each call site, and only for genuine two-car pairings: a
+    # third car in a session (a mid-weekend substitution) would make "the
+    # teammate" ambiguous, so those get null rather than an arbitrary pick.
+    #
+    # A NaN TEAMMATE IS NOT A ZERO, and s04 got this wrong. It built the delta as
+    # own - (groupby-sum - own), and pandas transform("sum") skips NaN, so a
+    # teammate who did not finish contributed 0 instead of nothing. The published
+    # teammate_finish_delta therefore equals the driver's OWN finishing position
+    # on all 162 rows where the teammate retired: Sainz 4th in Bahrain 2023 reads
+    # as beating Leclerc by four places, and Leclerc did not finish.
+    #
+    # Requiring both cars to have recorded the value is the fix. It changes 162
+    # finish deltas, 46 pace deltas and 3 grid deltas from a wrong number to
+    # null. teammate_points_delta was unaffected, because a DNF genuinely scores
+    # zero, so treating it as zero happened to be right there.
+    pair_cols = {"grid_position": "teammate_grid_delta",
+                 "position": "teammate_finish_delta",
+                 "points": "teammate_points_delta",
+                 "median_pace_ratio": "teammate_pace_delta"}
+    have = out[out.team_name.notna()].copy()
+    grp = have.groupby(["session_key", "team_name"])
+    # The real number of cars the team ran, so a three-car weekend reads 3 and
+    # is excluded from pairing rather than silently reported as 0.
+    have["teammate_count"] = grp.driver_number.transform("size")
+    tot = grp[list(pair_cols)].transform("sum")
+    cnt = grp[list(pair_cols)].transform("count")
+    deltas = pd.DataFrame(index=have.index)
+    for src, dst in pair_cols.items():
+        other = tot[src] - have[src]
+        deltas[dst] = (have[src] - other).where((cnt[src] == 2)
+                                                & (have.teammate_count == 2))
+    deltas["teammate_count"] = have.teammate_count
+    out = out.join(deltas)
+    out["teammate_count"] = out.teammate_count.fillna(0).astype(int)
+
+    # ZERO AND UNKNOWN ARE DIFFERENT, and only one of these is safe to fill.
+    # Zero pit stops is a real, common outcome, so a missing pit row means zero.
+    # Zero stints is impossible for a car that took the start, so a missing
+    # stint row means OpenF1 did not report one. Filling it would state a fact
+    # that is not merely unknown but cannot happen. 28 rows are in that state.
+    out["n_pit_stops"] = out.n_pit_stops.fillna(0).astype(int)
+    out["n_stints"] = out.n_stints.astype("Int64")
+    return out
 
 
 @builds("gold_agg_driver_season")
@@ -793,7 +1125,8 @@ def build_agg_circuit_season(gold: dict) -> pd.DataFrame:
 # with rather than from every column.
 INDEXES = {
     "gold_session": ["(year, session_name)", "(meeting_key)",
-                     "(circuit_short_name, year)"],
+                     "(circuit_short_name, year)",
+                     "(is_analysable, session_name)"],
     "gold_entry": ["(session_key)", "(year, team_name)", "(driver_number)"],
     "gold_driver": ["(driver_number)", "(full_name)"],
     "gold_lap": ["(session_key)", "(year, session_name)",
@@ -811,6 +1144,7 @@ INDEXES = {
     "gold_position": ["(session_key, driver_number)"],
     "gold_race_control": ["(session_key)", "(is_red_flag_message)"],
     "gold_championship": ["(year, entity_type)", "(session_key)"],
+    "gold_agg_interval": ["(session_key, driver_number)"],
     "gold_agg_driver_session": ["(session_key)", "(year, driver_number)"],
     "gold_agg_driver_race": ["(year, driver_number)", "(year, team_name)",
                              "(session_key)"],

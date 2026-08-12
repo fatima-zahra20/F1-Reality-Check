@@ -71,20 +71,49 @@ API = "https://api.github.com"
 
 # Tables to bundle. Anything else in the directory is ignored, so a stray CSV
 # cannot silently end up published.
-TABLES = [
+# Written directly into dashboard.db by s04_descriptive, which reads gold.
+# They have no CSV: the CSV was only ever an intermediate this script read back,
+# which meant every value existed twice with nothing checking the copies agreed.
+DB_TABLES = [
     "dim_race", "dim_driver", "dim_team",
     "fact_driver_race", "fact_lap", "fact_event", "fact_championship",
+]
+
+# Statistical and model output. These are conclusions, not data, so they are
+# genuinely produced by the analysis steps and arrive as CSV.
+CSV_TABLES = [
     "diag_tests", "diag_coefficients", "diag_groups", "diag_points",
-    "perfect_lap", "perfect_lap_model", "perfect_lap_record", "perfect_race",
     "map_circuit_outline", "map_measured_xy", "map_coverage",
     "lap_factor_anova", "lap_factor_model", "lap_factor_reference",
     "telemetry_tow", "telemetry_effect",
     "lap_counterfactual_model", "lap_counterfactual_bounds",
 ]
 
+# NOT BUNDLED, and checked rather than assumed: perfect_lap, perfect_race,
+# perfect_lap_record and perfect_lap_model have no FROM, JOIN, subquery,
+# f-string or quoted reference anywhere in the app. 3,070 rows and 754 KB were
+# computed, written, packed, gzipped, uploaded and downloaded by every visitor,
+# then never read. The perfect-lap page was built on fact_lap plus the telemetry
+# geometry in map_measured_xy instead.
+#
+# s05b_perfect.py still computes them, deliberately. They are ahead of the
+# dashboard rather than useless: the planned application wants a choose-a-lap
+# feature. Add the names back here when something reads them.
+NOT_BUNDLED = [
+    "perfect_lap", "perfect_lap_model", "perfect_lap_record", "perfect_race",
+]
+
+TABLES = DB_TABLES + CSV_TABLES
+
 # The app filters by race and by test far more than anything else. Without
 # these, every "show me this race" click scans 90k lap rows.
-INDEXES = [
+#
+# Filtered against TABLES rather than listed freely, because the two lists drifted
+# apart the moment the perfect_* tables stopped being bundled: the entries for
+# them survived here and the build failed with "no such table: main.perfect_lap"
+# AFTER it had already written every table. Deriving the list means removing a
+# table from the bundle cannot leave a dangling index behind.
+_INDEX_WISHLIST = [
     ("fact_lap", "session_key"),
     ("fact_driver_race", "session_key"),
     ("fact_event", "session_key"),
@@ -99,6 +128,7 @@ INDEXES = [
     ("lap_factor_reference", "session_key"),
     ("lap_counterfactual_bounds", "session_key"),
 ]
+INDEXES = [(t, c) for t, c in _INDEX_WISHLIST if t in TABLES]
 
 
 def human(n: float) -> str:
@@ -111,31 +141,68 @@ def human(n: float) -> str:
 
 
 def build_db() -> dict[str, int]:
-    """Rewrites dashboard.db from the serving CSVs. Returns row counts."""
-    missing = [t for t in TABLES if not (DASHBOARD_DIR / f"{t}.csv").exists()]
-    if missing:
+    """
+    Completes dashboard.db: the fact and dimension tables are already in it,
+    written by s04 from gold, so this loads the analysis-output CSVs around them.
+    Returns row counts.
+    """
+    missing_csv = [t for t in CSV_TABLES
+                   if not (DASHBOARD_DIR / f"{t}.csv").exists()]
+    if missing_csv:
         raise FileNotFoundError(
-            "missing serving CSVs: " + ", ".join(missing) + "\n"
-            "Run s04_descriptive.py and s05_diagnostic.py first."
+            "missing analysis CSVs: " + ", ".join(missing_csv) + "\n"
+            "Run s05_diagnostic.py, s05b_perfect.py, s05c_racemap.py and "
+            "s05d_telemetry.py first."
+        )
+    if not DB_FILE.exists():
+        raise FileNotFoundError(
+            f"{DB_FILE.name} does not exist.\n"
+            "Run s04_descriptive.py first: it writes the fact and dimension "
+            "tables straight into the bundle."
         )
 
     # Drop and rewrite per table via to_sql(if_exists="replace"), matching
     # s04/s05, rather than deleting the file first. On Windows the file delete
     # fails outright if a local `streamlit run` still has dashboard.db open —
     # replacing tables in place works regardless of who else has it open for
-    # reading.
+    # reading. It is also what lets s04 write its tables before this runs.
     counts: dict[str, int] = {}
     with sqlite3.connect(DB_FILE) as con:
-        for table in TABLES:
+        present = {r[0] for r in con.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")}
+        absent = [t for t in DB_TABLES if t not in present]
+        if absent:
+            raise FileNotFoundError(
+                "these tables are missing from the bundle: " + ", ".join(absent)
+                + "\nRun s04_descriptive.py, which writes them from gold."
+            )
+
+        for table in DB_TABLES:
+            n = con.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0]
+            counts[table] = n
+            print(f"  {table:26s} {n:>8,} rows  (from gold via s04)")
+
+        for table in CSV_TABLES:
             df = pd.read_csv(DASHBOARD_DIR / f"{table}.csv")
             df.to_sql(table, con, index=False, if_exists="replace")
             counts[table] = len(df)
-            print(f"  {table:20s} {len(df):>8,} rows")
+            print(f"  {table:26s} {len(df):>8,} rows  (csv)")
+
+        # Anything left over from a previous bundle would still be uploaded, so
+        # it is dropped rather than carried. This is what removes the four
+        # perfect_* tables nothing reads on the first run after that change.
+        stale = present - set(TABLES) - {"sqlite_sequence"}
+        for table in sorted(stale):
+            con.execute(f'DROP TABLE IF EXISTS "{table}"')
+            print(f"  dropped stale table: {table}")
 
         # DROP TABLE (inside to_sql's replace) already drops that table's
         # indexes, so recreating them here never collides with a stale one.
+        # The DB_TABLES indexes are not dropped by anything above, hence
+        # IF NOT EXISTS.
         for table, col in INDEXES:
-            con.execute(f"CREATE INDEX ix_{table}_{col} ON {table}({col})")
+            con.execute(
+                f"CREATE INDEX IF NOT EXISTS ix_{table}_{col} ON {table}({col})")
 
     # VACUUM cannot run inside the transaction the context manager holds open,
     # and needs exclusive access it may not get with another reader attached.

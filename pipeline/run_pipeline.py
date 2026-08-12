@@ -7,6 +7,7 @@ Order
     s02_build_silver  rebuild silver from bronze   (skipped if nothing new)
     s02b_caution_flags rebuild derived flag tables (skipped if nothing new)
     s03_verify        invariant gate               (always runs)
+    s07_build_gold    gold layer, the source for everything below
     s04_descriptive   descriptive serving layer    (only if the gate passed)
     s05_diagnostic    diagnostic serving layer     (only if the gate passed)
     s06_publish       push data to the dashboard   (only with --publish)
@@ -260,12 +261,30 @@ def main() -> int:
         runner.log("rejected, presented as a finished dashboard.")
     else:
         serving_status = "built"
-        for name, script in (("descriptive", "s04_descriptive.py"),
+        # GOLD RUNS FIRST, AND THAT ORDER IS LOAD-BEARING.
+        #
+        # s05_diagnostic reads gold, so a run that rebuilt silver and skipped
+        # gold would analyse the previous week's data while reporting success.
+        # That is the exact failure this pipeline already has one guard against:
+        # silver_lap_flags going stale behind silver (check [17]) and the
+        # scheduled task failing silently for four months (NOTES_LOG #43).
+        # Gold is fully derived, so rebuilding it every run costs a minute and
+        # removes the whole class of problem.
+        #
+        # It also runs before s04, which now writes its seven tables straight
+        # into dashboard.db rather than to CSV.
+        for name, script in (("gold", "s07_build_gold.py"),
+                             ("descriptive", "s04_descriptive.py"),
                              ("diagnostic", "s05_diagnostic.py")):
-            rc, _ = runner.run_step(name, script)
+            extra = ["--execute"] if name == "gold" else None
+            rc, _ = runner.run_step(name, script, extra)
             if rc != 0:
                 runner.log(f"\n{name} serving layer FAILED.")
                 serving_failed.append(name)
+                if name == "gold":
+                    runner.log("Gold is the source for the diagnostic layer, so "
+                               "the rest would read a stale copy. Stopping here.")
+                    break
         if serving_failed:
             serving_status = f"FAILED: {', '.join(serving_failed)}"
 

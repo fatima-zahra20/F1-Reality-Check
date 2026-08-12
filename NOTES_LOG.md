@@ -801,9 +801,98 @@ in total, a 5.8x improvement. Caution share by circuit went 527ms to 1ms because
 became a table read. Grid versus finish improved only 2.6x, so the aggregates earn their
 place on the lap-heavy questions rather than uniformly.
 
-**Not carried:** `silver_intervals` (2.1M rows, a sub-second time series that would
-roughly double the layer for questions nothing currently asks) and `silver_team_radio`
-(audio URLs with no transcription, per open question D).
+**Not carried raw:** `silver_team_radio` (audio URLs with no transcription, per open
+question D). `silver_intervals` and `silver_position` enter at the two grains anything
+asks for rather than as 2.4M raw rows: one reading per lap on `gold_lap`, and a
+close-running share in `gold_agg_interval`.
+
+### 51. Migrating the consumers onto gold, and what that surfaced
+
+*2026-08-12.*
+
+**`s05_diagnostic` first, because its filter was already proven identical**, so any
+movement would be a bug caught cheaply rather than a judgement call. Result: **nothing
+moved**. 29 verdicts, p-values, statistics and n; 42 coefficients across 7 numeric
+columns; 189 group statistics across 4. All identical to 1e-9.
+
+`RACE_SCOPE`'s four-part predicate with two EXISTS subqueries became
+`WHERE is_analysable = 1`, verified to select the identical 81 races. `normalize_teams`
+became a no-op. `lane_duration` became `pit_duration`, safe only because they were
+byte-identical.
+
+**A correction.** I had said `is_representative_lap` was "row-for-row identical to the
+filter s05 writes by hand". That was true of its SQL clause, which is what I compared,
+but `load_clean_laps` then applies `LAP_OUTLIER_FACTOR = 2.0` and a null-team drop in
+pandas. The real population is 81,677, not 81,689. A gap of 12 laps, but I overstated it.
+
+**`LAP_OUTLIER_FACTOR` is a sixth valid-lap rule resting on a claim the caution fix
+invalidated.** Its comment says it removes "red-flag queues"; it runs after
+`neutralised = 0`, so red flags are already gone. What it removes now is 12 laps, and
+**six are Monaco 2026 lap 70, where sixteen cars ran at 2.02x with nothing flagged**.
+So it is partly compensating for a missed caution, exactly as the 60-200s window was
+(#49). Left at 2.0 deliberately: fixing that caution and moving this threshold in one
+step would make attribution impossible. Sensitivity: 1.5x drops 118, 1.8x drops 28,
+2.0x drops 12, 2.5x drops 1.
+
+**Lap-start state moved into gold**, which removed the last non-telemetry reason to
+reach past it. `position`, both gaps and both lap-gap counts are now columns, verified
+**100.0000% identical to the published fact_lap on all 90,053 race laps** with matching
+null patterns.
+
+That needed a decision nobody had noticed needed making. `s04` read these with
+`direction="backward"`, `s05` with `"nearest"`. Backward is the state as the lap began;
+nearest can return a sample from AFTER it started, which for a predictive feature is
+lookahead. Backward chosen. The two agree on 98.7% of laps; 328 of 88,652 fall on the
+other side of the 2.0s threshold one test filters on.
+
+**A real bug in published data: a missing teammate was being treated as a zero.**
+
+`fact_driver_race` built its teammate deltas as `own - (groupby_sum - own)`, and pandas
+`transform("sum")` skips NaN. A teammate who did not finish therefore contributed 0
+rather than nothing, and the delta came out equal to the driver's OWN finishing
+position, on **162 of 162 rows** where the teammate retired. Sainz finished 4th in
+Bahrain 2023 and it read as beating Leclerc by four places. Leclerc retired.
+`story_driver.py:73` renders that as an "Against teammate" metric.
+
+Also 46 pace deltas and 3 grid deltas. `teammate_points_delta` was unaffected, because a
+DNF genuinely scores zero, so treating it as zero happened to be right there. Fixed in
+both `s04` and gold by requiring both cars to have recorded the value; the call sites
+already guard on `pd.notna`, so the metric stops rendering rather than breaking.
+
+**Four bundle tables nothing reads.** `perfect_lap`, `perfect_race`,
+`perfect_lap_record`, `perfect_lap_model`: 3,070 rows, 754 KB, checked against every way
+a name can reach a query (FROM, JOIN, subquery, f-string, quoted, bare). The
+perfect-lap page was built on `fact_lap` plus `map_measured_xy` instead. Dropped from
+the bundle, still computed, because the planned application wants that feature.
+
+**Six of my own errors, caught by comparing rather than assuming:**
+
+| Error | How it showed |
+|---|---|
+| `n_stints` filled with 0 | zero stints is impossible for a car that started; 28 rows asserted it |
+| `n_stints` inherited through a lap-grained table | silently dropped 3 drivers with a stint but no laps |
+| `lap_vs_median` off the single-pass median | differed on 23,046 of 90,053 laps while looking like the same column |
+| `gold_driver` keyed on `driver_number` | 34 of 57 numbers are shared; every Verstappen lap resolved to Norris |
+| coefficient comparison joined on `(test_id, model)` | fanned 42 rows to 212 and reported 874 phantom changes |
+| group comparison keyed on `generated_at` | a fresh timestamp every run, so it matched nothing |
+
+The last two mean my first verification run reported movement that did not exist. Worth
+recording: a verification that is wrong in the alarming direction still wastes the same
+amount of trust.
+
+**The CSVs.** `s04` now writes its seven tables straight into `dashboard.db` instead of
+to CSV, which `s06` then read back. That copy existed twice with nothing checking the
+halves agreed. 7 CSVs and 25.2 MB deleted; 18 remain, all genuine analysis or model
+output. Bundle 25 tables to 21, gz 12.8 MB to 12.3 MB.
+
+**`s07_build_gold` is wired into `run_pipeline` before `s04` and `s05`, and stops the
+run if it fails.** Without that, a week that rebuilt silver and skipped gold would
+analyse the previous week's data and report success, which is the same shape as
+NOTES_LOG #43 and #44.
+
+**Verified end to end:** gate PASS with 0 FAIL, 32 of 32 dashboard queries resolve
+against the rebuilt bundle, bundle matches its table list exactly, and the 29 verdicts
+are unchanged after a full pipeline run.
 
 
 ## Open questions
