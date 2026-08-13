@@ -71,7 +71,7 @@ from scipy import stats
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from config import (DB_PATH, EXCLUDED_TEAMS, GOLD_DB_PATH,  # noqa: E402
-                    OUTPUTS_DIR)
+                    LAP_OUTLIER_FACTOR, OUTPUTS_DIR)
 
 import statsmodels.api as sm  # noqa: E402
 import statsmodels.formula.api as smf  # noqa: E402
@@ -92,8 +92,7 @@ TEAM_NAME_MAP = {
 
 ALPHA = 0.05
 
-# A lap longer than this multiple of the session median is a red-flag queue.
-LAP_OUTLIER_FACTOR = 2.0
+# LAP_OUTLIER_FACTOR is imported from config, which is the single definition.
 
 # Below this many shared races a teammate pairing cannot support a t-test.
 # Used by the qualifying-delta and sector-consistency analyses alike, so the

@@ -579,6 +579,48 @@ This is the source for `map_measured_xy` and `map_circuit_outline` in the dashbo
 - **Telemetry.** `car_data` and `location` are bronze-only and cover 32 of 490 sessions. `s05b_perfect`, `s05c_racemap` and `s05d_telemetry` keep a bronze connection for them, correctly.
 - **Two-pass medians.** Both `s04` and `s05` normalise against a median taken *after* trimming laps above `LAP_OUTLIER_FACTOR`. Gold's `session_green_median_s` is single-pass, which is the right denominator for `pace_ratio` (using the trimmed median to decide the trim would be circular) but the wrong one for normalisation. Shipping a `lap_vs_median` off the single-pass median would differ from the published column on 23,046 of 90,053 race laps while looking like the same thing, so it is deliberately absent. Consumers compute it in two lines.
 
+### Known caution gaps still in the data
+
+Six caution bugs were found and fixed (see the register in `README`). One remains,
+measured, not hidden behind a constant. `neutralised` is right for the overwhelming
+majority of laps and wrong in one specific way, plus one small residual.
+
+**A. The formation lap after a red flag. FIXED 2026-08-13.** After a stoppage the field
+forms up and takes a standing or rolling start, and that lap is not racing, but the red
+period closed at the inferred restart which lands before it. Zandvoort 2023 lap 66 at
+130.6s, Mexico City 2023 lap 36 at 138.2s and Suzuka 2024 lap 3 at 153.0s, against 88.7s,
+84.1s and 99.0s the lap after. The rule flags, per car, the first lap it starts after the
+period ends. All three cleared. **163 laps newly flagged, 0 lost.**
+
+Residual: Monaco 2026 lap 71 is flagged for 2 cars one lap too far, left alone because
+separating it needs a duration threshold. NOTES_LOG #52 has the detail, including the
+widening that flagged 697 racing laps before it was bounded correctly.
+
+**Over-flagging is now guarded.** Gate check [22] fails the run if a lap flagged
+neutralised ran at or faster than its session's green median.
+
+**B. The safety car withdrawal lap is partly recorded as green.**
+`SAFETY CAR IN THIS LAP` announces that the car leaves at the *end* of the current lap,
+but the period is closed at the message timestamp, so cars that start the lap after it are
+left green. **35 laps across 12 races.**
+
+Two things matter about B if you are writing a query:
+
+- **`LAP_OUTLIER_FACTOR` does not catch it.** Its cut is 2.0x the session green median and
+  these laps top out at 1.50x. All 35 reach the representative population.
+- **The error is biased, not random.** When the message fires the leaders have already
+  crossed the line, so the cars still on the lap are at the **back**. It lands on
+  midfield and backmarker drivers and therefore makes slow cars look slower.
+
+The worst effect on any driver's race median is **0.313s** and the typical one is under
+0.05s, but that is entirely because every consumer takes a median. **A mean over race laps
+would be materially more exposed to this**, so prefer medians for per-driver pace.
+
+B is not fixed because it cannot be expressed in the current model: cars begin the same lap
+up to 154 seconds apart, so no single period-end timestamp is correct for all of them. Two
+attempts were reverted for flagging more racing laps than they caught. See NOTES_LOG #52
+before trying again.
+
 ### Provenance
 
 `_gold_build_state` records rows, columns and build time per table, so a stale gold layer can be spotted the way `_silver_build_state` lets the gate spot a stale silver one.

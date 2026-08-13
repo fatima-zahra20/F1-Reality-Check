@@ -904,6 +904,92 @@ def check_unflagged_field_slowdowns(con, rep: Report) -> None:
                  f"{ratio:.2f}x, {flagged:.0%} flagged")
 
 
+def check_overflagged_racing_laps(con, rep: Report) -> None:
+    """
+    The mirror of [21]: laps flagged as neutralised that ran at racing pace.
+
+    WHY THIS EXISTS. Check [21] looks for cautions the parser MISSED. Nothing
+    looked for the opposite, and every caution fix so far has been validated by
+    throwaway scripts that no longer exist. On 2026-08-13 a one-line widening of
+    the restart-procedure rule extended Melbourne 2023's first red flag period
+    across laps 10 to 26 and flagged 697 racing laps as neutralised. The gate
+    reported PASS. It was caught by an ad-hoc script, which is not a control.
+
+    Over-flagging is the more dangerous direction. A missed caution leaves a
+    conspicuously slow lap in the green population, which check [21] finds and a
+    reader might notice. A wrongly flagged lap simply DISAPPEARS from every
+    analysis, and nothing downstream can tell it apart from a real one.
+
+    A FAIL, not a WARN, unlike [21]. A field-wide slowdown has innocent
+    explanations, so [21] reports. A neutralised lap at full racing pace does
+    not: either the flag is wrong or the pace reference is, and both need fixing
+    before the numbers are trusted.
+
+    The threshold is deliberately loose. This is not trying to grade borderline
+    restart laps, which legitimately sit a few percent off green pace; it is
+    trying to catch a rule that has run away. Only laps at or FASTER than the
+    session's own green median count, since a genuinely neutralised lap can
+    never be quicker than the racing it replaced.
+    """
+    print("\n[22] No laps flagged as neutralised while running at racing pace")
+    if not table_exists(con, "silver_lap_flags"):
+        rep.warn("silver_lap_flags missing, cannot check over-flagging")
+        return
+
+    # Medians, for the same reason as [21]. Pit-out and pit-in laps are excluded
+    # from the reference but a flagged lap is judged on its own duration.
+    rows = con.execute("""
+        WITH lap AS (
+            SELECT l.session_key, l.lap_number, l.driver_number, l.lap_duration,
+                   COALESCE(l.is_pit_out_lap, 0) AS pit_out, f.neutralised
+            FROM silver_laps l
+            JOIN silver_lap_flags f
+              ON f.session_key = l.session_key
+             AND f.driver_number = l.driver_number
+             AND f.lap_number = l.lap_number
+            JOIN silver_sessions s ON s.session_key = l.session_key
+            WHERE s.session_name IN ('Race', 'Sprint')
+              AND l.lap_duration IS NOT NULL
+        ),
+        green_ranked AS (
+            SELECT session_key, lap_duration,
+                   ROW_NUMBER() OVER (PARTITION BY session_key
+                                      ORDER BY lap_duration) AS rn,
+                   COUNT(*)     OVER (PARTITION BY session_key) AS cnt
+            FROM lap WHERE neutralised = 0 AND pit_out = 0 AND lap_number >= 5
+        ),
+        ref AS (
+            SELECT session_key, AVG(lap_duration) AS green
+            FROM green_ranked
+            WHERE rn IN ((cnt + 1) / 2, (cnt + 2) / 2)
+            GROUP BY session_key
+        )
+        SELECT l.session_key, l.lap_number, COUNT(*) AS cars,
+               AVG(l.lap_duration / ref.green) AS ratio
+        FROM lap l JOIN ref USING (session_key)
+        WHERE l.neutralised = 1 AND l.pit_out = 0
+          AND l.lap_duration <= ref.green
+        GROUP BY l.session_key, l.lap_number
+        HAVING COUNT(*) >= 5
+        ORDER BY cars DESC
+    """).fetchall()
+
+    if not rows:
+        rep.ok("no neutralised lap-event runs at or above green pace")
+        return
+
+    total = sum(r[2] for r in rows)
+    sessions = len({r[0] for r in rows})
+    rep.fail(
+        f"{total} neutralised lap(s) across {len(rows)} lap-event(s) in "
+        f"{sessions} session(s) ran at or faster than their session's green "
+        f"median. A caution rule is over-reaching"
+    )
+    for session_key, lap_number, cars, ratio in rows[:12]:
+        rep.info(f"session {session_key} lap {lap_number}: {cars} cars at "
+                 f"{ratio:.2f}x, flagged neutralised")
+
+
 CHECKS = [
     check_tables_present,
     check_split_columns,
@@ -922,6 +1008,7 @@ CHECKS = [
     check_cadillac_exclusion,
     check_lap_flags_fresh,
     check_unflagged_field_slowdowns,
+    check_overflagged_racing_laps,
     check_endpoint_coverage,
     check_silver_matches_bronze,
     # Last, so the snapshot it builds reflects everything the run has seen.

@@ -66,6 +66,11 @@ MIN_CARS_FOR_RESTART = 3
 # Fallback lap length when lap_duration is NULL and there is no following lap.
 DEFAULT_LAP_SECONDS = 120
 
+# Ways a red flag period can close that mean the race demonstrably resumed, and
+# so that a formation lap follows. 'session_end' is excluded deliberately: a
+# race that finished under red flag never restarted and has no formation lap.
+RESUMED_CLOSERS = ("restart_inferred", "start_procedure", "green_flag")
+
 
 def classify(message: str) -> tuple[str | None, str | None]:
     """Returns (kind, phase) for a SafetyCar-category message."""
@@ -407,10 +412,30 @@ def build_periods(con: sqlite3.Connection) -> pd.DataFrame:
         if kind != "RED":
             return end, closed_by
 
-        later = [p for p in procedures.get(session_key, [])
-                 if p > start_ts and (before is None or p <= before)]
-        if later and later[0] > end:
-            return later[0], "start_procedure"
+        # The EARLIEST procedure message that still falls after the inferred
+        # restart, not merely the first one after the stoppage. Zandvoort 2023
+        # needs this: it logs a procedure message BEFORE the inferred restart
+        # and 'SAFETY CAR WILL ENTER PITS: ROLLING START PROCEDURE' at 15:17:24,
+        # four minutes after it. Testing only the first message saw the early
+        # one, concluded there was nothing to extend to, and left lap 66 green
+        # at 130.6s against 88.7s the lap after.
+        #
+        # THIS IS ONLY SAFE BECAUSE OF THE TWO BOUNDS BELOW, and it was reverted
+        # once for lacking them. Unbounded, a multi-red-flag race lets the first
+        # stoppage reach the second restart's message: Melbourne 2023 extended
+        # its first period across laps 10 to 26 and 697 racing laps were
+        # flagged. `before` is the next red flag; `limit` is the session end.
+        # Neither is a tunable number.
+        limit = ends.get(session_key)
+        later = [
+            p for p in procedures.get(session_key, [])
+            if p > start_ts
+            and (before is None or p <= before)
+            and (limit is None or pd.isna(limit) or p <= limit)
+        ]
+        after_end = [p for p in later if p > end]
+        if after_end:
+            return after_end[0], "start_procedure"
         return end, closed_by
 
     rc = pd.read_sql("""
@@ -439,6 +464,11 @@ def build_periods(con: sqlite3.Connection) -> pd.DataFrame:
             (grp["category"] == "Flag") & (grp["flag"] == "GREEN"), "date"
         ].tolist()
 
+        # Every red flag in this session, so one stoppage's procedure search can
+        # be bounded by the NEXT stoppage. Without this bound a multi-red-flag
+        # race lets the first period reach the second restart's message.
+        reds = grp.loc[grp.apply(is_red_flag, axis=1), "date"].tolist()
+
         open_period = None
 
         def close(period, end_ts, closed_by):
@@ -455,12 +485,15 @@ def build_periods(con: sqlite3.Connection) -> pd.DataFrame:
                     close(open_period, ts, "superseded_by_red")
                     open_period = None
                 nxt = [g for g in greens if g > ts]
+                later_reds = [r for r in reds if r > ts]
                 if nxt:
                     end_ts, closed_by = nxt[0], "green_flag"
                 else:
-                    # No green flag follows, so nothing bounds the procedure
-                    # search except the period itself.
-                    end_ts, closed_by = fallback_end(session_key, ts)
+                    # No green flag follows, so the procedure search is bounded
+                    # by the next stoppage instead.
+                    end_ts, closed_by = fallback_end(
+                        session_key, ts,
+                        before=later_reds[0] if later_reds else None)
                 periods.append({
                     "session_key": session_key,
                     "kind": "RED",
@@ -587,6 +620,52 @@ def build_lap_flags(con: sqlite3.Connection, periods: pd.DataFrame) -> pd.DataFr
                 idx = sub.index[overlap.fillna(False)]
                 col = {"SC": "sc_flag", "VSC": "vsc_flag", "RED": "red_flag"}[p["kind"]]
                 laps.loc[idx, col] = 1
+
+    # --- the formation lap after a red flag ----------------------------------
+    #
+    # A race does not resume at racing speed. The field forms up and takes a
+    # standing or rolling start, and that lap is not racing. The red period is
+    # closed at the inferred restart, which lands BEFORE it, so the formation
+    # lap is recorded as green:
+    #
+    #   Zandvoort 2023 lap 66  130.6s  against 88.7s the lap after
+    #   Mexico City 2023 lap 36  138.2s  against 84.1s
+    #   Suzuka 2024 lap 3  153.0s  against 99.0s
+    #
+    # Each of those logs a STANDING or ROLLING START PROCEDURE message, but in
+    # Mexico and Suzuka it fires BEFORE the period end, so the Monaco rule in
+    # fallback_end cannot reach them. Monaco was one instance of this; the
+    # general fact is that a red flag is always followed by a formation lap.
+    #
+    # WHY PER CAR AND BY TIME, not by lap number. At Zandvoort the formation lap
+    # is a different lap NUMBER for different cars: those parked through the
+    # stoppage were mid-lap-65 and resume on lap 66, while cars that started
+    # lap 65 after the restart have lap 65 as their formation lap. Lap 65's
+    # start times span 42 minutes for that reason. "The first lap this car
+    # starts after the period ends" is correct for both groups; any rule keyed
+    # on a shared lap number is wrong for one of them.
+    #
+    # Scoped to races because only a race restarts this way. A qualifying or
+    # practice session simply reopens and cars leave the pits, which is already
+    # an out lap. Scoped to periods that demonstrably resumed, so a race that
+    # ended under red flag is untouched.
+    if not periods.empty:
+        race_keys = set(pd.read_sql("""
+            SELECT session_key FROM silver_sessions WHERE session_name = 'Race'
+        """, con)["session_key"])
+
+        resumed = periods[
+            (periods["kind"] == "RED")
+            & periods["closed_by"].isin(RESUMED_CLOSERS)
+            & periods["session_key"].isin(race_keys)
+        ]
+        for _, p in resumed.iterrows():
+            after = laps[(laps["session_key"] == p["session_key"])
+                         & (laps["date_start"] > p["date_end"])]
+            if after.empty:
+                continue
+            first = after.groupby("driver_number", sort=False)["date_start"].idxmin()
+            laps.loc[first.values, "red_flag"] = 1
 
     # --- sector yellows, kept separate ---------------------------------------
     yellows = pd.read_sql("""

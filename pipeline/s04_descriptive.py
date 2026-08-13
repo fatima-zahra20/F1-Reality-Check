@@ -66,16 +66,14 @@ from pathlib import Path
 import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from config import DB_PATH, OUTPUTS_DIR  # noqa: E402 
+from config import DB_PATH, LAP_OUTLIER_FACTOR, OUTPUTS_DIR  # noqa: E402
 
 DASHBOARD_DIR = OUTPUTS_DIR / "dashboard"
 BUNDLE_DB = DASHBOARD_DIR / "dashboard.db"
 
-# A clean lap longer than this multiple of its session's median clean lap is a
-# car sitting in a red-flag queue, not a lap. Derived per session rather than
-# hardcoded in seconds — see the note in build_fact_driver_race. s05_diagnostic
-# applies the same rule.
-LAP_OUTLIER_FACTOR = 2.0
+# LAP_OUTLIER_FACTOR now comes from config, which is the single definition.
+# Applied per session against that session's own median, never in seconds; see
+# the note in build_fact_driver_race.
 
 # Constructor renames across 2023-2026. Mirrors data_prep.TEAM_NAME_MAP.
 # Cadillac deliberately unmapped — a genuinely new 2026 constructor.

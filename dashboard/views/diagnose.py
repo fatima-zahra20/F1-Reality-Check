@@ -11,9 +11,11 @@ Nothing is recomputed in the app: the statistics on the page are the statistics
 the pipeline produced, so a number shown here can always be traced to a run.
 
 A test that failed to reach significance is displayed as prominently as one
-that succeeded. Twenty of the twenty-one carry a caveat, and the caveat sits
-next to the conclusion rather than behind a click, because several of these
-findings mean much less than the headline suggests.
+that succeeded. Almost every test carries a caveat, and the caveat sits next to
+the conclusion rather than behind a click, because several of these findings
+mean much less than the headline suggests. Counts are deliberately not written
+out here; they go stale, and this docstring claimed twenty of twenty-one long
+after it became twenty-eight of twenty-nine.
 """
 
 from __future__ import annotations

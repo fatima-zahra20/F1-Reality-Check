@@ -66,7 +66,8 @@ import pandas as pd
 import statsmodels.formula.api as smf
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from config import BRONZE_DB_PATH, DB_PATH, OUTPUTS_DIR  # noqa: E402
+from config import (BRONZE_DB_PATH, DB_PATH,  # noqa: E402
+                    LAP_OUTLIER_FACTOR, OUTPUTS_DIR)
 
 DASHBOARD_DIR = OUTPUTS_DIR / "dashboard"
 
@@ -80,7 +81,8 @@ MIN_SAMPLES_PER_LAP = 100
 # Matches s05b, so the two tables describe traffic the same way.
 GAP_CAP_SECONDS = 10.0
 DIRTY_AIR_SECONDS = 1.5
-LAP_OUTLIER_FACTOR = 2.0
+
+# LAP_OUTLIER_FACTOR is imported from config, which is the single definition.
 
 GAP_BUCKETS = [0, 1, 1.5, 2, 3, 5, GAP_CAP_SECONDS + 0.01]
 GAP_LABELS = ["under 1s", "1 to 1.5s", "1.5 to 2s", "2 to 3s", "3 to 5s",

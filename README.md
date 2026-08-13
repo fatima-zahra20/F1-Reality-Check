@@ -144,7 +144,7 @@ OpenF1 API
 [ s02b_caution_flags ]  ──▶  silver_caution_periods, silver_lap_flags
     │
     ▼
-[ s03_verify ]  ──▶  21-check invariant gate: FAIL halts the run
+[ s03_verify ]  ──▶  22-check invariant gate: FAIL halts the run
     │
     ▼
 [ s07_build_gold ]  ──▶  gold_f1.db                   158 MB, 18 conformed tables
@@ -350,7 +350,7 @@ F1-Reality-Check/
 │   ├── s01_backfill.py            targeted re-ingestion of failed fetches
 │   ├── s02_build_silver.py        bronze -> silver build driver
 │   ├── s02b_caution_flags.py      range-based SC / VSC / RED periods
-│   ├── s03_verify.py              21-check invariant gate
+│   ├── s03_verify.py              22-check invariant gate
 │   ├── s07_build_gold.py          silver -> gold, 18 conformed tables
 │   ├── s04_descriptive.py         7 fact/dim tables, written into the bundle
 │   ├── s05_diagnostic.py          29 statistical tests
@@ -468,6 +468,27 @@ the stoppage + its duration) minus one session-median lap. Sensitivity across
 `neutralised` went from 17,076 laps to 11,830, and the flags now behave as their names
 claim: green 1.00x, VSC 1.23x, SC 1.45x, red 1.93x. **Any analysis that filtered on
 `neutralised` before 2026-08-11 was built on a contaminated population.**
+
+**Bug 6, found 2026-08-13:** a red flag is always followed by a **formation lap**, and it
+was recorded as green. Monaco (bug 5) was one instance of it. Fixed per car by time, since
+the formation lap falls on different lap *numbers* for different cars: **163 laps newly
+flagged, 0 lost**, and 0 of 29 verdicts changed. Gate check [21] fell from 28 unexplained
+lap-events to 24.
+
+**A gate check now guards the other direction.** Check [22] fails the run when a lap
+flagged as neutralised ran at or faster than its session's green median. Every caution fix
+before this was validated by throwaway scripts, and one widening of the restart rule
+flagged 697 racing laps while the gate still reported PASS. Over-flagging is the more
+dangerous direction: a wrongly flagged lap simply disappears from every analysis and
+nothing downstream can tell it from a real one.
+
+**One is known, measured and still open.** The safety car withdrawal lap is partly green:
+`SAFETY CAR IN THIS LAP` means the car leaves at the *end* of the lap, but the period
+closes at the message. 35 laps over 12 races, biased toward the back of the grid because
+the leaders have already crossed the line, and caught by no outlier filter. It is not a
+rule change: cars begin the same lap up to 154 seconds apart, so no single timestamp is
+correct for all of them, and two attempts were reverted for flagging more racing laps than
+they caught. Detail in `DATA_DICTIONARY` and NOTES_LOG #52.
 
 **A duration window was hiding bug 4.** `DATA_DICTIONARY` recommended
 `lap_duration BETWEEN 60 AND 300`, used at no call site. Its floor can never fire (zero

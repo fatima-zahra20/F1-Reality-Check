@@ -77,6 +77,19 @@ TEST_SEASONS = [2026]
 EXCLUDED_TEAMS = ["Cadillac"]
 STOP_DURATION_MIN_YEAR = 2024          # zero coverage in 2023
 
+# A clean lap longer than this multiple of its session's median clean lap is
+# treated as a car sitting in a red-flag queue rather than a lap. Expressed as a
+# ratio, never in seconds, so it travels across circuits.
+#
+# THE STATED RATIONALE NO LONGER HOLDS and this constant is under review. Red
+# flag queues are now caught by silver_lap_flags, so the factor removes 6 laps
+# rather than the 12 it was introduced for. It also catches 0 of the 35 laps
+# left green by the known safety-car withdrawal bug, whose ratios top out at
+# 1.50 (DATA_DICTIONARY, known caution gaps). Consolidated here first so that
+# whatever replaces it changes one line: it was previously declared four times,
+# in s04, s05, s05b and s05d, with nothing checking the copies agreed.
+LAP_OUTLIER_FACTOR = 2.0
+
 # --- telemetry (excluded from the weekly pipeline) ---
 # car_data (9.4M rows) and location (25.8M rows) exist in bronze only. They cover
 # 32 of 490 sessions, so they cannot be model features or appear in season-wide

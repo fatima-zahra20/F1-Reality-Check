@@ -97,7 +97,7 @@ import pandas as pd
 from scipy import stats
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from config import DB_PATH, OUTPUTS_DIR  # noqa: E402
+from config import DB_PATH, LAP_OUTLIER_FACTOR, OUTPUTS_DIR  # noqa: E402
 
 import statsmodels.formula.api as smf  # noqa: E402
 from statsmodels.stats.anova import anova_lm  # noqa: E402
@@ -114,7 +114,7 @@ TEAM_NAME_MAP = {
     "Audi": "Sauber Family",
 }
 
-LAP_OUTLIER_FACTOR = 2.0
+# LAP_OUTLIER_FACTOR is imported from config, which is the single definition.
 
 # 0 keeps every candidate. There is one per driver-race, so the whole table is
 # ~1,550 rows and the dashboard can filter it freely rather than being handed a

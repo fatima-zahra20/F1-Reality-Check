@@ -895,6 +895,141 @@ against the rebuilt bundle, bundle matches its table list exactly, and the 29 ve
 are unchanged after a full pipeline run.
 
 
+### 52. A restart is a lap, not a timestamp
+*2026-08-12*
+
+Check [21] left 14 green laps whose field median sits at or above 1.30x the session green
+median. Splitting them by field spread and by whether a caution is already flagged on the
+neighbouring lap gives a clean 7 and 7:
+
+| | laps | |
+|---|---|---|
+| adjacent to a flagged period | **7** | Zandvoort 66, Mexico City 36, Suzuka 3, Jeddah 20, Montreal 29 and 58, Imola 53 |
+| no adjacent flag, wet race | 7 | Zandvoort 2 and 3, Monte Carlo 54 to 59 |
+
+Seven out of seven of the unexplained ones touch an existing period. **The remaining
+error is in period boundaries, not in events the pipeline missed entirely.** They fall
+into two families.
+
+**Family A, the formation lap after a red flag. FIXED.** The RED period is closed at the
+inferred restart, but the formation lap runs after it:
+
+| race | period ends | next lap | that lap | lap after |
+|---|---|---|---|---|
+| Zandvoort 2023 | 15:13:07 | 66 at 15:16:39 | 130.6s | 88.7s |
+| Mexico City 2023 | 21:14:15 | 36 at 21:15:10 | 138.2s | 84.1s |
+| Suzuka 2024 | 05:33:12 | 3 at 05:34:24 | 153.0s | 99.0s |
+
+Each logs a STANDING or ROLLING START PROCEDURE message, and in Mexico and Suzuka that
+message fires **before** the period end, so the #51 Monaco rule cannot reach them. Monaco
+was one instance of a general bug: after a red flag there is always a formation lap and
+it is never racing.
+
+The rule is **per car and by time**: the first lap a car starts after the period ends.
+Not by lap number, because at Zandvoort the formation lap is a different lap number for
+different cars. Cars parked through the stoppage were mid-lap-65 and resume on 66; cars
+that started lap 65 after the restart have 65 as their formation lap, which is why lap
+65's start times span 42 minutes. Any rule keyed on one shared lap number is wrong for
+one of the two groups. Scoped to races, since only a race restarts this way, and to
+periods closed by `restart_inferred`, `start_procedure` or `green_flag`, so a race that
+ended under red flag is untouched.
+
+**A second, separate defect in the same rule.** Zandvoort would not clear from the
+formation-lap rule alone, because its useful procedure message,
+`SAFETY CAR WILL ENTER PITS: ROLLING START PROCEDURE` at 15:17:24, sits *after* the
+inferred restart while an earlier procedure message sits *before* it, and `fallback_end`
+tested only the first message after the stoppage. So it saw the early one, concluded there
+was nothing to extend to, and stopped.
+
+Widening it to "the earliest message still after the inferred restart" was tried, and
+**failed catastrophically on the first attempt**: `before` was unbounded on that call path,
+so in a multi-red-flag race the first stoppage reached the second restart's message.
+Melbourne 2023 extended its first period across laps 10 to 26 and **697 racing laps were
+flagged as neutralised**. Reverted within the same run.
+
+It was then reinstated correctly by adding the two bounds it had been missing, neither of
+them a tunable number: `before` is the next red flag in the session, and `limit` is the
+effective session end. **The ordering matters and is recorded in the code**: bound first,
+widen second. Widening first is what produced the 697 laps.
+
+**Result of both together:** 163 laps newly flagged, `neutralised` 11,830 to 11,995.
+161 of the 163 are clearly slow (median 1.18x, max 2.27x). **0 laps lost a flag.** All
+three targets cleared: Zandvoort 66, Mexico City 36, Suzuka 3. Gate check [21] fell from
+28 unexplained lap-events to 24.
+
+**One residual, left deliberately.** Monaco 2026 lap 71 is flagged for 2 cars at 1.02x
+and 1.03x. For them the period end fell
+mid-lap-70, so lap 70 was already caught by overlap and lap 71 is one lap too far.
+Distinguishing "the lap spanning the period end is the stoppage lap" from "it is the
+formation lap" needs a duration threshold, which is the mistake `RESTART_FACTOR` already
+made once. Two laps just after a standing start are arguably not representative racing
+anyway, so this is left alone deliberately.
+
+**Verdict impact:** 0 of 29 test verdicts flipped. One coefficient crossed 0.05 and changed
+sign: T18's `tyre_age`, from -0.0001 (p=0.93) to **+0.0061**, with R² up from 11.2% to
+12.4%. That is the fix working rather than a problem: contaminated restart laps were
+dragging the term to zero. It is still an order of magnitude below T11a's within-stint
++0.058 to +0.079 s/lap, which is the point the caveat already makes. The published
+narrative switched branches on its own, because the wording had been written for both
+outcomes rather than for the result of the day.
+
+**A gate check for the other direction, added the same day.** Check [22] fails the run when
+a lap flagged as neutralised ran at or faster than its session's green median. Every
+caution fix up to this point had been validated by ad-hoc scripts that no longer exist, and
+the 697-lap Melbourne regression above was caught by one of those while the gate reported
+PASS. Over-flagging is the more dangerous direction: a missed caution leaves a conspicuously
+slow lap that check [21] finds, whereas a wrongly flagged lap disappears from every analysis
+and nothing downstream can distinguish it from a real one. It is a FAIL rather than a WARN
+because, unlike a field-wide slowdown, a neutralised lap at full racing pace has no innocent
+explanation. Verified to have teeth rather than to pass blindly: 32 laps currently qualify
+individually, the largest lap-event holds 3 cars, and the check fires at 5.
+
+**`LAP_OUTLIER_FACTOR` consolidated into config**, having been declared four times, in
+`s04`, `s05`, `s05b` and `s05d`, with nothing checking the copies agreed. Same duplication
+as `EXCLUDED_TEAMS` in #51. Number-neutral. The constant itself is now flagged as under
+review in config: its stated rationale no longer holds, and it catches 0 of the 35 laps left
+green by family B.
+
+**Family B, the safety car withdrawal lap. MEASURED, ATTEMPTED, REVERTED.**
+`SAFETY CAR IN THIS LAP` is treated as the moment the period ends. It announces that the
+car withdraws at the **end** of the current lap, so the rest of that lap is still
+neutralised. It shows as partial flagging: Jeddah 8 of 19 cars, Montreal 2 of 15, Imola
+12 of 18.
+
+Cost, measured before attempting anything: **35 laps across 12 races.** None are removed
+by `LAP_OUTLIER_FACTOR`, whose cut is 2.0x and whose ratios here top out at 1.50. The
+affected cars are **not a random sample**: when the message fires the leaders have already
+crossed the line, so the cars still on the lap are the ones at the back. It lands on Zhou,
+Ocon, Bottas, Lawson, Stroll and Bortoleto, which means the error **makes slow cars look
+slower**, the direction least likely to be questioned. Largest effect on any driver's race
+median is 0.313s (Bottas, Suzuka 2026); typical is under 0.05s.
+
+**It is only that small because every consumer uses medians. If anything switches to a
+mean, this gets materially worse.**
+
+**Why the fix was reverted.** Two leader definitions were tried and both failed the
+acceptance tests:
+
+- the car in P1 in the position feed at the message time. The leader is frequently
+  **pitting** when the safety car is called in, and a pit lap ends long after the restart,
+  so the period stretched past the green
+- among laps in progress, the highest lap number and then the earliest end, which is the
+  first car on the leading lap to cross the line
+
+The second produced **byte-identical output** to the first, which is what gave the real
+answer. At Montreal 2024, **lap 58 start times spread across 154 seconds for 15 cars**.
+The field is not bunched. If cars begin the same lap 154 seconds apart then no single
+period-end timestamp is correct for all of them, and no better leader definition helps.
+
+Both attempts flagged 34 laps at racing pace in order to catch 35 behind the safety car,
+including car 1's lap 59 at Montreal at 78.4s against an 87.4s baseline. **The fix was
+worse than the bug**, and the wrong flags would have been indistinguishable from right
+ones afterwards. Reverted; all 239,102 lap flags and 445 periods restored exactly.
+
+Fixing B properly means making `build_lap_flags` operate on lap numbers per car rather
+than on time windows. That is a rewrite, not a rule change. Do not retry it as one.
+
+
 ## Open questions
 
 ### A. `caution_flag` under-detects Safety Car periods
