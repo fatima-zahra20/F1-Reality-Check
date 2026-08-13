@@ -1029,6 +1029,49 @@ ones afterwards. Reverted; all 239,102 lap flags and 445 periods restored exactl
 Fixing B properly means making `build_lap_flags` operate on lap numbers per car rather
 than on time windows. That is a rewrite, not a rule change. Do not retry it as one.
 
+**Family C, a race that ENDS under caution. FIXED.** Found by finally comparing the gate's
+own [21] list against the ones I had triaged, and discovering **14 of 24 had never been
+looked at**, because every triage script I wrote filtered to races at a tighter threshold
+than the check uses. The loudest unexplained slowdown in the whole dataset was in that gap.
+
+Montreal 2025: safety car deployed on lap 67, `CHEQUERED FLAG` at 19:34:56, no green flag
+and no closing message in between, because racing never resumed. The period was closed
+after 123s instead of running the 444s to the finish, leaving laps 68, 69 and 70 at 1.39x,
+1.58x and 1.60x green pace recorded as racing. `ALL CARS TO FOLLOW THE SAFETY CAR THROUGH
+THE PIT LANE` confirms it.
+
+The cause is a priority inversion in `fallback_end`: it preferred an inferred restart over
+the session end whenever `restart_finder` returned anything, and **`restart_finder` cannot
+tell "racing resumed" from "cars kept circulating behind the safety car"**, because both
+produce completed laps. So it invented a restart that never happened.
+
+The test is structural, not a threshold: no green track flag and no safety car closing
+message after the deployment means racing never resumed. **RED is excluded deliberately**,
+because a suspended race that resumes often logs neither signal, which is the whole reason
+`restart_finder` exists (#47, Monaco 2024). Applying this to RED would reintroduce that bug.
+
+Closed at the **chequered flag**, not at `effective_session_end`. The latter is the last
+evidence of any activity and runs long past the finish as stewards' decisions arrive:
+Melbourne 2024's VSC would have been extended by 2,209s rather than 26s, a 38-minute VSC.
+No lap is misflagged either way, since no lap exists after the finish, but
+`duration_seconds` is published.
+
+**Result:** 7 periods extended, all SC or VSC, none shortened, no RED touched. 3 races
+(Montreal 2025, Melbourne 2024, Baku 2024), 3 practices and 1 sprint. 42 race laps newly
+flagged, **0 at racing pace** (min ratio 1.13), **0 laps lost a flag**. Longest extension
+679s, down from 2,209s before the chequered bound. 0 of 29 verdicts flipped, 0 coefficients
+crossed 0.05, 0 sign changes.
+
+**Check [21] narrowed to races.** It had covered Sprints since it was written, but nothing
+in this project analyses a Sprint, so those findings could not move a published number and
+sat untriaged for weeks while looking like work. Two are genuine and still in the data
+(Austin 2025 laps 18-19 at 1.50x, Miami 2025 lap 3 at 1.44x); the docstring records them
+and says to widen the scope back when that phase starts.
+
+**The lesson worth keeping:** a check whose scope is wider than any triage script will
+accumulate findings nobody reads, and a gate people learn to skim is worse than no gate.
+Scope the check to the scope of the work.
+
 
 ## Open questions
 

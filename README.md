@@ -482,6 +482,16 @@ flagged 697 racing laps while the gate still reported PASS. Over-flagging is the
 dangerous direction: a wrongly flagged lap simply disappears from every analysis and
 nothing downstream can tell it from a real one.
 
+**Bug 7, found 2026-08-13:** a race that **ends under the safety car** never restarts, but
+`fallback_end` preferred an inferred restart over the session end whenever it could compute
+one, and the restart statistic cannot tell "racing resumed" from "cars kept circulating
+behind the safety car". Montreal 2025 closed its period after 123s instead of the 444s to
+the chequered flag, leaving laps 68 to 70 at 1.39x to 1.60x recorded as racing. Fixed
+structurally: no green flag and no closing message after the deployment means nothing
+resumed. Red flags are excluded, since a suspended race that resumes often logs neither and
+that is why the restart inference exists. 7 periods extended, 42 race laps, 0 at racing
+pace, 0 lost, 0 of 29 verdicts changed.
+
 **One is known, measured and still open.** The safety car withdrawal lap is partly green:
 `SAFETY CAR IN THIS LAP` means the car leaves at the *end* of the lap, but the period
 closes at the message. 35 laps over 12 races, biased toward the back of the grid because

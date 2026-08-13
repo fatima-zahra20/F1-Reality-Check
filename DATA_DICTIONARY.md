@@ -581,9 +581,13 @@ This is the source for `map_measured_xy` and `map_circuit_outline` in the dashbo
 
 ### Known caution gaps still in the data
 
-Six caution bugs were found and fixed (see the register in `README`). One remains,
+Seven caution bugs were found and fixed (see the register in `README`). One remains,
 measured, not hidden behind a constant. `neutralised` is right for the overwhelming
 majority of laps and wrong in one specific way, plus one small residual.
+
+Note also that `silver_caution_periods.closed_by` now records **how** each period was
+closed, including `ended_under_caution` for a session that finished behind a safety car.
+It is worth checking when a period's duration looks surprising.
 
 **A. The formation lap after a red flag. FIXED 2026-08-13.** After a stoppage the field
 forms up and takes a standing or rolling start, and that lap is not racing, but the red

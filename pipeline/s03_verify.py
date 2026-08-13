@@ -828,9 +828,16 @@ def check_unflagged_field_slowdowns(con, rep: Report) -> None:
     pit-out laps, taken over the whole session. That trusts the flags, but only
     on the laps not in question, and only in aggregate.
 
-    Known residuals as of 2026-08-11, both being a safety car that came in
-    mid-lap while the closing message predates it:
-      Suzuka 2024 race lap 3, Miami 2025 sprint lap 3.
+    SCOPED TO RACES since 2026-08-13. It covered Sprints too, but nothing in
+    this project analyses a Sprint: gold's race scope, the 29 tests and the
+    dashboard all filter to session_name = 'Race'. So Sprint findings could not
+    affect a published number, and they sat untriaged for weeks while looking
+    like real work. Two of them (Austin 2025 laps 18-19 at 1.50x, Miami 2025
+    lap 3 at 1.44x) are genuine and still in the data. Widen this back to
+    ('Race', 'Sprint') when the Sprint phase starts, and triage them then.
+
+    Known residual as of 2026-08-13: Suzuka 2024 race lap 3, a safety car that
+    came in mid-lap while the closing message predates it.
     """
     print("\n[21] No unexplained field-wide slowdowns left unflagged")
     if not table_exists(con, "silver_lap_flags"):
@@ -851,7 +858,7 @@ def check_unflagged_field_slowdowns(con, rep: Report) -> None:
              AND f.driver_number = l.driver_number
              AND f.lap_number = l.lap_number
             JOIN silver_sessions s ON s.session_key = l.session_key
-            WHERE s.session_name IN ('Race', 'Sprint')
+            WHERE s.session_name = 'Race'
               AND l.lap_duration IS NOT NULL
         ),
         green_ranked AS (

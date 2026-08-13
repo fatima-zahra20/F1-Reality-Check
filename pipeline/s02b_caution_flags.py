@@ -221,6 +221,63 @@ def start_procedures(con: sqlite3.Connection) -> dict:
             for k, g in df.groupby("session_key", sort=False)}
 
 
+def resumption_signals(con: sqlite3.Connection) -> dict:
+    """
+    Per session, every timestamp that is evidence racing RESUMED: a green track
+    flag, or a safety car / VSC closing message.
+
+    Used to tell a race that restarted from one that simply ENDED under caution.
+    restart_finder cannot distinguish them: a field circulating behind a safety
+    car keeps completing laps, so it produces the same statistic as a field that
+    went back to racing, and the inferred "restart" is an artefact.
+
+    Matched on category='SafetyCar' for the closing messages rather than on the
+    text alone, because 'ENDING' as a bare substring also hits stewards' notes
+    and would invent a resumption signal that suppresses the fix.
+    """
+    df = pd.read_sql("""
+        SELECT session_key, "date"
+        FROM silver_race_control
+        WHERE (category = 'Flag' AND flag = 'GREEN' AND scope = 'Track')
+           OR (category = 'SafetyCar'
+               AND (UPPER(message) LIKE '%IN THIS LAP%'
+                    OR UPPER(message) LIKE '%ENDING%'))
+    """, con)
+    if df.empty:
+        return {}
+    df["date"] = pd.to_datetime(df["date"], format="ISO8601", utc=True,
+                                errors="coerce")
+    df = df.dropna(subset=["date"])
+    return {k: sorted(g["date"].tolist())
+            for k, g in df.groupby("session_key", sort=False)}
+
+
+def chequered_flags(con: sqlite3.Connection) -> dict:
+    """
+    Per session, the first chequered flag: when the session actually finished.
+
+    Distinct from effective_session_end, which is the last evidence of ANY
+    activity and runs long past the finish because stewards' decisions keep
+    arriving. Melbourne 2024 is the case: its chequered flag falls 26s after the
+    VSC period, while effective_session_end is 37 minutes later. Closing a
+    caution that ran to the finish at the latter inflates its duration to 38
+    minutes. No lap is misflagged, since no lap exists after the finish, but
+    duration_seconds is a published column and a 38-minute VSC is wrong.
+    """
+    df = pd.read_sql("""
+        SELECT session_key, MIN("date") AS cheq
+        FROM silver_race_control
+        WHERE UPPER(message) LIKE '%CHEQUERED%'
+        GROUP BY session_key
+    """, con)
+    if df.empty:
+        return {}
+    df["cheq"] = pd.to_datetime(df["cheq"], format="ISO8601", utc=True,
+                                errors="coerce")
+    df = df.dropna(subset=["cheq"])
+    return dict(zip(df.session_key, df.cheq))
+
+
 def effective_session_end(con: sqlite3.Connection) -> dict:
     """
     When did each session actually stop, as opposed to when it was scheduled to?
@@ -359,6 +416,8 @@ def build_periods(con: sqlite3.Connection) -> pd.DataFrame:
     ends = effective_session_end(con)
     find_restart = restart_finder(con)
     procedures = start_procedures(con)
+    resumptions = resumption_signals(con)
+    chequered = chequered_flags(con)
 
     def fallback_end(session_key, start_ts, kind="RED", before=None):
         """
@@ -396,14 +455,45 @@ def build_periods(con: sqlite3.Connection) -> pd.DataFrame:
         extended by up to 31,361 seconds by picking up an unrelated message
         hours later.
         """
-        restart = find_restart(session_key, start_ts)
+        # A RACE THAT ENDED UNDER CAUTION NEVER RESTARTED, so there is nothing
+        # to infer and inferring anyway invents a restart. Added 2026-08-13 for
+        # Montreal 2025: the safety car came out on lap 67, the race finished
+        # behind it, and the period was closed after 123s instead of running the
+        # 444s to the chequered flag. Laps 68, 69 and 70 at 1.39x, 1.58x and
+        # 1.60x green pace were left recorded as racing, and check [21] had it as
+        # the loudest unexplained slowdown in the dataset.
+        #
+        # The test is structural: no green track flag and no safety car closing
+        # message after the deployment means racing never resumed. No threshold,
+        # and it refuses to act rather than guessing when signals exist.
+        #
+        # RED IS EXCLUDED DELIBERATELY. A suspended race that resumes often logs
+        # neither signal, which is the entire reason restart_finder exists
+        # (Monaco 2024, where closing at the session end flagged all 1,237 laps).
+        # Applying this to RED would reintroduce that bug.
+        #
+        # Verified against all three affected race periods: Baku 2024 VSC,
+        # Melbourne 2024 VSC and Montreal 2025 SC. All three end with a
+        # chequered flag, none has a resumption signal, and all three show final
+        # laps at 1.30-1.60x green pace.
+        resumed = any(t > start_ts for t in resumptions.get(session_key, ()))
+        ended_under_caution = kind != "RED" and not resumed
+
+        restart = (None if ended_under_caution
+                   else find_restart(session_key, start_ts))
         if restart is not None:
             end, closed_by = restart, "restart_inferred"
         else:
             end = ends.get(session_key)
+            if ended_under_caution:
+                # The finish, not the last sign of life. See chequered_flags.
+                cheq = chequered.get(session_key)
+                if cheq is not None and not pd.isna(cheq) and cheq > start_ts:
+                    end = cheq
             if end is None or pd.isna(end) or end < start_ts:
                 return start_ts, "unclosed"
-            closed_by = "session_end"
+            closed_by = ("ended_under_caution" if ended_under_caution
+                         else "session_end")
 
         # RED only. A restart procedure is how a SUSPENDED race resumes. A
         # safety car ends with 'SAFETY CAR IN THIS LAP' and a green flag, so
