@@ -836,8 +836,22 @@ def check_unflagged_field_slowdowns(con, rep: Report) -> None:
     lap 3 at 1.44x) are genuine and still in the data. Widen this back to
     ('Race', 'Sprint') when the Sprint phase starts, and triage them then.
 
-    Known residual as of 2026-08-13: Suzuka 2024 race lap 3, a safety car that
-    came in mid-lap while the closing message predates it.
+    WHAT THIS LIST SHOULD LOOK LIKE. As of 2026-08-13 it holds 16 lap-events and
+    every one is accounted for, so a NEW entry means something changed:
+
+      3   the safety car withdrawal bug, still open (NOTES_LOG #52 family B):
+          Jeddah 2023 lap 20, Montreal 2024 laps 29 and 58
+      13  confirmed rain, not cautions: Monte Carlo 2023 laps 54-63 and
+          Zandvoort 2023 laps 1-3
+
+    The rain verdict was checked rather than assumed, because these two look
+    like cautions on the spread test: at Monaco nobody can overtake in the wet,
+    so the field queues and appears bunched. What settles it is the tyres. Monte
+    Carlo went from 12 cars on HARD and 2 on INTERMEDIATE to 0 and 18, with WET
+    appearing after; Zandvoort went from 19 on SOFT and 0 on INTERMEDIATE at lap
+    1 to 5 and 15 by lap 5. Cars do not change tyres because a safety car came
+    out. Monte Carlo also has zero caution periods in the whole race, and its
+    pace decays smoothly rather than stepping and holding.
     """
     print("\n[21] No unexplained field-wide slowdowns left unflagged")
     if not table_exists(con, "silver_lap_flags"):

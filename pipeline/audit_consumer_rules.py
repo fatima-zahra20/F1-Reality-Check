@@ -164,7 +164,14 @@ GOLD_OWNER = {
 
 
 def decision(name: str, kind: str, question: str):
-    """Registers a matcher. kind is 'conflict' or 'spread'."""
+    """
+    Registers a matcher. kind is one of:
+
+      conflict      several incompatible rules exist; the count is the problem
+      spread        one agreed rule, repeated by hand; the count is the risk
+      out_of_scope  no layer here can enforce it, so zero sites is correct and
+                    reporting it as a gap would invite a pointless fix
+    """
     def wrap(fn):
         DECISIONS.append((name, kind, question, fn))
         return fn
@@ -222,10 +229,16 @@ def _stint(line: str):
     return m.group(0) if m else None
 
 
-@decision("corrupt n_gear", "conflict",
+@decision("corrupt n_gear", "out_of_scope",
           "Are the ~600 rows with n_gear > 8 excluded? "
-          "(DATA_DICTIONARY says filter in gold)")
+          "OUT OF SCOPE: n_gear lives in car_data, which is bronze-only and "
+          "never reaches silver or gold, so there is nothing here to enforce.")
 def _gear(line: str):
+    # Reports 0 sites and always will. Kept rather than deleted because
+    # DATA_DICTIONARY once promised this filter, and a decision that quietly
+    # disappears looks like it was handled. It was not; it is unenforceable at
+    # this layer. If telemetry is ever promoted into silver, this becomes real
+    # again and the rule is already here.
     m = re.search(r"n_gear\s*(<=|<|>=|>|==)\s*(\d+)", line)
     return m.group(0) if m else None
 
@@ -346,7 +359,7 @@ def main() -> int:
         print("  [note] pipeline/s07_build_gold.py not found; "
               "nothing can be reported as owned by gold")
 
-    print(f"{'decision':28s} {'kind':9s} {'variants':>8} {'sites':>6} "
+    print(f"{'decision':28s} {'kind':13s} {'variants':>8} {'sites':>6} "
           f"{'gold':>5}  verdict")
     conflicts = 0
     owned = 0
@@ -364,7 +377,11 @@ def main() -> int:
         if in_gold:
             owned += 1
 
-        if not real and not in_gold:
+        if kind == "out_of_scope":
+            # Not a gap. There is no layer here that could enforce it, so
+            # reporting it as unenforced invites someone to "fix" it.
+            verdict = "n/a, cannot apply at this layer"
+        elif not real and not in_gold:
             verdict = "NOT ENFORCED"
         elif not real and in_gold:
             verdict = "OWNED BY GOLD, no call site left"
@@ -379,7 +396,7 @@ def main() -> int:
             verdict = f"one rule, repeated {sites}x by hand"
             if in_gold:
                 verdict += " (gold owns it; migrate the rest)"
-        print(f"{name:28s} {kind:9s} {len(real):>8} {sites:>6} "
+        print(f"{name:28s} {kind:13s} {len(real):>8} {sites:>6} "
               f"{'yes' if in_gold else '-':>5}  {verdict}")
 
     print(f"\ndecisions in genuine conflict: {conflicts}")

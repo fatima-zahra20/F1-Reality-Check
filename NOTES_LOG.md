@@ -1076,28 +1076,29 @@ Scope the check to the scope of the work.
 ## Open questions
 
 ### A. `caution_flag` under-detects Safety Car periods
-*Raised 2026-07-26*
+*Raised 2026-07-26. RESOLVED 2026-08-11, kept for the trail.*
 
-`load_laps()` builds `caution_flag` by joining `silver_race_control` on exact
-`(session_key, lap_number)`. But per #24, SC messages aren't tagged to every lap they
-span — so `caution_flag = 0` does **not** guarantee a clean lap.
+The original problem: `load_laps()` built `caution_flag` by joining
+`silver_race_control` on an exact `(session_key, lap_number)` match, so a Safety Car
+spanning several laps flagged only the lap its message carried, and sector-scoped
+yellows were counted as race-wide neutralisations.
 
-It also over-flags: `YELLOW` is included, but yellows are frequently sector-scoped
-(`scope = 'Sector'`) and may barely affect a lap time.
-
-**Fix:** derive a range-based flag from SC deployment and clearing messages, marking
-every lap in between; and separate sector-scoped from track-scoped flags.
-
-**Priority: high.** Session-normalized pace is the strongest feature in the model, and
-contaminated laps degrade it directly.
+**Resolved by `s02b_caution_flags`**, which derives range-based periods and writes
+independent per-lap flags with sector yellows kept separate. Seven further bugs were
+found and fixed in that machinery afterwards (#47, #48, #52); one remains open and
+measured, the safety car withdrawal lap in #52. `neutralised` currently covers 12,070
+laps. Do not reintroduce a lap-number join.
 
 ### B. Virtual Safety Car is not detected at all
-*Carried from the diagnostic phase*
+*Carried from the diagnostic phase. RESOLVED 2026-08-11, kept for the trail.*
 
-The position-swing regression used `category = 'SafetyCar'`. VSC appears under a
-different category or only in the free-text `message` field, and was never included.
-Adding it would reduce the unexplained-big-swings residual (1,366 rows). Requires text
-parsing.
+VSC was never missing from the data. It lives inside `category='SafetyCar'` under two
+spellings, `VIRTUAL SAFETY CAR ...` and `VSC ...`, so earlier analyses silently counted
+a VSC as a full Safety Car despite the two being very different events.
+
+**Resolved**: `classify()` separates them and `vsc_flag` is now a first-class column
+covering 3,116 laps. Measured pace confirms they are distinct: green 1.00x, VSC 1.23x,
+SC 1.45x, red 1.93x.
 
 ### C. Competing pit stops on adjacent laps are unmeasured
 *Carried from the diagnostic phase*
