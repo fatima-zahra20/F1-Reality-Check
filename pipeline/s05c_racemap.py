@@ -3,7 +3,8 @@ s05c_racemap.py - track outlines and measured car positions for the race map.
 
 Runs between s05b and s06.
 
-Produces three CSVs in outputs/dashboard/:
+Writes three tables into dashboard/data/dashboard.db (pipeline/serving.py owns
+that path). Add --csv to also get a copy you can open and read by eye:
 
     map_circuit_outline   the traced shape of each circuit, as an ordered path
     map_measured_xy       real recorded car positions, for the one race that has them
@@ -76,9 +77,8 @@ import numpy as np
 import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from config import BRONZE_DB_PATH, DB_PATH, OUTPUTS_DIR  # noqa: E402
-
-DASHBOARD_DIR = OUTPUTS_DIR / "dashboard"
+from config import BRONZE_DB_PATH, DB_PATH  # noqa: E402
+import serving  # noqa: E402
 
 # Position units are 0.1 m. See the module docstring.
 UNITS_PER_METRE = 10.0
@@ -444,7 +444,9 @@ TABLES = ["map_circuit_outline", "map_measured_xy", "map_coverage"]
 def main() -> int:
     ap = argparse.ArgumentParser(description="Build the race map layer.")
     ap.add_argument("--dry-run", action="store_true",
-                    help="compute and report without writing the CSVs")
+                    help="compute and report without writing anything")
+    ap.add_argument("--csv", action="store_true",
+                    help="also write each table as CSV, for reading by eye")
     args = ap.parse_args()
 
     for p in (DB_PATH, BRONZE_DB_PATH):
@@ -452,13 +454,13 @@ def main() -> int:
             print(f"[FAIL] database not found at {p}")
             return 1
 
-    DASHBOARD_DIR.mkdir(parents=True, exist_ok=True)
     generated_at = datetime.now(timezone.utc).isoformat()
 
     print("=" * 74)
     print("RACE MAP LAYER")
     print(f"silver: {DB_PATH}")
     print(f"bronze: {BRONZE_DB_PATH}")
+    print(f"target: {serving.BUNDLE_DB}")
     print(f"python: {sys.version.split()[0]}  pandas {pd.__version__}")
     print("=" * 74)
 
@@ -526,16 +528,23 @@ def main() -> int:
               "map_coverage": coverage}
 
     print()
+    out = None if args.dry_run else serving.connect()
     for name in TABLES:
         df = frames[name].copy()
         if df.empty:
-            print(f"  [WARN] {name} is empty")
+            # Left in place rather than written empty: s06 refuses to publish a
+            # bundle whose tables are missing, and an empty table would pass
+            # that check while telling the app there is no map.
+            print(f"  [WARN] {name} is empty, leaving the existing table alone")
             continue
         df["generated_at"] = generated_at
-        if not args.dry_run:
-            df.to_csv(DASHBOARD_DIR / f"{name}.csv", index=False)
+        if out is not None:
+            serving.write_table(df, name, out, csv=args.csv)
         print(f"  {name:22s} {len(df):>7,} rows x {len(df.columns):>2} cols"
               + ("   (dry run, not written)" if args.dry_run else ""))
+    if out is not None:
+        out.commit()
+        out.close()
 
     print("\n" + "=" * 74)
     print("Car placement is computed in the app from fact_lap, not shipped here.")

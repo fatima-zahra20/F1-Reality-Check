@@ -150,14 +150,15 @@ OpenF1 API
 [ s07_build_gold ]  ──▶  gold_f1.db                   158 MB, 18 conformed tables
     │                    every question below reads this, not silver
     │
-    ├──▶ [ s04_descriptive ]  ──▶  7 fact/dim tables, written into the bundle
-    ├──▶ [ s05_diagnostic ]   ──▶  29 statistical tests           ──▶ csv
-    ├──▶ [ s05b_perfect ]     ──▶  perfect-lap model              ──▶ csv
-    ├──▶ [ s05c_racemap ]     ──▶  circuit geometry (bronze telemetry) ──▶ csv
-    └──▶ [ s05d_telemetry ]   ──▶  tow and DRS effects            ──▶ csv
+    ├──▶ [ s04_descriptive ]  ──▶  7 fact/dim tables
+    ├──▶ [ s05_diagnostic ]   ──▶  29 statistical tests
+    ├──▶ [ s05b_perfect ]     ──▶  lap-factor and counterfactual models
+    ├──▶ [ s05c_racemap ]     ──▶  circuit geometry (bronze telemetry)
+    └──▶ [ s05d_telemetry ]   ──▶  tow and DRS effects
                    │
+                   │  all five write straight into dashboard/data/dashboard.db
                    ▼
-        [ s06_publish ]  ──▶  dashboard.db (21 tables) ──▶ gzip ──▶ GitHub Release
+        [ s06_publish ]  ──▶  validate 21 tables, index ──▶ gzip ──▶ GitHub Release
                                                                         │
                                                                         ▼
                                                           Streamlit app downloads it
@@ -343,8 +344,13 @@ F1-Reality-Check/
 ├── DESCRIPTIVE ANALYTICS/         10 SQL files, one per story-of-a-race theme
 ├── DIAGNOSTIC ANALYTICS/          7 notebooks (statistical tests + regressions)
 ├── dashboard/                     Streamlit app: views, story pages, race map
+│   ├── assets/                    theme and images
+│   ├── views/                     one file per page
+│   └── data/                      dashboard.db and its gzip, both git-ignored
 ├── pipeline/
 │   ├── config.py                  single source of truth for all paths
+│   ├── serving.py                 where the bundle lives, and how a table gets in
+│   ├── coverage_snapshot.json     the gate's memory of the previous run
 │   ├── run_pipeline.py            sequences everything, exits non-zero on failure
 │   ├── s01_ingest.py              weekly incremental ingest
 │   ├── s01_backfill.py            targeted re-ingestion of failed fetches
@@ -359,7 +365,6 @@ F1-Reality-Check/
 │   ├── s05d_telemetry.py          tow and DRS effects
 │   ├── s06_publish.py             bundle + upload to the GitHub Release
 │   └── audit_consumer_rules.py    which decisions gold owns vs re-decided
-├── outputs/dashboard/             the bundle, plus 18 analysis-output CSVs
 ├── models/                        serialized models + metrics, versioned
 ├── logs/
 ├── data_prep.py                   shared loaders and cleaning utilities
@@ -428,9 +433,24 @@ python pipeline/run_pipeline.py --execute
 python pipeline/run_pipeline.py --execute --publish   # also refresh the live dashboard
 ```
 
+It currently runs gold, `s04` and `s05` only. **`s05b`, `s05c` and `s05d` are not
+sequenced**, so the five tables they own carry whatever date they were last run by hand.
+Until that is fixed, run them before publishing:
+
+```bash
+python pipeline/s05b_perfect.py
+python pipeline/s05c_racemap.py
+python pipeline/s05d_telemetry.py
+python pipeline/s06_publish.py --build-only     # validate, index and gzip, no upload
+```
+
 `--publish` needs `GITHUB_TOKEN` with `contents:write`. Note that the deployed Streamlit
 app caches the downloaded bundle in its container's temp directory, so **publishing takes
 effect on Reboot, not on Clear cache**.
+
+The bundle is built at `dashboard/data/dashboard.db` and gzipped beside it. Both are
+git-ignored; the app reads the local file when it exists and downloads the GitHub Release
+asset when it does not, which is the normal deployed path.
 
 **Which layer to query.** Silver is the source of truth about what the API said. Gold is
 where the decisions live, and is what every analysis should read. Two audits keep that
@@ -657,8 +677,16 @@ the diagnostic and predictive layers, where the choice is explicit and documente
 - Migrated `s04_descriptive` and `s05_diagnostic` onto gold. Verified as a pure refactor:
   0 of 29 verdicts, 42 coefficients and 189 group statistics moved
 - Cut 7 duplicated CSVs and 25.2 MB; dropped 4 bundle tables nothing read
+- Removed the CSV round-trip entirely. All five serving steps now write straight into
+  `dashboard/data/dashboard.db` through one path definition (`pipeline/serving.py`),
+  instead of writing 18 CSVs for `s06` to read back. `outputs/` no longer exists
 
 **Near term**
+- **`s05c_racemap` does not reproduce itself.** Two identical runs give different circuit
+  outlines for one or two of 24 circuits. Every other bundle table is byte-identical.
+  See open question G in `NOTES_LOG.md` for what has been ruled out
+- **`run_pipeline` does not call `s05b`, `s05c` or `s05d`**, so five bundled tables ship
+  data fitted on whenever those steps were last run by hand
 - **Migrate the remaining consumers onto gold.** 8 of 10 modelling decisions are now
   defined there, but the old call sites still sit beside them: 26 per-test queries in
   `s05_diagnostic`, the seven diagnostic notebooks, and the dashboard modules.

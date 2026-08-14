@@ -3,10 +3,11 @@ s05_diagnostic.py — builds the diagnostic serving layer for the dashboard.
 
 Where s04 answers "what happened", this answers "why", and it does so as data
 rather than prose. Every statistical claim the project makes gets recomputed
-here from current silver and written to CSV, so the dashboard can show the
-finding, the evidence behind it, and the caveat attached to it.
+here from current silver and written to the dashboard bundle, so the dashboard
+can show the finding, the evidence behind it, and the caveat attached to it.
 
-Produces four CSVs in outputs/dashboard/:
+Writes four tables into dashboard/data/dashboard.db (pipeline/serving.py owns
+that path). Add --csv to also get a copy you can open and read by eye:
 
     diag_tests          one row per statistical test
     diag_coefficients   one row per predictor per model
@@ -71,14 +72,13 @@ from scipy import stats
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from config import (DB_PATH, EXCLUDED_TEAMS, GOLD_DB_PATH,  # noqa: E402
-                    LAP_OUTLIER_FACTOR, OUTPUTS_DIR)
+                    LAP_OUTLIER_FACTOR)
+import serving  # noqa: E402
 
 import statsmodels.api as sm  # noqa: E402
 import statsmodels.formula.api as smf  # noqa: E402
 from statsmodels.stats.outliers_influence import variance_inflation_factor  # noqa: E402
 from statsmodels.stats.power import TTestIndPower  # noqa: E402
-
-DASHBOARD_DIR = OUTPUTS_DIR / "dashboard"
 
 # Mirrors data_prep.TEAM_NAME_MAP and s04. Cadillac deliberately unmapped.
 TEAM_NAME_MAP = {
@@ -2080,7 +2080,9 @@ def main() -> int:
                          "without writing, since a partial run cannot produce a "
                          "complete table; add --allow-partial to write anyway.")
     ap.add_argument("--allow-partial", action="store_true",
-                    help="let a --tests subset overwrite the CSVs (destructive)")
+                    help="let a --tests subset overwrite the tables (destructive)")
+    ap.add_argument("--csv", action="store_true",
+                    help="also write each table as CSV, for reading by eye")
     ap.add_argument("--list", action="store_true", help="list analyses and exit")
     args = ap.parse_args()
 
@@ -2110,13 +2112,12 @@ def main() -> int:
         print(f"[FAIL] unknown analysis id(s): {unknown_t}. Use --list.")
         return 1
 
-    DASHBOARD_DIR.mkdir(parents=True, exist_ok=True)
     generated_at = datetime.now(timezone.utc).isoformat()
 
     print("=" * 74)
     print("DIAGNOSTIC SERVING LAYER")
     print(f"silver: {DB_PATH}")
-    print(f"csv:    {DASHBOARD_DIR}")
+    print(f"target: {serving.BUNDLE_DB}")
     print(f"python: {sys.version.split()[0]}  pandas {pd.__version__}")
     print("=" * 74)
 
@@ -2165,13 +2166,19 @@ def main() -> int:
     write = (not partial) or args.allow_partial
 
     print()
+    # Opened only when actually writing, so a --tests run cannot create or
+    # touch the bundle at all.
+    out = serving.connect() if write else None
     for name in targets:
         df = BUILDERS[name](d)
         df["generated_at"] = generated_at
         if write:
-            df.to_csv(DASHBOARD_DIR / f"{name}.csv", index=False)
+            serving.write_table(df, name, out, csv=args.csv)
         print(f"  {name:20s} {len(df):>6,} rows x {len(df.columns):>2} cols"
               + ("" if write else "   (not written)"))
+    if out is not None:
+        out.commit()
+        out.close()
 
     if partial and not args.allow_partial:
         print(f"\n  NOT WRITTEN: --tests ran {len(run_ids)} of {len(ANALYSES)} analyses.")
@@ -2187,7 +2194,7 @@ def main() -> int:
     n_sig = sum(1 for t in d.tests if t["significant"])
     n_caveat = sum(1 for t in d.tests if t["caveat"])
     print(f"{len(d.tests)} tests | {n_sig} significant | {n_caveat} carrying a caveat")
-    print(f"Serving layer written to {DASHBOARD_DIR}")
+    print(f"Serving layer written to {serving.BUNDLE_DB.name}")
     print("=" * 74)
     return 0
 

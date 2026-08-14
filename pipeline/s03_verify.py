@@ -28,7 +28,7 @@ from pathlib import Path
 
 # Make `import config` work regardless of the current working directory.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from config import BRONZE_DB_PATH, DB_PATH, OUTPUTS_DIR  # noqa: E402
+from config import BRONZE_DB_PATH, DB_PATH  # noqa: E402
 
 # --- expected silver tables (18) -------------------------------------------------
 EXPECTED_TABLES = [
@@ -104,7 +104,15 @@ STRICT_COVERAGE = {
 }
 RAGGED_COVERAGE = {"silver_pit", "silver_team_radio"}
 
-SNAPSHOT_PATH = OUTPUTS_DIR / "coverage_snapshot.json"
+# Beside this file, which is the only thing that reads or writes it, and IN GIT
+# ON PURPOSE. This is the gate's memory: the run writes it at the end, the next
+# run reads it to tell "this table lost 40% of its rows" from "this table always
+# looked like that". A baseline that is not committed is a baseline that resets
+# to nothing on a fresh clone, and the check goes quiet without failing.
+#
+# That rules out dashboard/data/, which the data/ rule in .gitignore ignores
+# whole. It lived in outputs/ until that folder was emptied of everything else.
+SNAPSHOT_PATH = Path(__file__).resolve().parent / "coverage_snapshot.json"
 
 # A null rate has to move by more than this before it is worth a line of output.
 # Below it, ordinary week-to-week churn would bury a real signal in noise.

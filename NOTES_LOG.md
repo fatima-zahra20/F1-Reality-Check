@@ -1073,6 +1073,44 @@ accumulate findings nobody reads, and a gate people learn to skim is worse than 
 Scope the check to the scope of the work.
 
 
+### 53. One folder called dashboard, and what running it twice found
+*2026-08-14*
+
+The project had two folders named `dashboard`: the app's hand-written source, and a
+build output under `outputs/`. Same name, opposite lifecycles. The bundle now lives at
+`dashboard/data/dashboard.db`, beside the app it serves, and `outputs/` no longer exists.
+
+**The path was declared six times.** `OUTPUTS_DIR / "dashboard"` appeared in `s04`, `s05`,
+`s05b`, `s05c`, `s05d` and `s06`, so moving it meant six edits and hoping none was missed.
+That is the same shape as `EXCLUDED_TEAMS` (declared twice) and `LAP_OUTLIER_FACTOR`
+(declared four times). Now one definition, in `pipeline/serving.py`.
+
+**Every dataset was written to disk twice.** `s05`, `s05b`, `s05c` and `s05d` wrote CSVs;
+`s06` opened those CSVs and copied them into `dashboard.db`. The whole project contained
+exactly one `read_csv`, and it was that line. 18 files regenerated each run to be read
+once by the step that removed the need for them. All five steps now write straight into
+the bundle.
+
+**The perfect_\* tables are no longer produced.** #51 dropped them from the bundle but kept
+computing them, on the grounds that a planned choose-a-lap feature wanted them. That
+feature exists: `views/perfect.py` was built on `fact_lap`, the map geometry and the
+`lap_factor_*` tables. The reader they were waiting for arrived and used something else.
+The four builders stay, reachable with `--tables perfect_lap`.
+
+**The coverage snapshot moved to `pipeline/`, not into the bundle folder.** It is the
+gate's memory and it has to stay in git; `dashboard/data/` is ignored wholesale by the
+`data/` rule, so putting it there would have dropped it from version control silently and
+the check would have gone quiet without failing. `config.py` also had to stop calling
+`mkdir` on `outputs/` on import, or the folder would have reappeared empty on every run.
+
+**Running the pipeline twice is what earned this entry.** One run reproducing the previous
+bundle proves nothing about determinism; it only proves the paths work. Two runs found
+that **`s05c_racemap` does not reproduce itself**, which is recorded as open question G.
+
+**Also found:** `run_pipeline` never called `s05b`, `s05c` or `s05d`, so five bundled
+tables had been shipping data fitted five to six days stale. Not yet fixed.
+
+
 ## Open questions
 
 ### A. `caution_flag` under-detects Safety Car periods
@@ -1128,3 +1166,52 @@ approach the 30 needed for 80% power.
 Circuit has essentially no effect on median stop duration, but circuit-specific
 *overtaking* rates and strategy outcomes weren't fully examined. Monaco versus Monza as
 extreme opposites would be a targeted analysis worth running during feature engineering.
+
+### G. `s05c_racemap` does not reproduce itself
+*Raised 2026-08-14*
+
+Running the pipeline twice on unchanged inputs gives a different `map_circuit_outline`.
+Every other table in the bundle is byte-identical across runs; this one is not.
+
+**What varies.** One or two circuits out of 24 per run trace their outline from a
+different reference lap. The row count never moves (9,600, 400 points x 24 circuits) and
+neither does any other table. Observed:
+
+| run pair | circuit | chosen lap A | chosen lap B |
+|---|---|---|---|
+| 1 vs 2 | 61 | drv 4, lap 12, 91.839s | drv 16, lap 18, 91.763s |
+| earlier pair | 9 (Austin) | drv 1, lap 11, 92.143s | drv 4, lap 11, 92.214s |
+| earlier pair | 19 (Spielberg) | drv 1, lap 17, 64.314s | drv 1, lap 14, 64.426s |
+
+Outline points move by up to **9.75 m** in x and 9.49 m in y on a circuit several
+kilometres long, and `time_fraction` by up to 0.0038.
+
+**What has been ruled out**, each measured rather than reasoned about:
+
+- the candidate list is identical across processes (same md5 over 144 rows, 3 processes)
+- there are no ties on the sort key, so the unstable `sort_values` cannot reorder them
+- `fetch_positions` returns the same 4,545,724 rows with the same content hash and the
+  same row order across processes
+- the single big OR-chain query is not dropping rows: for all 18 candidate laps at the
+  three affected circuits, a targeted per-lap query and the bulk fetch agree exactly
+- every candidate lap has 240 to 363 position samples against a `MIN_OUTLINE_SAMPLES`
+  cutoff of 120, so on the measured evidence no candidate should ever be rejected
+- `build_outlines` is stable when called twice on identical inputs in one process
+
+That last point is the puzzle: identical inputs give identical outputs in-process, the
+inputs are provably identical across processes, and yet the output differs between
+processes.
+
+**Why it is not urgent.** Each candidate is a clean fast qualifying lap at the same
+circuit, so every outcome is a valid outline; the map is drawn from a different good lap,
+not a wrong one. Nothing else reads `source_driver_number` or `source_lap_number`.
+
+**Why it still matters.** A bundle that differs run to run cannot be verified by
+comparison, which is the technique every other check in this project relies on. It also
+means "republish and diff" cannot distinguish a real data change from noise.
+
+**Next step when picked up:** make the choice deterministic by construction rather than
+by finding the mechanism. Evaluate all candidates and select on an explicit total order
+(sample count, then session_key, driver_number, lap_number) instead of taking the first
+that traces, and replace the `pairs` set with a sorted list so the query text cannot vary.
+Then run `s05c` four or more times and require one distinct geometry hash.

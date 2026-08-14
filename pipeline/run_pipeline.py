@@ -291,7 +291,8 @@ def main() -> int:
     # --- 7. publish ------------------------------------------------------------
     # Opt-in. Requires the serving layers to have been built this run, since
     # publishing means replacing the live dashboard's data — doing that from a
-    # stale outputs/ directory would push whatever happened to be lying around.
+    # stale bundle would push whatever happened to be lying around in
+    # dashboard/data/dashboard.db.
     publish_status = "not requested"
 
     if args.publish:

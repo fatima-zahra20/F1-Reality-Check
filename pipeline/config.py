@@ -61,6 +61,11 @@ DESCRIPTIVE_SQL_DIR = PROJECT_ROOT / "DESCRIPTIVE ANALYTICS"
 DIAGNOSTIC_NB_DIR = PROJECT_ROOT / "DIAGNOSTIC ANALYTICS"
 
 # --- pipeline outputs ---
+# OUTPUTS_DIR has one user left: serving.ANALYSIS_DIR, for the perfect_* tables
+# that only build when named on --tables. It is NOT created on import (see the
+# bottom of this file) because the folder would otherwise reappear empty on
+# every run of every step. Everything that used to live under it has moved: the
+# dashboard bundle to dashboard/data/, the coverage snapshot to pipeline/.
 OUTPUTS_DIR = PROJECT_ROOT / "outputs"
 MODELS_DIR = PROJECT_ROOT / "models"
 LOGS_DIR = PROJECT_ROOT / "logs"
@@ -98,5 +103,9 @@ LAP_OUTLIER_FACTOR = 2.0
 TELEMETRY_TABLES = ["car_data", "location"]
 INCLUDE_TELEMETRY_IN_WEEKLY = False
 
-for _d in (OUTPUTS_DIR, MODELS_DIR, LOGS_DIR):
+# OUTPUTS_DIR is deliberately not in this list. Nothing writes there on a normal
+# run any more, and creating it here would rebuild an empty folder every time a
+# step imports config. Its one remaining consumer, serving.write_analysis_csv,
+# creates it on demand with parents=True.
+for _d in (MODELS_DIR, LOGS_DIR):
     _d.mkdir(exist_ok=True)

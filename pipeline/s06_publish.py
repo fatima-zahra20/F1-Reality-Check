@@ -2,23 +2,34 @@
 s06_publish.py — packages the serving layer and publishes it to a GitHub Release.
 
 Streamlit Cloud runs the app from GitHub and has no disk of its own, so the
-dashboard needs its data from somewhere the cloud can reach. This step bundles
-the ten serving CSVs into one SQLite file, compresses it, and uploads it as a
-Release asset.
+dashboard needs its data from somewhere the cloud can reach. This step checks
+dashboard.db is complete, compresses it, and uploads it as a Release asset.
+
+It no longer BUILDS anything
+----------------------------
+It used to read 14 CSV files and copy them into dashboard.db. Every one of those
+datasets therefore sat on disk twice, with nothing checking the copies agreed,
+and the app never read a CSV at all: the only read_csv in the entire project was
+the one in this file doing the copying. Each producing step now writes its tables
+straight into the bundle, so this step verifies instead of assembling.
+
+That makes the completeness check in build_db the load-bearing part. Several
+steps write into the same file in sequence, so a crash midway leaves it part
+old and part new. Nothing else stands between that and the live site.
 
 Why a Release asset and not the repo
 ------------------------------------
-s04 and s05 rewrite all ten CSVs on every run. Committing them would add ~21 MB
-of new blobs to git history every time — a changed data file is stored whole,
-not as a diff, so the repo would grow without bound and every clone would carry
-the entire history of it. Release assets live outside the git tree: they
-overwrite in place, never accumulate, and do not affect clone size.
+The bundle is rewritten on every run. Committing it would add ~12 MB of new
+blobs to git history each time, since a changed binary is stored whole and not
+as a diff, so the repo would grow without bound and every clone would carry the
+entire history of it. Release assets live outside the git tree: they overwrite
+in place, never accumulate, and do not affect clone size.
 
-Why one SQLite file and not ten CSVs
-------------------------------------
-One asset instead of ten, one download instead of ten round trips, and the app
-can filter with SQL rather than loading 90k laps into memory to show one race.
-It also keeps the project's existing idiom — everything upstream is SQLite.
+Why one SQLite file
+-------------------
+One asset, one download, and the app can filter with SQL rather than loading 90k
+laps into memory to show one race. It also keeps the project's existing idiom:
+everything upstream is SQLite.
 
 The tag is fixed at data-latest and the asset is replaced each run, so the
 download URL never changes and the app can hardcode it. Deliberately not a
@@ -52,58 +63,71 @@ import sys
 import time
 from datetime import datetime, timezone
 
-import pandas as pd
 import requests
 
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from config import OUTPUTS_DIR  # noqa: E402
+import serving  # noqa: E402
 
-DASHBOARD_DIR = OUTPUTS_DIR / "dashboard"
-DB_FILE = DASHBOARD_DIR / "dashboard.db"
-GZ_FILE = DASHBOARD_DIR / "dashboard.db.gz"
+# Aliased rather than redefined. serving.py is the single definition of where
+# the bundle lives; this file used to compute the same path itself, which is how
+# six modules ended up each deciding independently where the bundle was.
+DB_FILE = serving.BUNDLE_DB
+GZ_FILE = serving.BUNDLE_GZ
 
 REPO = "fatima-zahra20/F1-Reality-Check"
 TAG = "data-latest"
 ASSET_NAME = "dashboard.db.gz"
 API = "https://api.github.com"
 
-# Tables to bundle. Anything else in the directory is ignored, so a stray CSV
+# Tables to bundle. Anything else in the folder is ignored, so a stray file
 # cannot silently end up published.
-# Written directly into dashboard.db by s04_descriptive, which reads gold.
-# They have no CSV: the CSV was only ever an intermediate this script read back,
-# which meant every value existed twice with nothing checking the copies agreed.
-DB_TABLES = [
-    "dim_race", "dim_driver", "dim_team",
-    "fact_driver_race", "fact_lap", "fact_event", "fact_championship",
-]
-
-# Statistical and model output. These are conclusions, not data, so they are
-# genuinely produced by the analysis steps and arrive as CSV.
-CSV_TABLES = [
-    "diag_tests", "diag_coefficients", "diag_groups", "diag_points",
-    "map_circuit_outline", "map_measured_xy", "map_coverage",
-    "lap_factor_anova", "lap_factor_model", "lap_factor_reference",
-    "telemetry_tow", "telemetry_effect",
-    "lap_counterfactual_model", "lap_counterfactual_bounds",
-]
-
-# NOT BUNDLED, and checked rather than assumed: perfect_lap, perfect_race,
-# perfect_lap_record and perfect_lap_model have no FROM, JOIN, subquery,
-# f-string or quoted reference anywhere in the app. 3,070 rows and 754 KB were
-# computed, written, packed, gzipped, uploaded and downloaded by every visitor,
-# then never read. The perfect-lap page was built on fact_lap plus the telemetry
-# geometry in map_measured_xy instead.
 #
-# s05b_perfect.py still computes them, deliberately. They are ahead of the
-# dashboard rather than useless: the planned application wants a choose-a-lap
-# feature. Add the names back here when something reads them.
-NOT_BUNDLED = [
-    "perfect_lap", "perfect_lap_model", "perfect_lap_record", "perfect_race",
-]
+# WRITTEN STRAIGHT INTO dashboard.db by the step named, with no CSV in between.
+# The CSV was only ever an intermediate this script read back, which meant every
+# value existed twice on disk with nothing checking the copies agreed, and the
+# app never read a CSV at all. Mapped to their producer rather than listed,
+# because "this table is missing" is only useful with "run this to get it".
+DB_TABLES = {
+    "dim_race": "s04_descriptive",
+    "dim_driver": "s04_descriptive",
+    "dim_team": "s04_descriptive",
+    "fact_driver_race": "s04_descriptive",
+    "fact_lap": "s04_descriptive",
+    "fact_event": "s04_descriptive",
+    "fact_championship": "s04_descriptive",
+    "diag_tests": "s05_diagnostic",
+    "diag_coefficients": "s05_diagnostic",
+    "diag_groups": "s05_diagnostic",
+    "diag_points": "s05_diagnostic",
+    "lap_factor_anova": "s05b_perfect",
+    "lap_factor_model": "s05b_perfect",
+    "lap_factor_reference": "s05b_perfect",
+    "lap_counterfactual_model": "s05b_perfect",
+    "lap_counterfactual_bounds": "s05b_perfect",
+    "map_circuit_outline": "s05c_racemap",
+    "map_measured_xy": "s05c_racemap",
+    "map_coverage": "s05c_racemap",
+    "telemetry_tow": "s05d_telemetry",
+    "telemetry_effect": "s05d_telemetry",
+}
 
-TABLES = DB_TABLES + CSV_TABLES
+# s05b can also produce perfect_lap, perfect_race, perfect_lap_record and
+# perfect_lap_model, which are NOT bundled. Checked rather than assumed: none of
+# them has a FROM, JOIN, subquery, f-string or quoted reference anywhere in the
+# app. 3,070 rows were computed, written, packed, gzipped, uploaded and
+# downloaded by every visitor, then never read. The perfect-lap page was built
+# on fact_lap plus the geometry in map_measured_xy instead.
+#
+# They are no longer written at all unless named on --tables, and then only as
+# CSV under outputs/analysis/. The list lives in s05b_perfect.ON_REQUEST, next
+# to the code that writes them, and is deliberately NOT repeated here. It used
+# to be, and a name in two places is a name that can disagree with itself: the
+# same duplication left a dangling entry in the index list below and broke a
+# build after every table had already been written.
+
+TABLES = list(DB_TABLES)
 
 # The app filters by race and by test far more than anything else. Without
 # these, every "show me this race" click scans 90k lap rows.
@@ -142,18 +166,19 @@ def human(n: float) -> str:
 
 def build_db() -> dict[str, int]:
     """
-    Completes dashboard.db: the fact and dimension tables are already in it,
-    written by s04 from gold, so this loads the analysis-output CSVs around them.
-    Returns row counts.
+    Checks dashboard.db is complete, drops anything stale, indexes it.
+
+    NO LONGER BUILDS ANYTHING. Every table is now written directly by the step
+    that computes it, so this verifies rather than assembles. It used to read 14
+    CSV files back and copy them in, which meant each dataset sat on disk twice
+    with nothing checking the copies agreed, and the app never read a CSV.
+
+    That makes the check below the ONLY thing standing between a half-finished
+    build and the live site, since several steps write into the same file in
+    sequence and a crash leaves it part-updated. It refuses to publish unless
+    every expected table is present, and names the step to run for each one that
+    is not. Returns row counts.
     """
-    missing_csv = [t for t in CSV_TABLES
-                   if not (DASHBOARD_DIR / f"{t}.csv").exists()]
-    if missing_csv:
-        raise FileNotFoundError(
-            "missing analysis CSVs: " + ", ".join(missing_csv) + "\n"
-            "Run s05_diagnostic.py, s05b_perfect.py, s05c_racemap.py and "
-            "s05d_telemetry.py first."
-        )
     if not DB_FILE.exists():
         raise FileNotFoundError(
             f"{DB_FILE.name} does not exist.\n"
@@ -172,21 +197,19 @@ def build_db() -> dict[str, int]:
             "SELECT name FROM sqlite_master WHERE type='table'")}
         absent = [t for t in DB_TABLES if t not in present]
         if absent:
+            by_step: dict[str, list[str]] = {}
+            for t in absent:
+                by_step.setdefault(DB_TABLES[t], []).append(t)
             raise FileNotFoundError(
-                "these tables are missing from the bundle: " + ", ".join(absent)
-                + "\nRun s04_descriptive.py, which writes them from gold."
+                "these tables are missing from the bundle:\n"
+                + "\n".join(f"  run {step}.py  ->  {', '.join(sorted(ts))}"
+                            for step, ts in sorted(by_step.items()))
             )
 
-        for table in DB_TABLES:
+        for table, producer in DB_TABLES.items():
             n = con.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0]
             counts[table] = n
-            print(f"  {table:26s} {n:>8,} rows  (from gold via s04)")
-
-        for table in CSV_TABLES:
-            df = pd.read_csv(DASHBOARD_DIR / f"{table}.csv")
-            df.to_sql(table, con, index=False, if_exists="replace")
-            counts[table] = len(df)
-            print(f"  {table:26s} {len(df):>8,} rows  (csv)")
+            print(f"  {table:26s} {n:>8,} rows  ({producer})")
 
         # Anything left over from a previous bundle would still be uploaded, so
         # it is dropped rather than carried. This is what removes the four

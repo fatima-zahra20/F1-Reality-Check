@@ -3,7 +3,8 @@ s05d_telemetry.py - DRS and the tow, on the races that actually carry telemetry.
 
 Runs after s05c and before s06.
 
-Produces two CSVs in outputs/dashboard/:
+Writes two tables into dashboard/data/dashboard.db (pipeline/serving.py owns
+that path). Add --csv to also get a copy you can open and read by eye:
 
     telemetry_tow      top speed and DRS usage by gap to the car ahead
     telemetry_effect   coefficients and the diagnostics that qualify them
@@ -67,9 +68,9 @@ import statsmodels.formula.api as smf
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from config import (BRONZE_DB_PATH, DB_PATH,  # noqa: E402
-                    LAP_OUTLIER_FACTOR, OUTPUTS_DIR)
+                    LAP_OUTLIER_FACTOR)
+import serving  # noqa: E402
 
-DASHBOARD_DIR = OUTPUTS_DIR / "dashboard"
 
 # 10 and above means the flap is open. See the module docstring.
 DRS_OPEN_FROM = 10
@@ -388,7 +389,9 @@ def main() -> int:
     ap = argparse.ArgumentParser(
         description="Measure DRS and the tow on the telemetry races.")
     ap.add_argument("--dry-run", action="store_true",
-                    help="compute and report without writing the CSVs")
+                    help="compute and report without writing anything")
+    ap.add_argument("--csv", action="store_true",
+                    help="also write each table as CSV, for reading by eye")
     args = ap.parse_args()
 
     for p in (DB_PATH, BRONZE_DB_PATH):
@@ -396,7 +399,6 @@ def main() -> int:
             print(f"[FAIL] database not found at {p}")
             return 1
 
-    DASHBOARD_DIR.mkdir(parents=True, exist_ok=True)
     generated_at = datetime.now(timezone.utc).isoformat()
 
     print("=" * 74)
@@ -449,16 +451,23 @@ def main() -> int:
 
     frames = {"telemetry_tow": tow, "telemetry_effect": effect}
     print()
+    out = None if args.dry_run else serving.connect()
     for name in TABLES:
         df = frames[name].copy()
         if df.empty:
-            print(f"  [WARN] {name} is empty")
+            # See s05c: an empty table would satisfy s06's presence check while
+            # telling the app there is nothing to show, so the existing one is
+            # left alone instead.
+            print(f"  [WARN] {name} is empty, leaving the existing table alone")
             continue
         df["generated_at"] = generated_at
-        if not args.dry_run:
-            df.to_csv(DASHBOARD_DIR / f"{name}.csv", index=False)
+        if out is not None:
+            serving.write_table(df, name, out, csv=args.csv)
         print(f"  {name:18s} {len(df):>5,} rows x {len(df.columns):>2} cols"
               + ("   (dry run, not written)" if args.dry_run else ""))
+    if out is not None:
+        out.commit()
+        out.close()
 
     print("\n" + "=" * 74)
     print(f"These figures cover {len(keys)} races, not 81. The panel must say so.")

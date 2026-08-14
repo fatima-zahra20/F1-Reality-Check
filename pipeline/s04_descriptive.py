@@ -1,7 +1,9 @@
 """
 s04_descriptive.py — builds the descriptive serving layer for the dashboard.
 
-Produces a star schema as CSVs in outputs/dashboard/:
+Writes a star schema straight into the dashboard bundle, dashboard/data/dashboard.db
+(pipeline/serving.py owns that path). Add --csv to also get a copy you can open
+and read by eye:
 
     dim_race           one row per race          (~81)
     dim_driver         driver x season           (~90)
@@ -66,10 +68,8 @@ from pathlib import Path
 import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from config import DB_PATH, LAP_OUTLIER_FACTOR, OUTPUTS_DIR  # noqa: E402
-
-DASHBOARD_DIR = OUTPUTS_DIR / "dashboard"
-BUNDLE_DB = DASHBOARD_DIR / "dashboard.db"
+from config import DB_PATH, LAP_OUTLIER_FACTOR  # noqa: E402
+import serving  # noqa: E402
 
 # LAP_OUTLIER_FACTOR now comes from config, which is the single definition.
 # Applied per session against that session's own median, never in seconds; see
@@ -754,13 +754,12 @@ def main() -> int:
         print(f"[FAIL] unknown table(s): {unknown}")
         return 1
 
-    DASHBOARD_DIR.mkdir(parents=True, exist_ok=True)
     generated_at = datetime.now(timezone.utc).isoformat()
 
     print("=" * 74)
     print("DESCRIPTIVE SERVING LAYER")
     print(f"silver: {DB_PATH}")
-    print(f"target: {BUNDLE_DB}")
+    print(f"target: {serving.BUNDLE_DB}")
     print("=" * 74)
 
     con = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
@@ -772,16 +771,18 @@ def main() -> int:
     #
     # These seven tables used to be written as CSV and then read back by
     # s06_publish to build dashboard.db, which meant every value existed twice
-    # with nothing checking the copies agreed. The CSV was never the product;
-    # it was an intermediate. s06 now packs the analysis-output CSVs (which are
-    # genuinely produced elsewhere) around these, and replaces tables in place
-    # rather than deleting the file, so writing here first is safe.
+    # with nothing checking the copies agreed. The CSV was never the product; it
+    # was an intermediate. s04 moved first and s05, s05b, s05c and s05d have now
+    # followed, so s06 reads no CSV at all and only verifies what it finds.
+    #
+    # Tables are replaced in place rather than the file being deleted, which is
+    # what lets several steps write into the same bundle in any order.
     #
     # --csv still exists because reading a table in a spreadsheet is a
     # reasonable thing to want. It is off by default so the duplicate does not
     # come back by accident.
     failures = []
-    out = sqlite3.connect(BUNDLE_DB)
+    out = serving.connect()
     try:
         for name in targets:
             started = time.time()
@@ -795,9 +796,7 @@ def main() -> int:
             # Freshness stamp, so the dashboard can show how current it is.
             df["generated_at"] = generated_at
 
-            df.to_sql(name, out, index=False, if_exists="replace")
-            if args.csv:
-                df.to_csv(DASHBOARD_DIR / f"{name}.csv", index=False)
+            serving.write_table(df, name, out, csv=args.csv)
 
             print(f"  {name:20s} {len(df):>8,} rows x {len(df.columns):>3} cols  "
                   f"{time.time() - started:.1f}s")
@@ -811,7 +810,7 @@ def main() -> int:
         print(f"FAILED: {failures}")
         print("=" * 74)
         return 1
-    print(f"Built {len(targets)} table(s) into {BUNDLE_DB.name}.")
+    print(f"Built {len(targets)} table(s) into {serving.BUNDLE_DB.name}.")
     if not args.csv:
         print("No CSVs written: these tables live in the bundle only. "
               "Use --csv if you need one.")

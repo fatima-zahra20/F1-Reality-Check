@@ -3,15 +3,25 @@ s05b_perfect.py - finds the best lap and the best race, 2023 to 2026.
 
 Runs between s05 and s06 so the existing publish command is unchanged.
 
-Produces seven CSVs in outputs/dashboard/:
+Writes five tables straight into the dashboard bundle, dashboard/data/dashboard.db:
+
+    lap_factor_anova       how much of within-race lap variation each factor explains
+    lap_factor_model       every coefficient, so the app can decompose one lap
+    lap_factor_reference   the typical value of each factor within each race
+    lap_counterfactual_model   the within-lap fit the counterfactual moves along
+    lap_counterfactual_bounds  the range each lever is allowed, per race
+
+Four more are built only when named on --tables, and go to outputs/analysis/ as
+CSV rather than into the bundle, because nothing reads them:
 
     perfect_lap            the ranked race laps, with every parameter attached
     perfect_lap_model      the model behind the ranking, one row per predictor
     perfect_lap_record     raw fastest clean lap per circuit, for comparison
     perfect_race           the four components of a great race, ranked separately
-    lap_factor_anova       how much of within-race lap variation each factor explains
-    lap_factor_model       every coefficient, so the app can decompose one lap
-    lap_factor_reference   the typical value of each factor within each race
+
+The design notes below still describe how the ranking works, because the code
+that does it is intact and one command away. See ON_REQUEST near the runner for
+why it stopped running by default.
 
 DRS and the tow are NOT here. They exist for six races out of 81 and belong in
 their own step, s05d_telemetry.py, which says so on the page.
@@ -97,13 +107,12 @@ import pandas as pd
 from scipy import stats
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from config import DB_PATH, LAP_OUTLIER_FACTOR, OUTPUTS_DIR  # noqa: E402
+from config import DB_PATH, LAP_OUTLIER_FACTOR  # noqa: E402
+import serving  # noqa: E402
 
 import statsmodels.formula.api as smf  # noqa: E402
 from statsmodels.stats.anova import anova_lm  # noqa: E402
 from statsmodels.stats.outliers_influence import variance_inflation_factor  # noqa: E402
-
-DASHBOARD_DIR = OUTPUTS_DIR / "dashboard"
 
 TEAM_NAME_MAP = {
     "AlphaTauri": "RB Family",
@@ -1148,23 +1157,50 @@ def build_perfect_race(con, laps: pd.DataFrame) -> pd.DataFrame:
 
 # --- runner ----------------------------------------------------------------------
 
-TABLES = ["perfect_lap", "perfect_lap_model", "perfect_lap_record",
-          "perfect_race", "lap_factor_anova", "lap_factor_model",
-          "lap_factor_reference", "lap_counterfactual_model",
-          "lap_counterfactual_bounds"]
+# Bundled: the app queries these, so they go into dashboard.db.
+BUNDLED = ["lap_factor_anova", "lap_factor_model", "lap_factor_reference",
+           "lap_counterfactual_model", "lap_counterfactual_bounds"]
+
+# Not bundled, and no longer written by default: nothing reads these. Checked
+# against every way a name can reach a query (FROM, JOIN, subquery, f-string,
+# quoted, bare), across the app, the pipeline and the notebooks.
+#
+# They were kept for a while on the grounds that a choose-a-lap feature would
+# want them. That feature exists now. views/perfect.py was built on fact_lap,
+# the map geometry and the lap_factor_* tables instead, so the reader these were
+# waiting for arrived and did not use them. 3,157 rows and 793 KB were being
+# written every run for nobody.
+#
+# The builders stay, because the modelling in them is sound and the cost of
+# keeping unreferenced code is a great deal lower than rewriting it. They are
+# reachable on request:
+#
+#     python pipeline\s05b_perfect.py --tables perfect_lap
+#
+# which writes CSV to serving.ANALYSIS_DIR. A plain run writes only BUNDLED.
+ON_REQUEST = ["perfect_lap", "perfect_lap_model", "perfect_lap_record",
+              "perfect_race"]
+
+# Every name --tables will accept. DEFAULT_TABLES is what a plain run writes.
+TABLES = ON_REQUEST + BUNDLED
+DEFAULT_TABLES = BUNDLED
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="Find the perfect lap and race.")
     ap.add_argument("--tables", nargs="*", default=None,
-                    help=f"subset of output tables to write {TABLES}")
+                    help=f"subset of output tables to write. A plain run writes "
+                         f"{DEFAULT_TABLES}. Also available on request, written "
+                         f"as CSV to the analysis folder: {ON_REQUEST}")
     ap.add_argument("--top", type=int, default=DEFAULT_TOP_N,
                     help=f"how many ranked laps to keep (default {DEFAULT_TOP_N})")
     ap.add_argument("--dry-run", action="store_true",
-                    help="compute and report without writing the CSVs")
+                    help="compute and report without writing anything")
+    ap.add_argument("--csv", action="store_true",
+                    help="also write the bundled tables as CSV, to read by eye")
     args = ap.parse_args()
 
-    targets = args.tables or TABLES
+    targets = args.tables or DEFAULT_TABLES
     unknown = [t for t in targets if t not in TABLES]
     if unknown:
         print(f"[FAIL] unknown table(s): {unknown}. Valid: {TABLES}")
@@ -1174,13 +1210,16 @@ def main() -> int:
         print(f"[FAIL] silver database not found at {DB_PATH}")
         return 1
 
-    DASHBOARD_DIR.mkdir(parents=True, exist_ok=True)
     generated_at = datetime.now(timezone.utc).isoformat()
 
     print("=" * 74)
     print("PERFECT LAP AND PERFECT RACE")
     print(f"silver: {DB_PATH}")
-    print(f"csv:    {DASHBOARD_DIR}")
+    print(f"bundle:   {serving.BUNDLE_DB}")
+    # Only named when something is actually going there, so a plain run does not
+    # advertise a folder it will not create.
+    if any(t in ON_REQUEST for t in targets):
+        print(f"analysis: {serving.ANALYSIS_DIR}")
     print(f"python: {sys.version.split()[0]}  pandas {pd.__version__}")
     print("=" * 74)
 
@@ -1236,46 +1275,65 @@ def main() -> int:
           + ", ".join(f"{k} {v:+.3f}s" for k, v in fresh.items()
                       if v is not None))
 
-    ranked = build_perfect_lap(modelled, args.top)
     frames = {
-        "perfect_lap": ranked,
-        "perfect_lap_model": build_perfect_lap_model(fit, modelled, ranked,
-                                                     vifs, rare, bad),
-        "perfect_lap_record": build_perfect_lap_record(laps),
-        "perfect_race": build_perfect_race(con, laps),
         "lap_factor_anova": build_lap_factor_anova(ffit, ftable),
         "lap_factor_model": build_lap_factor_model(ffit, fvifs),
         "lap_factor_reference": build_lap_factor_reference(modelled),
         "lap_counterfactual_model": build_counterfactual_model(wfit, ffit),
         "lap_counterfactual_bounds": build_counterfactual_bounds(modelled),
     }
+
+    # Built only when asked for. build_perfect_race re-queries the database and
+    # the ranking sorts every clean lap in four seasons, so a plain run should
+    # not pay for output it is not going to write.
+    ranked = None
+    if any(t in ON_REQUEST for t in targets):
+        ranked = build_perfect_lap(modelled, args.top)
+        frames.update({
+            "perfect_lap": ranked,
+            "perfect_lap_model": build_perfect_lap_model(fit, modelled, ranked,
+                                                         vifs, rare, bad),
+            "perfect_lap_record": build_perfect_lap_record(laps),
+            "perfect_race": build_perfect_race(con, laps),
+        })
     con.close()
 
-    head = ranked.head(200)
-    print(f"  candidates (one per driver-race): {len(ranked):,}")
-    print(f"  top 200 spans {head.session_key.nunique()} races and "
-          f"{head.driver_number.nunique()} drivers, "
-          f"{(head.track_state == 'wet').mean() * 100:.0f}% wet")
+    if ranked is not None:
+        head = ranked.head(200)
+        print(f"  candidates (one per driver-race): {len(ranked):,}")
+        print(f"  top 200 spans {head.session_key.nunique()} races and "
+              f"{head.driver_number.nunique()} drivers, "
+              f"{(head.track_state == 'wet').mean() * 100:.0f}% wet")
 
-    for label, row in (("overall", ranked.iloc[0]),
-                       ("dry only", ranked[ranked.track_state == "dry"].iloc[0])):
-        print(f"\n  perfect lap, {label}: {row.driver}, "
-              f"{row.meeting_name} {row.year}, lap {row.lap_number}")
-        print(f"    {row.lap_duration:.3f}s against an expected "
-              f"{row.predicted_lap:.3f}s, {row.residual:+.3f}s "
-              f"(z {row.z_residual:+.2f})")
-        print(f"    {row.compound} on a {int(row.tyre_age)}-lap tyre, track "
-              f"{row.track_temperature}C, wind {row.wind_speed} m/s, "
-              f"{row.track_state}")
+        for label, row in (
+                ("overall", ranked.iloc[0]),
+                ("dry only", ranked[ranked.track_state == "dry"].iloc[0])):
+            print(f"\n  perfect lap, {label}: {row.driver}, "
+                  f"{row.meeting_name} {row.year}, lap {row.lap_number}")
+            print(f"    {row.lap_duration:.3f}s against an expected "
+                  f"{row.predicted_lap:.3f}s, {row.residual:+.3f}s "
+                  f"(z {row.z_residual:+.2f})")
+            print(f"    {row.compound} on a {int(row.tyre_age)}-lap tyre, track "
+                  f"{row.track_temperature}C, wind {row.wind_speed} m/s, "
+                  f"{row.track_state}")
 
     print()
+    out = None if args.dry_run else serving.connect()
     for name in targets:
         df = frames[name].copy()
         df["generated_at"] = generated_at
-        if not args.dry_run:
-            df.to_csv(DASHBOARD_DIR / f"{name}.csv", index=False)
-        print(f"  {name:20s} {len(df):>6,} rows x {len(df.columns):>2} cols"
-              + ("   (dry run, not written)" if args.dry_run else ""))
+        where = "bundle" if name in BUNDLED else "analysis"
+        if out is not None:
+            if name in BUNDLED:
+                serving.write_table(df, name, out, csv=args.csv)
+            else:
+                serving.write_analysis_csv(df, name)
+        print(f"  {name:26s} {len(df):>6,} rows x {len(df.columns):>2} cols"
+              + (f"   -> {where}" if not args.dry_run else
+                 "   (dry run, not written)"))
+    if out is not None:
+        out.commit()
+        out.close()
 
     print("\n" + "=" * 74)
     print("Run s06_publish.py --execute to push these to the data-latest release.")

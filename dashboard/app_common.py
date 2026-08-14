@@ -26,11 +26,17 @@ ASSET_URL = f"https://github.com/{REPO}/releases/download/data-latest/dashboard.
 
 # Resolved from this file's own location, not the current working directory,
 # so it doesn't matter whether streamlit was launched from the repo root or
-# from inside dashboard/ - both land on the same two paths.
+# from inside dashboard/ - both land on the same paths.
 APP_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = APP_DIR.parent
 ASSETS_DIR = APP_DIR / "assets"
-LOCAL_DB = PROJECT_ROOT / "outputs" / "dashboard" / "dashboard.db"
+
+# In data/ beside this file, kept out of the source listing because it is a
+# 67 MB generated file and everything else here is hand-written. The pipeline
+# writes it there (pipeline/serving.py owns that path); git ignores it. On
+# Streamlit Cloud it is absent, so the download below runs instead, which is the
+# normal deployed path rather than a fallback.
+LOCAL_DB = APP_DIR / "data" / "dashboard.db"
 
 # Fallback for teams whose colour is missing in the source data.
 NEUTRAL = "#8A8A94"
