@@ -13,7 +13,38 @@ from pathlib import Path
 import streamlit as st
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from app_common import find_asset_b64, render_footer  # noqa: E402
+from app_common import find_asset_b64, query, render_footer  # noqa: E402
+
+# Counted, not written down. This line used to read "70 races. 217,000 laps.",
+# which was 2023 to 2025 exactly: it was true when written and silently stopped
+# being true when 2026 started arriving, while the sidebar, which counts, said
+# 81. A headline number nobody recomputes drifts from the data behind it after
+# every race weekend, and this one is the first thing a visitor reads.
+#
+# Race laps rather than all laps, because the count sits beside the race count
+# and has to mean the same thing: practice and qualifying laps would treble it
+# and correspond to nothing on the page.
+#
+# This is the first page a visitor hits, and reading the counts means opening
+# the bundle, which on Streamlit Cloud downloads it. That cost is moved earlier
+# rather than added: every other page needs the same connection, and it is
+# cached per server process, so only the first visitor waits. The fallback below
+# means a slow or failed download degrades to a sentence without numbers instead
+# of an error page on the front door.
+WORDS = {1: "One", 2: "Two", 3: "Three", 4: "Four", 5: "Five", 6: "Six"}
+
+try:
+    _span = query(
+        "SELECT MIN(year) lo, MAX(year) hi, COUNT(*) races FROM dim_race")
+    _laps = int(query("SELECT COUNT(*) n FROM fact_lap").n.iloc[0])
+    _seasons = int(_span.hi.iloc[0]) - int(_span.lo.iloc[0]) + 1
+    # Rounded down to the nearest thousand: a headline that moves by about 60
+    # every race reads as a live counter rather than a statement of scale.
+    HEADLINE = (f"{WORDS.get(_seasons, _seasons)} seasons. "
+                f"{int(_span.races.iloc[0])} races. "
+                f"{_laps // 1000:,},000 laps. Every claim tested.")
+except Exception:
+    HEADLINE = "Every claim tested."
 
 hero_image = find_asset_b64("f1_landing")
 background = (
@@ -120,10 +151,10 @@ st.markdown(
 
 with st.container(key="hero"):
     st.markdown(
-        """
+        f"""
         <h1>F1 REALITY CHECK</h1>
         <p class="subtitle">What actually decides a Formula 1 race?</p>
-        <p class="note">Four seasons. 70 races. 217,000 laps. Every claim tested.</p>
+        <p class="note">{HEADLINE}</p>
         <p class="note">Every finding on this dashboard is the output of a
         statistical test, not an observation. Where the evidence is weak,
         the dashboard says so.</p>
