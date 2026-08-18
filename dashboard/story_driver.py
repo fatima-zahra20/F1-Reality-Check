@@ -30,7 +30,7 @@ import streamlit as st
 
 from app_common import NEUTRAL, fmt_gap, fmt_lap, query, team_colours
 from story_common import (
-    ACCENT, AXIS_BASE, CLEAN_LAP, FIGHTING_SECONDS, INK, MUTED, PLOT_BASE,
+    ACCENT, AXIS_BASE, CLEAN_LAP, FIGHTING_SECONDS, MUTED, PLOT_BASE, ink,
     field, guide, line_layout,
 )
 
@@ -181,7 +181,7 @@ def _pace(session_key: int, me: pd.Series, mate: pd.Series | None,
     fig.add_trace(go.Scatter(
         x=clean.lap_number, y=clean.lap_duration, mode="lines+markers",
         name=me.name_acronym or f"#{int(me.driver_number)}",
-        line=dict(color=INK, width=2), marker=dict(size=4),
+        line=dict(color=ink(), width=2), marker=dict(size=4),
         hovertemplate="Lap %{x}<br>%{y:.3f}s<extra></extra>",
     ))
 
@@ -393,7 +393,7 @@ def _positions(me: pd.Series, laps: pd.DataFrame) -> None:
 
     fig = go.Figure(go.Scatter(
         x=trace.lap_number, y=trace.position, mode="lines",
-        line=dict(color=INK, width=2),
+        line=dict(color=ink(), width=2),
         hovertemplate="Lap %{x}, P%{y}<extra></extra>",
     ))
     st.plotly_chart(
@@ -441,7 +441,7 @@ def _gaps(me: pd.Series, laps: pd.DataFrame) -> None:
         g = clean.dropna(subset=["gap_to_leader_seconds"])
         fig.add_trace(go.Scatter(
             x=g.lap_number, y=g.gap_to_leader_seconds, mode="lines",
-            name="To the leader", line=dict(color=INK, width=2),
+            name="To the leader", line=dict(color=ink(), width=2),
             hovertemplate="Lap %{x}<br>%{y:.2f}s behind the leader<extra></extra>",
         ))
     if have_interval:

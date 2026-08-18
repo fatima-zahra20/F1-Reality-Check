@@ -25,6 +25,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import story_driver  # noqa: E402
 import story_race  # noqa: E402
 import story_team  # noqa: E402
+import theme  # noqa: E402
 from app_common import query, render_footer  # noqa: E402
 
 # --- shared filters -----------------------------------------------------------
@@ -40,6 +41,11 @@ races = query("""
 
 st.sidebar.title("F1 Reality Check")
 st.sidebar.caption(f"{len(races)} races · {races.year.min()}-{races.year.max()}")
+
+# Before any figure is built on this page: the switch also refreshes the shared
+# chart palette, so a flip and the charts change together rather than a rerun
+# apart.
+theme.render_toggle()
 
 season = st.sidebar.selectbox(
     "Season", sorted(races.year.unique(), reverse=True), key="season_choice",

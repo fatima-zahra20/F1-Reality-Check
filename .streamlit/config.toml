@@ -1,4 +1,11 @@
 [theme]
+# ONE palette section, deliberately.
+#
+# Defining [theme.light] and [theme.dark] instead makes Streamlit follow the
+# visitor's SYSTEM appearance and ignore `base`, so the app opened dark on a
+# dark machine and the in-page switch could not override it. The switch in
+# dashboard/theme.py rewrites these values at runtime instead, which keeps the
+# app authoritative over its own default.
 base = "light"
 primaryColor = "#E10600"
 backgroundColor = "#FFFFFF"

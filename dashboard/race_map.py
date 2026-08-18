@@ -28,11 +28,26 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from app_common import NEUTRAL, fmt_gap, fmt_lap, query, team_colours
+from theme import ACCENT, ink
 
 SECTOR_CHOICES = ["All of the lap", "Sector 1", "Sector 2", "Sector 3"]
 
+# The unhighlighted outline. A mid grey on purpose, so it reads as background
+# against either page colour and needs no theme of its own.
 TRACK_LINE = "#C9C9D1"
-TRACK_HIGHLIGHT = "#31333F"
+
+
+def track_highlight() -> str:
+    """
+    The darkened sector, the start/finish marker and the car labels.
+
+    A function rather than a constant because it follows the page: near-black
+    on light, near-white on dark. As a module-level string it would be fixed at
+    import and the highlighted sector would disappear into a dark background.
+    """
+    return ink()
+
+
 NOT_RECORDED = "not recorded"
 
 # Deliberately distinct from NOT_RECORDED. The telemetry exists upstream; it
@@ -368,8 +383,232 @@ CAMERA_DISTANCE_MIN = 1.4
 CAMERA_DISTANCE_MAX = 3.4
 
 
+# --- orientation ------------------------------------------------------------------
+#
+# THERE IS NO NORTH HERE, AND THAT IS NOT AN OVERSIGHT. Position coordinates
+# arrive in each circuit's own frame and the rotation to compass north is not
+# recorded anywhere: `location` carries x, y and z only, and no table in the
+# project holds a latitude or a longitude. s05b_perfect.add_wind_components
+# reaches the same conclusion from the other direction, which is why wind enters
+# the model as two components crossed with circuit rather than as a bearing.
+#
+# So a needle labelled N would be a guess wearing the clothes of a measurement,
+# wrong by an unknown amount per circuit, with nothing on screen to warn a
+# reader. The two instruments below answer the questions a reader actually has,
+# and both are exact:
+#
+#   which way is the lap run   -> the path is stored in lap order
+#   which way am I looking     -> the camera bearing is an input we set
+#
+# Both are stated in the circuit's own frame and neither claims a cardinal
+# direction.
+
+ARROW_COUNT = 8
+
+# The inset sits in the top-right corner of the 3D scene, in paper coordinates.
+DIAL_DOMAIN = [0.80, 0.99]
+
+# Radii inside the dial, as fractions of its half-width. The outline is scaled
+# so its furthest point lands on DIAL_TRACK_R, then the viewer dot and the
+# cardinal letters sit at fixed distances clear of it. Keeping all three here
+# means the spacing can be tuned without hunting through the drawing code.
+DIAL_TRACK_R = 0.46      # outer edge of the circuit outline
+DIAL_EYE_R = 0.56        # the red "you are here" marker
+DIAL_LABEL_R = 0.64      # N, E, S, W
+DIAL_LIMIT = 0.74        # axis range, leaving room for the letters
+
+
+def _heading_points(path: pd.DataFrame, n: int) -> pd.DataFrame:
+    """
+    n points spaced evenly along the stored path, each with its local heading.
+
+    CENTRED DIFFERENCE, not the step to the next point. Measuring from here to
+    somewhere ahead gives the direction of a CHORD, which always leans toward
+    the outside of a turn by half the arc it spans. Checked on a circle whose
+    answer is known: the forward difference put every arrow 11 degrees off,
+    consistently, which on screen reads as arrows that do not quite follow the
+    line they sit on. Taking the point before and the point after cancels it.
+
+    The outline is already resampled to even spacing, so a fixed number of
+    points either side is a fixed distance either side.
+    """
+    if len(path) < 3:
+        return pd.DataFrame()
+
+    idx = np.linspace(0, len(path) - 1, n, endpoint=False).astype(int)
+    step = max(1, len(path) // (n * 4))
+    before = (idx - step) % len(path)
+    after = (idx + step) % len(path)
+
+    here, back, ahead = path.iloc[idx], path.iloc[before], path.iloc[after]
+    out = here[["x", "y"]].copy().reset_index(drop=True)
+    out["z"] = here["z"].to_numpy() if "z" in here else 0.0
+    out["dx"] = ahead.x.to_numpy() - back.x.to_numpy()
+    out["dy"] = ahead.y.to_numpy() - back.y.to_numpy()
+    out["dz"] = ((ahead.z.to_numpy() - back.z.to_numpy())
+                 if "z" in here else np.zeros(len(out)))
+
+    # Plotly measures marker.angle clockwise from straight up; atan2 measures
+    # counter-clockwise from the positive x axis. Hence 90 minus, not plus.
+    out["angle"] = 90.0 - np.degrees(np.arctan2(out.dy, out.dx))
+    return out
+
+
+def travel_arrows_2d(path: pd.DataFrame, colour: str,
+                     n: int = ARROW_COUNT) -> go.Scatter | None:
+    """Arrowheads along the flat outline, pointing the way the lap is run."""
+    pts = _heading_points(path, n)
+    if pts.empty:
+        return None
+    return go.Scatter(
+        x=pts.x, y=pts.y, mode="markers", name="Direction of travel",
+        marker=dict(symbol="arrow", size=13, angle=pts.angle,
+                    color=colour, line=dict(width=0)),
+        hovertemplate="The lap runs this way<extra></extra>",
+        showlegend=False,
+    )
+
+
+def travel_arrows_3d(path: pd.DataFrame, colour: str,
+                     n: int = ARROW_COUNT) -> go.Cone | None:
+    """
+    The same arrows in the 3D scene.
+
+    Cones rather than markers because Scatter3d cannot rotate a symbol, so a
+    marker would point the same way whatever the car is doing.
+    """
+    pts = _heading_points(path, n)
+    if pts.empty:
+        return None
+    span = float(max(path.x.max() - path.x.min(), path.y.max() - path.y.min()))
+    return go.Cone(
+        x=pts.x, y=pts.y, z=pts.z,
+        u=pts.dx, v=pts.dy, w=pts.dz,
+        sizemode="absolute", sizeref=span * 0.05, anchor="tail",
+        showscale=False, colorscale=[[0, colour], [1, colour]],
+        hovertemplate="The lap runs this way<extra></extra>",
+    )
+
+
+# WHICH WAY THE ROTATION TURNS. The MultiViewer API gives a `rotation` per
+# circuit but never states its convention: it is either the angle the map must
+# be turned to put north up, or the bearing north already sits at. Both are
+# internally consistent, so the data alone cannot choose between them.
+#
+# Settled by comparing each circuit's LONG AXIS, which is unmistakable on a
+# satellite view, against what each convention predicts:
+#
+#   Las Vegas   runs along the Strip, a north-south boulevard.
+#               "bearing" gives N-S. "rotate_map" gives W-E, which is wrong.
+#   Monza       main straight runs roughly north-south.
+#               "bearing" gives NNE-SSW. "rotate_map" gives WNW-ESE.
+#
+# Two independent circuits, both agreeing, with the two answers 90 degrees apart
+# rather than marginally different.
+#
+# Monaco looks like the obvious test and is useless for it: there the two
+# conventions give the SAME line, E-W, differing only in which end is north. An
+# elevation test was tried first and settled nothing either, because it rested
+# on a guess about which way Casino Square sits from the harbour.
+#
+# One constant on purpose. If a circuit ever looks wrong on a map, flip this
+# word and all 24 follow.
+NORTH_CONVENTION = "bearing"          # or "rotate_map"
+
+
+def north_angle(rotation: float | None) -> float | None:
+    """
+    Where north points, in the circuit's own frame, as degrees anticlockwise
+    from the positive x axis. None when the circuit has no recorded rotation.
+    """
+    if rotation is None or pd.isna(rotation):
+        return None
+    r = float(rotation)
+    # "rotate_map": turning the map by r puts north up, so north currently sits
+    # r degrees clockwise of straight up. "bearing": r already is that heading.
+    return (90.0 - r) % 360.0 if NORTH_CONVENTION == "rotate_map" else r % 360.0
+
+
+def view_dial(path: pd.DataFrame, azimuth: float, colour: str,
+              rotation: float | None = None) -> list:
+    """
+    A small circuit-shaped dial showing where the camera is looking from.
+
+    Not a compass. It carries no cardinal labels, because none can be honestly
+    assigned. What it does say is exact: this is the circuit seen from directly
+    above, and the marker is the corner of it you are currently viewing from.
+    That is what a reader loses after spinning the scene, and it is the only
+    thing they lose.
+
+    Drawn on ordinary 2D axes overlaid on the 3D scene, so it stays put while
+    the circuit turns underneath it.
+    """
+    cx, cy = float(path.x.mean()), float(path.y.mean())
+    dx, dy = path.x - cx, path.y - cy
+
+    # Scaled by the FURTHEST point from the centre, not by the bounding box or
+    # by an average. That fixes the outline's outer edge at a known radius for
+    # every circuit, so the ring of labels sits the same distance clear of the
+    # track whether it is a long thin one like Monza or a compact one like
+    # Monaco. Scaling by a mean let a stretched circuit reach past its own
+    # labels while a compact one left them floating far out.
+    reach_max = float(np.hypot(dx, dy).max()) or 1.0
+    ux, uy = dx / reach_max * DIAL_TRACK_R, dy / reach_max * DIAL_TRACK_R
+
+    angle = np.radians(azimuth)
+    eye_x, eye_y = DIAL_EYE_R * np.cos(angle), DIAL_EYE_R * np.sin(angle)
+
+    traces = [
+        go.Scatter(
+            x=ux, y=uy, mode="lines", xaxis="x2", yaxis="y2",
+            line=dict(color=colour, width=1.5), opacity=0.55,
+            hoverinfo="skip", showlegend=False,
+        ),
+    ]
+
+    # Cardinal points, when the circuit's rotation is known. Drawn from north:
+    # the other three are exactly 90 degrees apart from it, so only one of the
+    # four is ever a measurement and the rest are arithmetic. Compass order runs
+    # clockwise while these axes run anticlockwise, hence the minus.
+    theta = north_angle(rotation)
+    if theta is not None:
+        for label, offset in (("N", 0), ("E", -90), ("S", -180), ("W", -270)):
+            a = np.radians(theta + offset)
+            traces.append(go.Scatter(
+                x=[DIAL_LABEL_R * np.cos(a)], y=[DIAL_LABEL_R * np.sin(a)],
+                mode="text", text=[label], xaxis="x2", yaxis="y2",
+                textfont=dict(size=11 if label == "N" else 9, color=colour),
+                opacity=1.0 if label == "N" else 0.6,
+                hoverinfo="skip", showlegend=False,
+            ))
+        a = np.radians(theta)
+        traces.append(go.Scatter(
+            x=[0, DIAL_TRACK_R * np.cos(a)], y=[0, DIAL_TRACK_R * np.sin(a)],
+            mode="lines", xaxis="x2", yaxis="y2",
+            line=dict(color=colour, width=1, dash="dot"), opacity=0.5,
+            hovertemplate=f"North, {theta:.0f} degrees in this circuit's "
+                          "frame<extra></extra>", showlegend=False,
+        ))
+
+    traces.append(go.Scatter(
+        x=[eye_x * 0.30, eye_x], y=[eye_y * 0.30, eye_y],
+        mode="lines+markers", xaxis="x2", yaxis="y2",
+        line=dict(color=ACCENT, width=2),
+        marker=dict(size=[0, 9], color=ACCENT, symbol="circle"),
+        hovertemplate=f"You are viewing from here<br>{azimuth:.0f} degrees in "
+                      "this circuit's frame<extra></extra>",
+        showlegend=False,
+    ))
+    return traces
+
+
 def camera_eye(azimuth_deg: float, distance: float) -> dict:
-    """Camera position for a given compass bearing, at a fixed height."""
+    """
+    Camera position for a bearing IN THE CIRCUIT'S OWN FRAME, at fixed height.
+
+    The bearing is not a compass bearing. Zero degrees is the positive x axis
+    of the position feed, which points somewhere different at every circuit.
+    """
     tilt = np.radians(CAMERA_TILT_DEG)
     angle = np.radians(azimuth_deg)
     return dict(x=float(distance * np.cos(tilt) * np.cos(angle)),
@@ -426,7 +665,8 @@ def draw_3d(path: pd.DataFrame, cars: pd.DataFrame, bounds, sector: int | None,
             focus: int | None, colours: dict[str, str],
             azimuth: float = CAMERA_AZIMUTH_DEFAULT,
             distance: float = CAMERA_DISTANCE_DEFAULT,
-            height: int = 620) -> go.Figure:
+            height: int = 620,
+            north_rotation: float | None = None) -> go.Figure:
     """
     The same map with its real elevation, as a scene that turns left and right.
 
@@ -457,17 +697,24 @@ def draw_3d(path: pd.DataFrame, cars: pd.DataFrame, bounds, sector: int | None,
         line=dict(color=TRACK_LINE, width=10), hoverinfo="skip",
         showlegend=False))
 
+    arrows = travel_arrows_3d(path, track_highlight())
+    if arrows is not None:
+        fig.add_trace(arrows)
+
+    for trace in view_dial(path, azimuth, track_highlight(), north_rotation):
+        fig.add_trace(trace)
+
     if sector and bounds:
         seg = _sector_slice(path, bounds, sector)
         fig.add_trace(go.Scatter3d(
             x=seg.x, y=seg.y, z=seg.z, mode="lines",
-            line=dict(color=TRACK_HIGHLIGHT, width=10), hoverinfo="skip",
+            line=dict(color=track_highlight(), width=10), hoverinfo="skip",
             showlegend=False))
 
     start = path.iloc[0]
     fig.add_trace(go.Scatter3d(
         x=[start.x], y=[start.y], z=[start.z], mode="markers",
-        marker=dict(size=5, color=TRACK_HIGHLIGHT, symbol="diamond"),
+        marker=dict(size=5, color=track_highlight(), symbol="diamond"),
         hovertemplate="Start/finish line<extra></extra>", showlegend=False))
 
     on = _cars_to_draw(cars, focus, colours)
@@ -487,7 +734,7 @@ def draw_3d(path: pd.DataFrame, cars: pd.DataFrame, bounds, sector: int | None,
             fig.add_trace(go.Scatter3d(
                 x=mine.map_x, y=mine.map_y, z=mine.map_z.fillna(0.0),
                 mode="markers+text", text=mine.label, textposition="top center",
-                textfont=dict(size=13, color=TRACK_HIGHLIGHT),
+                textfont=dict(size=13, color=track_highlight()),
                 marker=dict(size=11, color=mine.colour,
                             line=dict(color="white", width=2)),
                 customdata=_car_data(mine), hovertemplate=CAR_HOVER,
@@ -516,11 +763,21 @@ def draw_3d(path: pd.DataFrame, cars: pd.DataFrame, bounds, sector: int | None,
                         center=dict(x=0, y=0, z=0)),
             # turntable keeps the horizon level; orbit lets the track tumble.
             dragmode="turntable",
+            domain=dict(x=[0, 1], y=[0, 1]),
             # Tied to the camera controls only, so changing the lap or the
             # driver redraws the cars without yanking the view back, while
             # moving a camera slider does move it.
             uirevision=f"{azimuth}:{distance}",
         ),
+        # The view dial. Ordinary 2D axes laid over the scene's top-right
+        # corner, so it holds still while the circuit turns beneath it.
+        # scaleanchor keeps the miniature outline the right shape rather than
+        # stretching it to fill a square.
+        xaxis2=dict(domain=DIAL_DOMAIN, anchor="y2", visible=False,
+                    fixedrange=True, range=[-DIAL_LIMIT, DIAL_LIMIT]),
+        yaxis2=dict(domain=DIAL_DOMAIN, anchor="x2", visible=False,
+                    fixedrange=True, range=[-DIAL_LIMIT, DIAL_LIMIT],
+                    scaleanchor="x2"),
     )
     return fig
 
@@ -542,17 +799,21 @@ def draw(path: pd.DataFrame, cars: pd.DataFrame, bounds, sector: int | None,
         line=dict(color=TRACK_LINE, width=6), hoverinfo="skip",
         showlegend=False))
 
+    arrows = travel_arrows_2d(path, track_highlight())
+    if arrows is not None:
+        fig.add_trace(arrows)
+
     if sector and bounds:
         seg = _sector_slice(path, bounds, sector)
         fig.add_trace(go.Scatter(
             x=seg.x, y=seg.y, mode="lines", name=f"Sector {sector}",
-            line=dict(color=TRACK_HIGHLIGHT, width=6), hoverinfo="skip",
+            line=dict(color=track_highlight(), width=6), hoverinfo="skip",
             showlegend=False))
 
     start = path.iloc[0]
     fig.add_trace(go.Scatter(
         x=[start.x], y=[start.y], mode="markers", name="Start/finish",
-        marker=dict(symbol="line-ns", size=18, line=dict(color=TRACK_HIGHLIGHT,
+        marker=dict(symbol="line-ns", size=18, line=dict(color=track_highlight(),
                                                          width=3)),
         hovertemplate="Start/finish line<extra></extra>", showlegend=False))
 
@@ -573,7 +834,7 @@ def draw(path: pd.DataFrame, cars: pd.DataFrame, bounds, sector: int | None,
             fig.add_trace(go.Scatter(
                 x=mine.map_x, y=mine.map_y, mode="markers+text",
                 text=mine.label, textposition="top center",
-                textfont=dict(size=12, color=TRACK_HIGHLIGHT),
+                textfont=dict(size=12, color=track_highlight()),
                 marker=dict(size=24, color=mine.colour,
                             line=dict(color="white", width=2.5)),
                 customdata=_car_data(mine), hovertemplate=CAR_HOVER,
@@ -628,7 +889,7 @@ def _kv(title: str, pairs: list[tuple[str, str]]) -> None:
     st.markdown(
         "<div style='font-size:0.8rem;line-height:1.45'>"
         f"<div style='font-weight:700;font-size:0.75rem;letter-spacing:.04em;"
-        f"text-transform:uppercase;color:#31333F;margin-bottom:.35rem'>{title}</div>"
+        f"text-transform:uppercase;color:{ink()};margin-bottom:.35rem'>{title}</div>"
         f"<table style='border-collapse:collapse;width:100%'>{rows}</table>"
         "</div>",
         unsafe_allow_html=True)

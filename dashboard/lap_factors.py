@@ -29,7 +29,7 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from app_common import query
-from story_common import ACCENT, AXIS_BASE, INK, MUTED, PLOT_BASE, guide
+from story_common import ACCENT, AXIS_BASE, MUTED, PLOT_BASE, guide, ink
 
 NUMERIC_TERMS = ["lap_number", "tyre_age", "rainfall", "track_temperature",
                  "air_temperature", "humidity", "wind_speed",
@@ -358,7 +358,7 @@ def waterfall(parts: pd.DataFrame, totals: dict) -> go.Figure:
         connector=dict(line=dict(color="rgba(0,0,0,0.18)")),
         increasing=dict(marker=dict(color=ACCENT)),
         decreasing=dict(marker=dict(color="#2E7D32")),
-        totals=dict(marker=dict(color=INK)),
+        totals=dict(marker=dict(color=ink())),
     ))
     fig.update_layout(
         height=430,

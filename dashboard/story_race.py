@@ -28,7 +28,7 @@ import streamlit as st
 
 from app_common import NEUTRAL, fmt_lap, query, team_colours
 from story_common import (
-    AXIS_BASE, CLEAN_LAP, FIGHTING_SECONDS, PLOT_BASE,
+    AXIS_BASE, CLEAN_LAP, FIGHTING_SECONDS, PLOT_BASE, ink,
     field as _field, guide as _guide, hbar as _bar, labels as _labels,
 )
 
@@ -270,7 +270,7 @@ def _race_pace(session_key: int) -> None:
     fig = go.Figure()
     fig.add_trace(go.Scatter(
         x=per_lap.lap_number, y=per_lap.median_lap, mode="lines",
-        line=dict(color="#31333F", width=2), name="Field median",
+        line=dict(color=ink(), width=2), name="Field median",
         hovertemplate="Lap %{x}<br>%{y:.3f}s<extra></extra>",
     ))
     neutral = per_lap[per_lap.is_neutral]

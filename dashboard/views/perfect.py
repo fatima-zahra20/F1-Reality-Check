@@ -25,8 +25,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import lap_counterfactual as cf  # noqa: E402
 import lap_factors as lf  # noqa: E402
 import race_map as rm  # noqa: E402
+import theme  # noqa: E402
 from app_common import query, render_footer, team_colours  # noqa: E402
 from story_common import guide  # noqa: E402
+
+theme.render_toggle()
 
 st.title("Find perfect lap")
 st.caption(
@@ -46,7 +49,8 @@ races = query("""
     FROM dim_race ORDER BY year DESC, round
 """)
 races = races.merge(cover[["session_key", "circuit_key", "has_outline",
-                           "has_measured_xy", "map_note"]], on="session_key")
+                           "has_measured_xy", "map_note", "north_rotation"]],
+                    on="session_key")
 
 c1, c2 = st.columns([1, 3])
 years = sorted(races.year.unique(), reverse=True)
@@ -147,7 +151,8 @@ else:
 
         fig = rm.draw_3d(path, cars, bounds, sector,
                          None if focus is None else int(focus), team_colours(),
-                         azimuth=float(azimuth), distance=float(distance))
+                         azimuth=float(azimuth), distance=float(distance),
+                         north_rotation=race.north_rotation)
     else:
         fig = rm.draw(path, cars, bounds, sector,
                       None if focus is None else int(focus), team_colours())
@@ -169,6 +174,24 @@ else:
             "screen as a metre of track. Most circuits look nearly flat "
             "because they are."
         )
+        st.caption(
+            "**The arrows show which way the lap is run.** The small outline "
+            "in the corner is the circuit seen from above: **N, E, S and W** "
+            "are fixed to the ground, and the **red dot is you**, moving round "
+            "as you turn the view."
+        )
+        if pd.notna(race.north_rotation):
+            st.caption(
+                "North is not in the position data, which gives coordinates in "
+                "each circuit's own frame. It comes from the circuit reference "
+                "the ingestion already stored, and was checked against this "
+                "project's own traced outline for all 24 circuits before being "
+                "used. The source does not state which way its angle turns, so "
+                "that was settled by checking each circuit's long axis against "
+                "its real orientation: Las Vegas runs along the Strip, Monza's "
+                "main straight runs roughly north-south. Only **north** is "
+                "measured here; the other three are 90 degrees from it."
+            )
     elif not solid:
         st.caption(
             f"No elevation recorded for {race.circuit}, so only the flat view "

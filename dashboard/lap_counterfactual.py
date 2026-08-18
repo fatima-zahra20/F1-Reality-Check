@@ -34,7 +34,7 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from app_common import query
-from story_common import ACCENT, AXIS_BASE, INK, MUTED, PLOT_BASE
+from story_common import ACCENT, AXIS_BASE, MUTED, PLOT_BASE, ink
 
 # The levers, in the order they are shown. `flag` renders as a checkbox,
 # `choice` as a select, everything else as a slider bounded by the data.
@@ -334,7 +334,7 @@ def delta_chart(parts: pd.DataFrame) -> go.Figure:
         height=max(240, 40 * len(df)),
         xaxis=dict(title="Seconds, negative is faster",
                    range=[-span * 1.6, span * 1.6], zeroline=True,
-                   zerolinecolor=INK, **AXIS_BASE),
+                   zerolinecolor=ink(), **AXIS_BASE),
         yaxis=dict(title=None, **AXIS_BASE),
         **PLOT_BASE,
     )

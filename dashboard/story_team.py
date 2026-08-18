@@ -29,13 +29,18 @@ import streamlit as st
 
 from app_common import fmt_gap, fmt_lap, query, team_colours
 from story_common import (
-    ACCENT, AXIS_BASE, CLEAN_LAP, INK, MUTED, PLOT_BASE,
+    ACCENT, AXIS_BASE, CLEAN_LAP, MUTED, PLOT_BASE, ink,
     field, guide, line_layout,
 )
 
 # The two cars need to be told apart on a shared chart. The team's own colour
 # would make them identical, so one takes it and the other is muted.
-CAR_COLOURS = (INK, MUTED)
+#
+# A function, not a constant: the first colour follows the active theme, and a
+# module-level tuple would be built once at import and keep the light value for
+# the life of the server process.
+def car_colours() -> tuple[str, str]:
+    return (ink(), MUTED)
 
 
 def _cars(session_key: int, team: str) -> pd.DataFrame:
@@ -154,7 +159,7 @@ def _pace(session_key: int, cars: pd.DataFrame) -> None:
 
     fig = go.Figure()
     any_data = False
-    for colour, (_, car) in zip(CAR_COLOURS, cars.iterrows()):
+    for colour, (_, car) in zip(car_colours(), cars.iterrows()):
         laps = _laps(session_key, int(car.driver_number))
         clean = laps[(laps.neutralised == 0) & (laps.is_pit_out_lap == 0)
                      & laps.lap_duration.notna()]
@@ -291,7 +296,7 @@ def _positions(session_key: int, cars: pd.DataFrame) -> None:
 
     fig = go.Figure()
     any_data = False
-    for colour, (_, car) in zip(CAR_COLOURS, cars.iterrows()):
+    for colour, (_, car) in zip(car_colours(), cars.iterrows()):
         laps = _laps(session_key, int(car.driver_number)).dropna(subset=["position"])
         if laps.empty:
             continue

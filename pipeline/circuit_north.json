@@ -1,0 +1,175 @@
+{
+ "generated_at": "2026-08-18T14:53:49.942581+00:00",
+ "source": "MultiViewer circuits API, via silver_meetings.circuit_info_url",
+ "note": "rotation is in the same coordinate frame as OpenF1 position data; verified per circuit against this project's own traced outline. The convention (which way the angle turns) is set by NORTH_CONVENTION in dashboard/race_map.py.",
+ "circuits": [
+  {
+   "circuit_key": 2,
+   "circuit_short_name": "Silverstone",
+   "rotation": 92,
+   "source_year": 2022,
+   "source_url": "https://api.multiviewer.app/api/v1/circuits/2/2023"
+  },
+  {
+   "circuit_key": 4,
+   "circuit_short_name": "Hungaroring",
+   "rotation": 40,
+   "source_year": 2021,
+   "source_url": "https://api.multiviewer.app/api/v1/circuits/4/2023"
+  },
+  {
+   "circuit_key": 6,
+   "circuit_short_name": "Imola",
+   "rotation": 0,
+   "source_year": 2022,
+   "source_url": "https://api.multiviewer.app/api/v1/circuits/6/2024"
+  },
+  {
+   "circuit_key": 7,
+   "circuit_short_name": "Spa-Francorchamps",
+   "rotation": 91,
+   "source_year": 2021,
+   "source_url": "https://api.multiviewer.app/api/v1/circuits/7/2023"
+  },
+  {
+   "circuit_key": 9,
+   "circuit_short_name": "Austin",
+   "rotation": 0,
+   "source_year": 2021,
+   "source_url": "https://api.multiviewer.app/api/v1/circuits/9/2023"
+  },
+  {
+   "circuit_key": 10,
+   "circuit_short_name": "Melbourne",
+   "rotation": 44,
+   "source_year": 2022,
+   "source_url": "https://api.multiviewer.app/api/v1/circuits/10/2023"
+  },
+  {
+   "circuit_key": 14,
+   "circuit_short_name": "Interlagos",
+   "rotation": 258,
+   "source_year": 2023,
+   "source_url": "https://api.multiviewer.app/api/v1/circuits/14/2023"
+  },
+  {
+   "circuit_key": 15,
+   "circuit_short_name": "Catalunya",
+   "rotation": 303,
+   "source_year": 2023,
+   "source_url": "https://api.multiviewer.app/api/v1/circuits/15/2023"
+  },
+  {
+   "circuit_key": 19,
+   "circuit_short_name": "Spielberg",
+   "rotation": 1,
+   "source_year": 2022,
+   "source_url": "https://api.multiviewer.app/api/v1/circuits/19/2023"
+  },
+  {
+   "circuit_key": 22,
+   "circuit_short_name": "Monte Carlo",
+   "rotation": 315,
+   "source_year": 2022,
+   "source_url": "https://api.multiviewer.app/api/v1/circuits/22/2023"
+  },
+  {
+   "circuit_key": 23,
+   "circuit_short_name": "Montreal",
+   "rotation": 62,
+   "source_year": 2022,
+   "source_url": "https://api.multiviewer.app/api/v1/circuits/23/2023"
+  },
+  {
+   "circuit_key": 39,
+   "circuit_short_name": "Monza",
+   "rotation": 95,
+   "source_year": 2021,
+   "source_url": "https://api.multiviewer.app/api/v1/circuits/39/2023"
+  },
+  {
+   "circuit_key": 46,
+   "circuit_short_name": "Suzuka",
+   "rotation": 49,
+   "source_year": 2025,
+   "source_url": "https://api.multiviewer.app/api/v1/circuits/46/2023"
+  },
+  {
+   "circuit_key": 49,
+   "circuit_short_name": "Shanghai",
+   "rotation": 237,
+   "source_year": 2019,
+   "source_url": "https://api.multiviewer.app/api/v1/circuits/49/2024"
+  },
+  {
+   "circuit_key": 55,
+   "circuit_short_name": "Zandvoort",
+   "rotation": 0,
+   "source_year": 2021,
+   "source_url": "https://api.multiviewer.app/api/v1/circuits/55/2023"
+  },
+  {
+   "circuit_key": 61,
+   "circuit_short_name": "Singapore",
+   "rotation": 335,
+   "source_year": 2023,
+   "source_url": "https://api.multiviewer.app/api/v1/circuits/61/2023"
+  },
+  {
+   "circuit_key": 63,
+   "circuit_short_name": "Sakhir",
+   "rotation": 92,
+   "source_year": 2022,
+   "source_url": "https://api.multiviewer.app/api/v1/circuits/63/2023"
+  },
+  {
+   "circuit_key": 65,
+   "circuit_short_name": "Mexico City",
+   "rotation": 36,
+   "source_year": 2021,
+   "source_url": "https://api.multiviewer.app/api/v1/circuits/65/2023"
+  },
+  {
+   "circuit_key": 70,
+   "circuit_short_name": "Yas Marina Circuit",
+   "rotation": 280,
+   "source_year": 2021,
+   "source_url": "https://api.multiviewer.app/api/v1/circuits/70/2023"
+  },
+  {
+   "circuit_key": 144,
+   "circuit_short_name": "Baku",
+   "rotation": 357,
+   "source_year": 2022,
+   "source_url": "https://api.multiviewer.app/api/v1/circuits/144/2023"
+  },
+  {
+   "circuit_key": 149,
+   "circuit_short_name": "Jeddah",
+   "rotation": 104,
+   "source_year": 2022,
+   "source_url": "https://api.multiviewer.app/api/v1/circuits/149/2023"
+  },
+  {
+   "circuit_key": 150,
+   "circuit_short_name": "Lusail",
+   "rotation": 61,
+   "source_year": 2023,
+   "source_url": "https://api.multiviewer.app/api/v1/circuits/150/2023"
+  },
+  {
+   "circuit_key": 151,
+   "circuit_short_name": "Miami",
+   "rotation": 2,
+   "source_year": 2022,
+   "source_url": "https://api.multiviewer.app/api/v1/circuits/151/2023"
+  },
+  {
+   "circuit_key": 152,
+   "circuit_short_name": "Las Vegas",
+   "rotation": 90,
+   "source_year": 2023,
+   "source_url": "https://api.multiviewer.app/api/v1/circuits/152/2023"
+  }
+ ]
+}

@@ -67,6 +67,7 @@ Requires the pinned Anaconda environment. See NOTES_LOG #42.
 from __future__ import annotations
 
 import argparse
+import json
 import sqlite3
 import sys
 import time
@@ -441,6 +442,47 @@ def build_coverage(silver, outlines: pd.DataFrame, measured: pd.DataFrame,
 TABLES = ["map_circuit_outline", "map_measured_xy", "map_coverage"]
 
 
+NORTH_PATH = Path(__file__).resolve().parent / "circuit_north.json"
+
+
+def attach_north(coverage: pd.DataFrame) -> pd.DataFrame:
+    """
+    Add each circuit's rotation to north, read from disk rather than fetched.
+
+    OpenF1 gives positions in each circuit's own frame and never says how that
+    frame is turned. The rotation comes from the MultiViewer circuits API, whose
+    URL silver_meetings already stores, and it was verified against this
+    project's own traced outline for all 24 circuits before being trusted. See
+    fetch_circuit_north.py, which is run by hand and writes the JSON.
+
+    Offline on purpose: a circuit's orientation is a constant, and making the
+    weekly run depend on someone else's server for a constant means a network
+    blip breaks a build that has nothing to do with the network.
+
+    A circuit with no entry gets a null, which the map reads as "no compass for
+    this one" rather than as zero degrees. Those are different claims.
+    """
+    coverage = coverage.copy()
+    if not NORTH_PATH.exists():
+        print(f"  [WARN] {NORTH_PATH.name} missing; no compass will be drawn")
+        coverage["north_rotation"] = pd.NA
+        return coverage
+
+    payload = json.loads(NORTH_PATH.read_text(encoding="utf-8"))
+    by_key = {c["circuit_key"]: c["rotation"] for c in payload["circuits"]}
+    coverage["north_rotation"] = coverage.circuit_key.map(by_key)
+
+    known = int(coverage.north_rotation.notna().sum())
+    circuits = coverage[coverage.north_rotation.notna()].circuit_key.nunique()
+    print(f"north rotation known for {circuits} circuits "
+          f"({known} of {len(coverage)} races)")
+    missing = sorted(set(coverage[coverage.north_rotation.isna()]
+                         .circuit_short_name))
+    if missing:
+        print(f"  no rotation: {', '.join(missing)}")
+    return coverage
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="Build the race map layer.")
     ap.add_argument("--dry-run", action="store_true",
@@ -512,6 +554,7 @@ def main() -> int:
           f"{measured.session_key.nunique() if len(measured) else 0} races")
 
     coverage = build_coverage(silver, outlines, measured, car_keys)
+    coverage = attach_north(coverage)
     silver.close()
     bronze.close()
 

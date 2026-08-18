@@ -13,6 +13,13 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from app_common import query
+# The palette moved to theme.py when dark mode arrived. These are re-exported,
+# not redefined, so `from story_common import AXIS_BASE` keeps working and keeps
+# holding the SAME dict object theme.apply() refreshes. Reassigning either of
+# them here would silently detach every importer from the live palette.
+from theme import (  # noqa: F401
+    ACCENT, AXIS_BASE, MUTED, PLOT_BASE, heat, ink, zero_line,
+)
 
 # A pit out-lap or a lap behind a safety car is not a racing lap. Blocks that
 # describe pace exclude them; blocks that describe what happened do not.
@@ -21,17 +28,6 @@ CLEAN_LAP = "neutralised = 0 AND is_pit_out_lap = 0"
 # Within this gap a driver is in the attack window rather than circulating
 # alone. One second is the sport's own definition, not a derived threshold.
 FIGHTING_SECONDS = 1.0
-
-PLOT_BASE = dict(
-    margin=dict(l=10, r=10, t=10, b=10),
-    plot_bgcolor="rgba(0,0,0,0)",
-    paper_bgcolor="rgba(0,0,0,0)",
-)
-AXIS_BASE = dict(fixedrange=True, gridcolor="rgba(0,0,0,0.08)")
-
-INK = "#31333F"      # the driver being described
-ACCENT = "#E10600"   # something that needs attention
-MUTED = "#9A9AA5"    # the comparison, never the subject
 
 
 def guide(text: str) -> None:
@@ -51,7 +47,7 @@ def hbar(df, x, y, colours, hover, xtitle=None, zeroline=False, height=None):
     fig.update_layout(
         height=height or max(320, 24 * len(df)),
         xaxis=dict(title=xtitle, zeroline=zeroline,
-                   zerolinecolor="rgba(0,0,0,0.3)", **AXIS_BASE),
+                   zerolinecolor=zero_line(), **AXIS_BASE),
         yaxis=dict(title=None, **AXIS_BASE),
         **PLOT_BASE,
     )

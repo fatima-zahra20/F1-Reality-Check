@@ -30,9 +30,10 @@ import streamlit as st
 from streamlit.errors import StreamlitAPIException
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+import theme  # noqa: E402
 from app_common import NEUTRAL, query, render_footer, team_colours  # noqa: E402
 from story_common import (  # noqa: E402
-    ACCENT, AXIS_BASE, INK, MUTED, PLOT_BASE, guide,
+    ACCENT, AXIS_BASE, MUTED, PLOT_BASE, guide, heat, ink,
 )
 
 # ONE ENTRY PER QUESTION GROUP, not per notebook, and the two are not the same
@@ -204,7 +205,7 @@ def group_bar(groups: pd.DataFrame, metric: str, group_type: str,
         g = g.sort_values("value")
 
     colours = ([team_colours().get(n, NEUTRAL) for n in g.group_name]
-               if colour_by_team else INK)
+               if colour_by_team else ink())
     has_ci = g.ci_lower.notna().all() and g.ci_upper.notna().all()
 
     fig = go.Figure(go.Bar(
@@ -227,7 +228,7 @@ def scatter_fit(points: pd.DataFrame, xtitle: str, ytitle: str,
     if points.empty:
         return None
     colours = ([team_colours().get(g, NEUTRAL) for g in points.group_name]
-               if colour_by_group and points.group_name.notna().any() else INK)
+               if colour_by_group and points.group_name.notna().any() else ink())
 
     fig = go.Figure()
     fig.add_trace(go.Scatter(
@@ -276,7 +277,7 @@ def chart(test_id: str, tests: pd.DataFrame, coefs: pd.DataFrame,
         if len(pts):
             grid = (pts.groupby(["x", "y"]).size().reset_index(name="races"))
             fig = go.Figure(go.Heatmap(
-                x=grid.x, y=grid.y, z=grid.races, colorscale="Reds",
+                x=grid.x, y=grid.y, z=grid.races, colorscale=heat(),
                 hovertemplate="Started P%{x}<br>Finished P%{y}"
                               "<br>%{z} times<extra></extra>",
                 colorbar=dict(title="Races"),
@@ -286,7 +287,7 @@ def chart(test_id: str, tests: pd.DataFrame, coefs: pd.DataFrame,
                 b = pts.y.mean() - slope.iloc[0] * pts.x.mean()
                 fig.add_trace(go.Scatter(
                     x=xs, y=b + slope.iloc[0] * xs, mode="lines",
-                    line=dict(color=INK, width=2, dash="dash"),
+                    line=dict(color=ink(), width=2, dash="dash"),
                     hoverinfo="skip", showlegend=False))
             fig.update_layout(height=480, **PLOT_BASE,
                               xaxis=dict(title="Grid position", **AXIS_BASE),
@@ -326,7 +327,7 @@ def chart(test_id: str, tests: pd.DataFrame, coefs: pd.DataFrame,
                           .reset_index())
             fig = go.Figure(go.Bar(
                 x=by_slot.x, y=by_slot.mean_swing,
-                marker_color=[ACCENT if v < 0 else INK for v in by_slot.mean_swing],
+                marker_color=[ACCENT if v < 0 else ink() for v in by_slot.mean_swing],
                 customdata=np.stack([by_slot.n], axis=-1),
                 hovertemplate="Grid P%{x}<br>%{y:+.2f} places on average"
                               "<br>n=%{customdata[0]}<extra></extra>",
@@ -356,7 +357,7 @@ def chart(test_id: str, tests: pd.DataFrame, coefs: pd.DataFrame,
             fig = go.Figure()
             fig.add_trace(go.Bar(
                 x=corr.value, y=corr.group_name, orientation="h",
-                name="Fuel-corrected", marker_color=INK,
+                name="Fuel-corrected", marker_color=ink(),
                 error_x=dict(type="data", symmetric=False,
                              array=(corr.ci_upper - corr.value),
                              arrayminus=(corr.value - corr.ci_lower),
@@ -478,7 +479,7 @@ def chart(test_id: str, tests: pd.DataFrame, coefs: pd.DataFrame,
         show["predictor"] = show.predictor.str.replace("_", " ")
         fig = go.Figure(go.Bar(
             x=show.coefficient, y=show.predictor, orientation="h",
-            marker_color=[ACCENT if v < 0 else INK for v in show.coefficient],
+            marker_color=[ACCENT if v < 0 else ink() for v in show.coefficient],
             error_x=dict(type="data", symmetric=False,
                          array=show.ci_upper - show.coefficient,
                          arrayminus=show.coefficient - show.ci_lower,
@@ -650,7 +651,7 @@ def chart(test_id: str, tests: pd.DataFrame, coefs: pd.DataFrame,
         fig = go.Figure(go.Bar(
             x=show.coefficient, y=show.predictor, orientation="h",
             marker_color=[MUTED if p >= 0.05 else
-                          (ACCENT if v < 0 else INK)
+                          (ACCENT if v < 0 else ink())
                           for v, p in zip(show.coefficient, show.p_value)],
             error_x=dict(type="data", symmetric=False,
                          array=show.ci_upper - show.coefficient,
@@ -711,7 +712,7 @@ def chart(test_id: str, tests: pd.DataFrame, coefs: pd.DataFrame,
         show = show.sort_values("coefficient")
         fig = go.Figure(go.Bar(
             x=show.coefficient, y=show.predictor, orientation="h",
-            marker_color=[MUTED if p >= 0.05 else INK for p in show.p_value],
+            marker_color=[MUTED if p >= 0.05 else ink() for p in show.p_value],
             error_x=dict(type="data", symmetric=False,
                          array=show.ci_upper - show.coefficient,
                          arrayminus=show.coefficient - show.ci_lower,
@@ -789,7 +790,7 @@ def chart(test_id: str, tests: pd.DataFrame, coefs: pd.DataFrame,
         show["predictor"] = show.predictor.str.replace("_delta", "").str.title()
         fig = go.Figure(go.Bar(
             x=show.magnitude, y=show.predictor, orientation="h",
-            marker_color=[INK if p < 0.05 else MUTED for p in show.p_value],
+            marker_color=[ink() if p < 0.05 else MUTED for p in show.p_value],
             customdata=np.stack([show.p_value.map(fmt_p)], axis=-1),
             hovertemplate="<b>%{y}</b><br>relative weight %{x:.2f}"
                           "<br>p = %{customdata[0]}<extra></extra>",
@@ -813,6 +814,10 @@ tests = query("SELECT * FROM diag_tests")
 coefs = query("SELECT * FROM diag_coefficients")
 groups = query("SELECT * FROM diag_groups")
 points = query("SELECT * FROM diag_points")
+
+# First sidebar call on this page, so the switch sits at the top of it. It also
+# refreshes the shared chart palette, which is why it runs before any figure.
+theme.render_toggle()
 
 st.title("Diagnose")
 st.caption(
