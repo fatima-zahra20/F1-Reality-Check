@@ -62,9 +62,9 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# Hides the default header and sidebar on this page only - Analyse/Diagnose/
-# Predict each render their own sidebar, but a landing page reads cleaner
-# without Streamlit's toolbar chrome, and without a padded, width-capped
+# Hides the default header and sidebar on this page only - Analyse, Diagnose,
+# Predict and Prescribe each render their own sidebar, but a landing page reads
+# cleaner without Streamlit's toolbar chrome, and without a padded, width-capped
 # content column, since the photo is meant to fill the browser window.
 st.markdown(
     """
@@ -128,7 +128,12 @@ st.markdown(
         line-height: 1.5;
     }}
     .st-key-hero div[data-testid="stHorizontalBlock"] {{
-        max-width: 640px;
+        /* Widened from 640px when the row went from three buttons to four.
+           At 640 each of four buttons is 148px, narrow enough that "Prescribe"
+           nearly fills its button edge to edge; 780 keeps each one close to the
+           202px it had when there were three. Below Streamlit's stacking
+           breakpoint the columns stack and this ceiling stops applying. */
+        max-width: 780px;
         margin: 0 auto;
     }}
     .st-key-hero div[data-testid="column"] button {{
@@ -164,7 +169,13 @@ with st.container(key="hero"):
 
     # Paths are relative to the entry point (streamlit_app.py at the repo
     # root), not to this file, and must match its st.Page() paths exactly.
-    c1, c2, c3 = st.columns(3)
+    #
+    # Four buttons, in the order the four kinds of analytics build on each
+    # other: what happened, why it happened, what happens next, what to do
+    # about it. The sidebar lists them in the same order, so a visitor who
+    # arrives by button and a visitor who arrives by sidebar learn the same
+    # sequence.
+    c1, c2, c3, c4 = st.columns(4)
     with c1:
         if st.button("Analyse", width="stretch"):
             st.switch_page("dashboard/views/analyse.py")
@@ -174,5 +185,8 @@ with st.container(key="hero"):
     with c3:
         if st.button("Predict", width="stretch"):
             st.switch_page("dashboard/views/predict.py")
+    with c4:
+        if st.button("Prescribe", width="stretch"):
+            st.switch_page("dashboard/views/prescribe.py")
 
 render_footer()

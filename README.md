@@ -150,11 +150,11 @@ OpenF1 API
 [ s07_build_gold ]  ──▶  gold_f1.db                   158 MB, 18 conformed tables
     │                    every question below reads this, not silver
     │
-    ├──▶ [ s04_descriptive ]  ──▶  7 fact/dim tables
-    ├──▶ [ s05_diagnostic ]   ──▶  29 statistical tests
-    ├──▶ [ s05b_perfect ]     ──▶  lap-factor and counterfactual models
-    ├──▶ [ s05c_racemap ]     ──▶  circuit geometry (bronze telemetry)
-    └──▶ [ s05d_telemetry ]   ──▶  tow and DRS effects
+    ├──▶ [ s04_descriptive ]   ──▶  7 fact/dim tables
+    ├──▶ [ s05_diagnostic ]    ──▶  29 statistical tests
+    ├──▶ [ s05b_prescriptive ] ──▶  lap-factor and counterfactual models
+    ├──▶ [ s05c_racemap ]      ──▶  circuit geometry (bronze telemetry)
+    └──▶ [ s05d_telemetry ]    ──▶  tow and DRS effects
                    │
                    │  all five write straight into dashboard/data/dashboard.db
                    ▼
@@ -204,7 +204,7 @@ They are excluded from the scheduled run and refreshed manually.
 | **Descriptive** | What happened? | Complete |
 | **Diagnostic** | Why did it happen? | Complete |
 | **Predictive** | What will happen? | In progress |
-| **Prescriptive** | What should be done? | Out of scope |
+| **Prescriptive** | What should be done? | Shipped as the **Prescribe** page |
 
 The descriptive and diagnostic layers are both organised around the same spine — the
 chronological *story of a race*, examined once at driver level and once at team level:
@@ -360,7 +360,7 @@ F1-Reality-Check/
 │   ├── s07_build_gold.py          silver -> gold, 18 conformed tables
 │   ├── s04_descriptive.py         7 fact/dim tables, written into the bundle
 │   ├── s05_diagnostic.py          29 statistical tests
-│   ├── s05b_perfect.py            perfect-lap model
+│   ├── s05b_prescriptive.py       lap-factor and counterfactual models
 │   ├── s05c_racemap.py            circuit geometry from bronze telemetry
 │   ├── s05d_telemetry.py          tow and DRS effects
 │   ├── s06_publish.py             bundle + upload to the GitHub Release
@@ -438,7 +438,7 @@ sequenced**, so the five tables they own carry whatever date they were last run 
 Until that is fixed, run them before publishing:
 
 ```bash
-python pipeline/s05b_perfect.py
+python pipeline/s05b_prescriptive.py
 python pipeline/s05c_racemap.py
 python pipeline/s05d_telemetry.py
 python pipeline/s06_publish.py --build-only     # validate, index and gzip, no upload

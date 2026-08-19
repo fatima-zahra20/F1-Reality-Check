@@ -1111,6 +1111,44 @@ that **`s05c_racemap` does not reproduce itself**, which is recorded as open que
 tables had been shipping data fitted five to six days stale. Not yet fixed.
 
 
+### 54. The fourth headline gets its name back
+
+*2026-08-19. Naming only. No model, filter, coefficient, chart or number changed, and
+nothing was rebuilt or republished.*
+
+**The page was called the wrong thing.** "Find perfect lap" described an answer it never
+gives. It does not find a perfect lap; it takes a real one, decomposes it, and asks what
+moving each factor would have been worth. That is a prescription, the fourth of the four
+analytics headlines this dashboard is organised around. Three of the four were already
+named after the question they answer, Analyse, Diagnose and Predict, and the fourth was
+named after a superlative.
+
+**What moved.** `dashboard/views/perfect.py` to `views/prescribe.py`, and
+`pipeline/s05b_perfect.py` to `s05b_prescriptive.py`, both with `git mv` so
+`git log --follow` still reaches the history. Sidebar entry "Find perfect lap" to
+"Prescribe", page heading to "Prescribe a lap", and the landing page went from three
+buttons to four so every headline has a front door. Ten widget keys renamed inside the
+page for internal consistency; they are session-local and invisible.
+
+**What deliberately did not move: the four `perfect_*` tables.** `perfect_lap`,
+`perfect_race`, `perfect_lap_record` and `perfect_lap_model` rank the fastest lap and the
+best race ever recorded. A superlative is a descriptive question. Nothing in them
+prescribes anything, and the Prescribe page has never read one of them. Renaming them to
+match their file would have put a wrong label on a right thing, which is worse than the
+mismatch it fixed. Checked before deciding: the shipped bundle holds 21 tables and none of
+them is `perfect_*`, so this was a free choice rather than a costly one.
+
+**The rename found a stale comment, which is the part worth recording.** The orientation
+block in `race_map.py` still opened "THERE IS NO NORTH HERE, AND THAT IS NOT AN
+OVERSIGHT", fifteen lines above the code that draws N, E, S and W. It was true when
+written and was never revisited when `fetch_circuit_north.py` made north available. A
+comment that contradicts the code beneath it is worse than no comment, because it is
+read as current. Rewritten to carry both the old conclusion and why it stopped holding.
+
+**Also corrected:** the README listed the prescriptive phase as "Out of scope" while the
+page was live, and `s07_build_gold.py` described its consumer as "the perfect-lap tool".
+
+
 ## Open questions
 
 ### A. `caution_flag` under-detects Safety Car periods

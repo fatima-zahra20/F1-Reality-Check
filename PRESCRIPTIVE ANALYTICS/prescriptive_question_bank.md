@@ -6,7 +6,8 @@ prescriptive asks **what action would have produced a better outcome**.
 
 Built on the same silver and gold tables as the other phases, but on top of the
 diagnostic layer rather than beside it: every recommendation here is an
-arithmetic consequence of a coefficient that `s05_diagnostic` or `s05b_perfect`
+arithmetic consequence of a coefficient that `s05_diagnostic` or
+`s05b_prescriptive`
 already fitted and published. Nothing new is estimated in this phase. That is
 deliberate, because a prescription is only as trustworthy as the model it came
 from, and reusing the published model means the number on the page can be traced

@@ -1,5 +1,5 @@
 """
-perfect.py - "Find perfect lap".
+prescribe.py - "Prescribe a lap", the prescriptive layer.
 
 One page, read by scrolling, in the same three movements as the rest of the
 project:
@@ -11,6 +11,20 @@ project:
 Unlike Analyse and Diagnose there is no section picker. The three parts are
 meant to be read in order, because part 2 only means anything once part 1 has
 established what is being explained.
+
+WHY THE NAME CHANGED
+--------------------
+This was "Find perfect lap", and the file was views/perfect.py. That title
+described an answer the page never gives: it does not find a perfect lap, it
+takes a real one and asks what moving each factor would have been worth. That
+is a prescription, the fourth of the four kinds of analytics this dashboard
+covers, alongside Analyse, Diagnose and Predict. Only the naming moved. Every
+number, chart, model and caption below is unchanged.
+
+The four perfect_lap, perfect_race, perfect_lap_record and perfect_lap_model
+tables in s05b kept their names on purpose. They rank the fastest lap and the
+best race ever recorded, which is a superlative and therefore a descriptive
+question, not a prescriptive one. This page has never read them.
 """
 
 from __future__ import annotations
@@ -31,7 +45,7 @@ from story_common import guide  # noqa: E402
 
 theme.render_toggle()
 
-st.title("Find perfect lap")
+st.title("Prescribe a lap")
 st.caption(
     "Pick a moment of a race and see where every car was, what its lap was "
     "made of, and which conditions were acting on it."
@@ -54,14 +68,14 @@ races = races.merge(cover[["session_key", "circuit_key", "has_outline",
 
 c1, c2 = st.columns([1, 3])
 years = sorted(races.year.unique(), reverse=True)
-year = c1.selectbox("Season", years, key="perfect_year")
+year = c1.selectbox("Season", years, key="prescribe_year")
 
 in_year = races[races.year == year].reset_index(drop=True)
-if st.session_state.get("perfect_race") not in set(in_year.session_key):
-    st.session_state["perfect_race"] = int(in_year.session_key.iloc[0])
+if st.session_state.get("prescribe_race") not in set(in_year.session_key):
+    st.session_state["prescribe_race"] = int(in_year.session_key.iloc[0])
 
 session_key = c2.selectbox(
-    "Race", in_year.session_key, key="perfect_race",
+    "Race", in_year.session_key, key="prescribe_race",
     format_func=lambda k: in_year.loc[in_year.session_key == k,
                                       "race_name"].iloc[0])
 
@@ -87,16 +101,16 @@ if not len(laps):
 max_lap = int(laps.lap_number.max())
 p1, p2, p3 = st.columns([1, 1, 2])
 lap_number = p1.number_input("Lap", min_value=1, max_value=max_lap, value=1,
-                             step=1, key="perfect_lap_no")
+                             step=1, key="prescribe_lap_no")
 sector_label = p2.selectbox("Sector", rm.SECTOR_CHOICES, index=1,
-                            key="perfect_sector")
+                            key="prescribe_sector")
 sector = None if sector_label == rm.SECTOR_CHOICES[0] else int(sector_label[-1])
 
 drivers = (laps[["driver_number", "driver"]].drop_duplicates()
                                             .sort_values("driver"))
 options = [None] + drivers.driver_number.tolist()
 names = dict(zip(drivers.driver_number, drivers.driver))
-focus = p3.selectbox("Driver", options, key="perfect_driver",
+focus = p3.selectbox("Driver", options, key="prescribe_driver",
                      format_func=lambda d: "All cars" if d is None else names[d])
 
 bounds = rm.sector_bounds(laps)
@@ -121,7 +135,7 @@ else:
             cars, rm.measured_positions(int(session_key)), moment)
 
     view = st.radio("View", ["3D elevation", "Flat"], horizontal=True,
-                    key="perfect_view",
+                    key="prescribe_view",
                     disabled=not solid,
                     help=None if solid else
                     "This circuit has no elevation data recorded.")
@@ -138,14 +152,14 @@ else:
         azimuth = v1.slider(
             "Turn left and right", min_value=0, max_value=355,
             value=int(rm.CAMERA_AZIMUTH_DEFAULT), step=5, format="%d deg",
-            key="perfect_azimuth",
+            key="prescribe_azimuth",
             help="Five degrees a step. Dragging the circuit does the same "
                  "thing faster.")
         distance = v2.slider(
             "Zoom", min_value=rm.CAMERA_DISTANCE_MIN,
             max_value=rm.CAMERA_DISTANCE_MAX,
             value=rm.CAMERA_DISTANCE_DEFAULT, step=0.1,
-            key="perfect_zoom",
+            key="prescribe_zoom",
             help="Lower is closer. The mouse wheel does the same thing in "
                  "bigger jumps.")
 

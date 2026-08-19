@@ -38,7 +38,7 @@ pages = [
             icon=":material/science:"),
     st.Page("dashboard/views/predict.py", title="Predict",
             icon=":material/insights:"),
-    st.Page("dashboard/views/perfect.py", title="Find perfect lap",
+    st.Page("dashboard/views/prescribe.py", title="Prescribe",
             icon=":material/timer:"),
 ]
 

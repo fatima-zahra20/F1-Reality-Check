@@ -479,7 +479,7 @@ The Tukey fence at `DESCRIPTIVE ANALYTICS/pit_stops_05.sql` was re-derived and i
 >
 > Their silver copies were **dropped in the 2026-07-28 split**, which took `f1.db` from 6.4 GB to 352 MB. They cover 32 of 490 sessions, so they cannot be model features or appear in season-wide aggregates, and carrying 35M rows of them through silver bought nothing.
 >
-> Query them from `bronze_f1.db` under their unprefixed names, `car_data` and `location`. `s05b_perfect`, `s05c_racemap` and `s05d_telemetry` do exactly that. The column documentation below still applies; only the location changed.
+> Query them from `bronze_f1.db` under their unprefixed names, `car_data` and `location`. `s05b_prescriptive`, `s05c_racemap` and `s05d_telemetry` do exactly that. The column documentation below still applies; only the location changed.
 >
 > They are also **not in gold**, for the same coverage reason. `config.INCLUDE_TELEMETRY_IN_WEEKLY` is `False`, so the scheduled run skips them entirely.
 
@@ -576,7 +576,7 @@ This is the source for `map_measured_xy` and `map_circuit_outline` in the dashbo
 - **`silver_intervals` and `silver_position` raw.** 2.4M rows of sub-second series. They enter at the two grains anything actually asks for: one reading per lap on `gold_lap`, and a close-running share in `gold_agg_interval`. The lap reading uses `direction="backward"`, the state as the lap *began*, because `"nearest"` can return a sample from after the lap started and a predictive feature built on that is leakage.
 - **`lane_duration`.** Byte-identical to `pit_duration` across all 22,898 populated rows.
 - **`silver_team_radio`.** Audio URLs with no transcription.
-- **Telemetry.** `car_data` and `location` are bronze-only and cover 32 of 490 sessions. `s05b_perfect`, `s05c_racemap` and `s05d_telemetry` keep a bronze connection for them, correctly.
+- **Telemetry.** `car_data` and `location` are bronze-only and cover 32 of 490 sessions. `s05b_prescriptive`, `s05c_racemap` and `s05d_telemetry` keep a bronze connection for them, correctly.
 - **Two-pass medians.** Both `s04` and `s05` normalise against a median taken *after* trimming laps above `LAP_OUTLIER_FACTOR`. Gold's `session_green_median_s` is single-pass, which is the right denominator for `pace_ratio` (using the trimmed median to decide the trim would be circular) but the wrong one for normalisation. Shipping a `lap_vs_median` off the single-pass median would differ from the published column on 23,046 of 90,053 race laps while looking like the same thing, so it is deliberately absent. Consumers compute it in two lines.
 
 ### Known caution gaps still in the data

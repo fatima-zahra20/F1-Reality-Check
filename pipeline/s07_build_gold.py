@@ -5,7 +5,7 @@ WHAT GOLD IS FOR
 ================
 Silver is a clean mirror of the API. Gold is the layer every question reads
 from: descriptive queries, diagnostic tests, the predictive work, the
-perfect-lap tool, the current Streamlit dashboard and the application meant to
+prescriptive layer, the current Streamlit dashboard and the application meant to
 replace it. It is wide and denormalised on purpose, so a question is a filter
 rather than a chain of joins.
 

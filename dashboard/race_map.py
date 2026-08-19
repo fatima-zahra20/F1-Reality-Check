@@ -1,5 +1,5 @@
 """
-race_map.py - the track map and the single-car panel for "Find perfect lap".
+race_map.py - the track map and the single-car panel for "Prescribe a lap".
 
 Everything here answers one question: where was every car, and what was
 happening to it, at a chosen moment of a chosen race.
@@ -385,23 +385,28 @@ CAMERA_DISTANCE_MAX = 3.4
 
 # --- orientation ------------------------------------------------------------------
 #
-# THERE IS NO NORTH HERE, AND THAT IS NOT AN OVERSIGHT. Position coordinates
-# arrive in each circuit's own frame and the rotation to compass north is not
-# recorded anywhere: `location` carries x, y and z only, and no table in the
-# project holds a latitude or a longitude. s05b_perfect.add_wind_components
-# reaches the same conclusion from the other direction, which is why wind enters
-# the model as two components crossed with circuit rather than as a bearing.
+# NORTH IS NOT IN THE POSITION DATA. Coordinates arrive in each circuit's own
+# frame: `location` carries x, y and z only, and no table in the project holds a
+# latitude or a longitude. s05b_prescriptive.add_wind_components reaches the same
+# conclusion from the other direction, which is why wind enters the model as two
+# components crossed with circuit rather than as a bearing.
 #
-# So a needle labelled N would be a guess wearing the clothes of a measurement,
-# wrong by an unknown amount per circuit, with nothing on screen to warn a
-# reader. The two instruments below answer the questions a reader actually has,
-# and both are exact:
+# This section used to say a needle labelled N was therefore impossible, and it
+# drew only the two instruments that need no cardinal direction:
 #
 #   which way is the lap run   -> the path is stored in lap order
 #   which way am I looking     -> the camera bearing is an input we set
 #
-# Both are stated in the circuit's own frame and neither claims a cardinal
-# direction.
+# That was true of the position data and wrong about the project. The ingestion
+# had been storing a circuit reference URL per meeting since the beginning, and
+# that reference carries a rotation nobody had ever fetched. It is now fetched
+# once by pipeline/fetch_circuit_north.py, checked against this project's own
+# traced outline for all 24 circuits, and carried into map_coverage as
+# north_rotation. So the dial below does label N, E, S and W, and they are
+# measured rather than guessed.
+#
+# A circuit with no north_rotation draws the dial without letters rather than
+# defaulting to zero, because a wrong compass is worse than no compass.
 
 ARROW_COUNT = 8
 

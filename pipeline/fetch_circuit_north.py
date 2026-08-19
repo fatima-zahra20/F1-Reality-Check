@@ -10,7 +10,7 @@ OpenF1 reports car positions in each circuit's own coordinate frame and never
 says how that frame is turned relative to north. There is no latitude, longitude
 or bearing anywhere in bronze, silver or gold: 59 tables, checked. So the track
 map could draw the shape of a circuit and the direction of travel, but could not
-honestly say which way was north, and s05b_perfect.add_wind_components reaches
+honestly say which way was north. s05b_prescriptive.add_wind_components reaches
 the same conclusion from the other end, which is why wind enters that model as
 two components crossed with circuit rather than as a bearing.
 

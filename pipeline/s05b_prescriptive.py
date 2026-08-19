@@ -1,7 +1,13 @@
 """
-s05b_perfect.py - finds the best lap and the best race, 2023 to 2026.
+s05b_prescriptive.py - the models behind "Prescribe a lap", 2023 to 2026.
 
 Runs between s05 and s06 so the existing publish command is unchanged.
+
+This file was s05b_perfect.py. The name changed with the page it feeds: the
+dashboard's fourth section is now Prescribe, the prescriptive layer, sitting
+after Analyse, Diagnose and Predict. Only the naming moved. Every model, filter
+and coefficient below is unchanged, and the four perfect_* tables further down
+keep their own names for the reason given at ON_REQUEST.
 
 Writes five tables straight into the dashboard bundle, dashboard/data/dashboard.db:
 
@@ -85,9 +91,9 @@ READ-ONLY ON SILVER AND BRONZE. gold_f1.db is untouched.
 
 Usage
 -----
-    python pipeline\\s05b_perfect.py
-    python pipeline\\s05b_perfect.py --tables perfect_lap
-    python pipeline\\s05b_perfect.py --top 200
+    python pipeline\\s05b_prescriptive.py
+    python pipeline\\s05b_prescriptive.py --tables perfect_lap
+    python pipeline\\s05b_prescriptive.py --top 200
 
 Requires the pinned Anaconda environment. See NOTES_LOG #42.
 """
@@ -1166,7 +1172,7 @@ BUNDLED = ["lap_factor_anova", "lap_factor_model", "lap_factor_reference",
 # quoted, bare), across the app, the pipeline and the notebooks.
 #
 # They were kept for a while on the grounds that a choose-a-lap feature would
-# want them. That feature exists now. views/perfect.py was built on fact_lap,
+# want them. That feature exists now. views/prescribe.py was built on fact_lap,
 # the map geometry and the lap_factor_* tables instead, so the reader these were
 # waiting for arrived and did not use them. 3,157 rows and 793 KB were being
 # written every run for nobody.
@@ -1175,7 +1181,13 @@ BUNDLED = ["lap_factor_anova", "lap_factor_model", "lap_factor_reference",
 # keeping unreferenced code is a great deal lower than rewriting it. They are
 # reachable on request:
 #
-#     python pipeline\s05b_perfect.py --tables perfect_lap
+#     python pipeline\s05b_prescriptive.py --tables perfect_lap
+#
+# THEIR NAMES DID NOT CHANGE when this file became s05b_prescriptive.py, and
+# that is deliberate rather than an oversight. These four rank the fastest lap
+# and the best race ever recorded. A superlative is a descriptive question, not
+# a prescriptive one, and nothing prescribes anything here. Renaming them to
+# match the file would put a wrong label on a right thing.
 #
 # which writes CSV to serving.ANALYSIS_DIR. A plain run writes only BUNDLED.
 ON_REQUEST = ["perfect_lap", "perfect_lap_model", "perfect_lap_record",

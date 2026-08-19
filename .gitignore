@@ -139,6 +139,38 @@ data/
 *.db-wal
 
 
+# Secrets
+#
+# Nothing here exists yet, and that is the point: these rules are in place
+# BEFORE the file is created, because the dangerous window is between writing a
+# credential and noticing it was staged. Checked when added: no tracked file
+# matches any of these patterns, so nothing was un-tracked by adding them.
+#
+# .streamlit/secrets.toml is the one that matters most. That folder IS tracked,
+# on purpose, because config.toml holds the theme and the app opens in the wrong
+# colours without it. So the folder is not ignored wholesale and the secrets file
+# has to be named on its own line. It is Streamlit's standard home for API keys
+# and database passwords, and every tutorial tells you to put credentials there.
+.streamlit/secrets.toml
+
+# .env is already listed under Environments below, but the bare name does not
+# match .env.local or .env.production, which are the ones a framework generates.
+.env.*
+!.env.example
+
+# Private keys and certificates.
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Where git, curl and the GitHub CLI cache a token. s06_publish reads
+# GITHUB_TOKEN from the environment and never writes it to disk, but a tool run
+# by hand in this folder can leave one of these behind.
+.netrc
+_netrc
+.git-credentials
+
 # Environments
 .env
 .venv
@@ -220,7 +252,7 @@ tree.txt
 # snapshot to pipeline/, where it is tracked on purpose: it is the gate's baseline
 # and a baseline that is not committed resets to nothing on a fresh clone.
 # outputs/analysis/ is still created on demand by
-# `s05b_perfect.py --tables perfect_lap`, and caught by the *.csv rule above.
+# `s05b_prescriptive.py --tables perfect_lap`, and caught by the *.csv rule above.
 
 # Dashboard bundle. dashboard.db is caught by the *.db rule above; the gzip is
 # not, and it must stay out of git. s06 publishes it as a GitHub Release asset

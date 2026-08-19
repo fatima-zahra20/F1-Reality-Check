@@ -101,11 +101,11 @@ DB_TABLES = {
     "diag_coefficients": "s05_diagnostic",
     "diag_groups": "s05_diagnostic",
     "diag_points": "s05_diagnostic",
-    "lap_factor_anova": "s05b_perfect",
-    "lap_factor_model": "s05b_perfect",
-    "lap_factor_reference": "s05b_perfect",
-    "lap_counterfactual_model": "s05b_perfect",
-    "lap_counterfactual_bounds": "s05b_perfect",
+    "lap_factor_anova": "s05b_prescriptive",
+    "lap_factor_model": "s05b_prescriptive",
+    "lap_factor_reference": "s05b_prescriptive",
+    "lap_counterfactual_model": "s05b_prescriptive",
+    "lap_counterfactual_bounds": "s05b_prescriptive",
     "map_circuit_outline": "s05c_racemap",
     "map_measured_xy": "s05c_racemap",
     "map_coverage": "s05c_racemap",
@@ -121,7 +121,8 @@ DB_TABLES = {
 # on fact_lap plus the geometry in map_measured_xy instead.
 #
 # They are no longer written at all unless named on --tables, and then only as
-# CSV under outputs/analysis/. The list lives in s05b_perfect.ON_REQUEST, next
+# CSV under outputs/analysis/. The list lives in s05b_prescriptive.ON_REQUEST,
+# next
 # to the code that writes them, and is deliberately NOT repeated here. It used
 # to be, and a name in two places is a name that can disagree with itself: the
 # same duplication left a dangling entry in the index list below and broke a
