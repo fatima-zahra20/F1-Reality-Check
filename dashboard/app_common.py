@@ -66,6 +66,12 @@ LOCAL_DB = APP_DIR / "data" / "dashboard.db"
 # Fallback for teams whose colour is missing in the source data.
 NEUTRAL = "#8A8A94"
 
+# Written out rather than taken from strftime("%B"), which formats in the
+# server's locale. The dashboard is in English everywhere else and should not
+# start speaking another language because of where it happens to be hosted.
+MONTHS = ("January", "February", "March", "April", "May", "June", "July",
+          "August", "September", "October", "November", "December")
+
 
 # --- data -----------------------------------------------------------------
 
@@ -372,13 +378,32 @@ def data_vintage() -> str:
     try:
         row = query("SELECT MAX(race_date) AS latest, COUNT(*) AS races "
                     "FROM dim_race")
-        latest = pd.to_datetime(row.latest.iloc[0])
-        if pd.isna(latest):
+        if not len(row):
             return ""
-        # lstrip("0") so a single-digit day reads "6 June" rather than "06 June".
-        return (f"Data through {latest.strftime('%d %B %Y').lstrip('0')}, "
-                f"{int(row.races.iloc[0])} races")
-    except Exception:
+        raw = row.latest.iloc[0]
+        races = int(row.races.iloc[0])
+        if raw is None or (isinstance(raw, float) and raw != raw):
+            return ""
+
+        # PARSED BY HAND, not by pandas, and not formatted with strftime.
+        #
+        # This returned the right sentence locally and an empty one on Streamlit
+        # Cloud, which runs a different Python and a different pandas against
+        # the same data. The two candidates were pd.to_datetime's handling of a
+        # tz-aware ISO string and strftime's %B, which is locale dependent and
+        # therefore not guaranteed to be English on someone else's machine.
+        #
+        # race_date is stored as ISO 8601 and always starts YYYY-MM-DD, so the
+        # first ten characters are all this needs. Slicing them removes both
+        # candidates at once and cannot behave differently on another host.
+        stamp = str(raw)[:10]
+        year, month, day = (int(p) for p in stamp.split("-"))
+        return (f"Data through {day} {MONTHS[month - 1]} {year}, "
+                f"{races} races")
+    except Exception as exc:
+        # Degrades to no line, but says why in the server log. Swallowing this
+        # silently is what turned a one-line bug into an evening of guessing.
+        print(f"[data_vintage] {type(exc).__name__}: {exc}")
         return ""
 
 
