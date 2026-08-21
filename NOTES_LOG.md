@@ -1255,6 +1255,178 @@ read `Air {..}Â°C, track {..}Â°C`, a UTF-8 degree sign decoded once as latin
 the whole dashboard swept for `Â`, `Ã` and the replacement character: clean.
 
 
+### 57. What breaks when the data contains something new
+
+*2026-08-21. Pre-ship work, completing the responsiveness thread. #55 made the analysis
+follow the data and #56 made the prose follow it; this asks what happens when the data
+contains a shape the code has never met.*
+
+**The audit.** 68 `.iloc[0]` sites and 33 `min`/`max`/`idxmax` calls across the dashboard,
+narrowed by a script that looks for an emptiness guard naming the same variable. The first
+pass flagged 47 and was wrong about most of them: the common shape here is an inline
+ternary, `x.iloc[0] if len(x) else default`, which a backwards-only window cannot see.
+Widening it to include the line itself cut the list to 26, and reading those left **two**.
+
+That ratio is the real result. This codebase already guards nearly everything, and both
+survivors are cases where the guard was somewhere the pattern could not reach.
+
+**One: an inner join that loses races silently.** `views/prescribe.py` merged `dim_race`
+against `map_coverage` on the pandas default, `how="inner"`. `dim_race` comes from s04 and
+`map_coverage` from s05c, built by different steps from different sources, with nothing
+requiring them to agree. A race the first knows about and the second does not simply
+**vanishes from the picker**: no warning, no gap, a season quietly one race short.
+
+Now a left join. The subtle half is the fill: `bool(nan)` is True, so `not race.has_outline`
+is FALSE for a missing value, and an unfilled column would have sent exactly the races with
+no coverage into the map-drawing branch they were meant to skip. Filled to a real 0, they
+land in the "no track map for this circuit" path the page already had.
+
+Verified by inserting a race into a COPY of the bundle and running both joins: inner
+returns 81 rows without it, left returns 82 with `has_outline == 0` and a usable note.
+
+**Two: `int()` of a NaN on the first line of a page.** `views/diagnose.py` opened with
+`int(tests.n.max())` in its caption. An empty `diag_tests`, or an all-null `n`, raises
+ValueError, and because it sits above everything the whole page becomes a traceback rather
+than losing one number. Confirmed both ways on a copy: the old expression raises, the new
+one degrades to "every observation available to it".
+
+**Checked and found already safe**, which is worth recording so it is not re-audited: team
+colours are reached only through `.get(name, NEUTRAL)`, never by subscript; the compound
+picker tests membership before `index()`; the team selector resets session state when a
+team did not enter a race; `story_race` guards grid, intervals, pit stops and radio before
+touching them; and `home.py` wraps its counts in try/except. There is exactly one `.merge`
+in the dashboard, which is why finding it mattered.
+
+**Not fixed, deliberately:** `analyse.py:43` renders "0 races, nan-nan" if `dim_race` is
+empty. That is a broken bundle rather than new data, `app_common` already refuses to open
+one missing its core tables, and a page whose every number would be empty is not made
+better by tidying its subtitle.
+
+
+### 58. The data says when it stops
+
+*2026-08-21. Small, and the last of the pre-ship work.*
+
+`render_footer` now carries a line reading **"Data through 26 July 2026, 81 races"**, on
+every page, computed from `MAX(race_date)`.
+
+Two reasons, and the second earned it. For a reader, it dates everything above it: a
+dashboard that states findings without saying where the data stops invites being read as
+current forever, and any sentence #56 missed is now at least read against a date instead
+of as a claim about today. For the author, it is the only way to see what the deployed app
+is actually serving. Confirming a publish had landed used to mean rebooting and hoping,
+because a page showing last month's bundle looks exactly like a page showing this week's.
+
+Returns an empty string rather than raising, and the footer renders without it. This runs
+at the bottom of every page including ones already reporting a problem, and a footer is
+never worth an error.
+
+Deliberately the latest **race** date rather than a build timestamp: it answers "which
+races are in here", which is the question a reader has. It does not distinguish a
+republish that only refitted models, and that is a real limit rather than an oversight.
+
+
+### 59. The reference lap becomes a decision, not a computation
+
+*2026-08-21. Closes the user-visible half of open question G. The cause remains unknown.*
+
+**The measured baseline first, because the old entry was too kind about it.** Six runs of
+`s05c` on unchanged inputs: **four distinct geometry hashes**, and on one of them Suzuka
+produced **no outline at all**. Not a different good lap, no map. A visitor picking Suzuka
+would have been told the circuit has no track map.
+
+**What did not work.** Everything open question G proposed as its next step: an explicit
+total order over candidates, sorted `pairs` so the query text cannot vary, a stable sort
+with unique tiebreakers, a fixed row order on the fetched positions. All implemented, all
+defensible, and the six runs still gave four answers. The one genuine bug found along the
+way, an unstable sort that changed which six candidates survived `head()`, is fixed and
+was not the cause.
+
+**What worked: stop choosing.** `circuit_outline_source.json` records which session,
+driver and lap each circuit's outline is traced from. It is committed, read on every run,
+and `--repick` is the only thing that rewrites it.
+
+Which lap best represents a circuit is a **decision**, not a computation. `circuit_north.json`
+already worked this way in this same module, and its reasoning transfers exactly: a
+constant should not be re-derived on every run, because re-deriving it is a chance to get a
+different answer. This is better design than what preceded it, not a workaround bolted on
+top of a bug.
+
+**Three safeguards, because pinning alone was not enough:**
+
+A pinned lap that is **no longer a candidate** means the data behind it changed. That is
+said loudly and the circuit is re-chosen, because a pin that stops matching is a fact
+worth hearing.
+
+A pinned lap that **fails to trace on a given run** falls back to the best available lap
+rather than skipping the circuit. This one was caught before the test could find it:
+Melbourne's pinned lap is *one of the four known-unstable candidates*, and without the
+fallback a bad run would have left Melbourne with no map. That would have been a worse
+regression than the instability being fixed. It logs a WARN, because a fallback is the one
+remaining way two runs could differ and must not be absorbed silently.
+
+A normal run **can never rewrite the pins**. Otherwise the file would quietly absorb
+whatever that run happened to choose, and pinning would mean nothing.
+
+**Verified:** six runs in separate processes, `distinct geometry hashes: 1`, `distinct
+source hashes: 1`. 24 of 24 circuits traced from their pinned lap with no fallbacks, 81 of
+81 races mapped.
+
+**What this unblocks.** "Run it twice and diff it" works on this step again, which is the
+technique the rest of the project is built on, and automatic publishing becomes safe to
+turn on. Question G itself stays open: the sample-count flapping is real, unexplained, and
+now unable to reach the bundle.
+
+
+### 60. Two things a page reload got wrong
+
+*2026-08-21. Both reported from use, which is why neither showed up in any check here.*
+
+**Nothing survived a refresh.** Every choice lived in `st.session_state`, and a reload
+starts a NEW session, so the theme snapped back to light and every picker went back to its
+default. The URL is the one thing a reload carries, so that is where the state now lives.
+
+`url_state.py` does it generally: `restore` seeds session state from the query string
+before a widget is built, `remember` writes it back after. Both pages use it for season,
+race, story, section, driver, team, lap, sector and view. The theme writes **both** values
+rather than only `dark`, because recording only the non-default spells "light" as an
+absent parameter, and an absent parameter is also what a first visit looks like. Choosing
+light and reloading would then land on light by accident rather than by instruction.
+
+**A restored value is checked against the real options.** A query string is user input: it
+can be edited, a link can go stale, and a race that existed last month may not be in the
+picker today. Handing a selectbox a value that is not among its options raises and takes
+the page down, so a value that does not belong is dropped and the widget falls back to its
+default. `None` round-trips as an empty parameter, because "All cars" is a chosen state
+rather than an absent one, and an empty value only becomes `None` where `None` is
+genuinely an option.
+
+Two theme details took a second pass. `active()` settles the value once per session
+including the light default, because leaving it unset makes "never chosen"
+indistinguishable from "chose light", and the switch then reruns on every first load
+trying to apply a theme that was already correct. And `_sync_chrome` compares against the
+LIVE config rather than remembering what this session last wrote, because config is
+process wide and another visitor's flip can move it underneath: reading the real value
+makes it self correcting, and returning False when it already matches is what keeps a
+fresh session from paying for a pointless rerun.
+
+**Both race pickers opened on the wrong race.** `dim_race` is queried `ORDER BY year DESC,
+round`, so within a season the rounds run ASCENDING and `options[0]` is round 1. Analyse
+and Prescribe therefore both opened on the OLDEST race of the newest season. The season
+picker was right, which is what made it look deliberate rather than broken.
+
+`options[-1]` in `analyse.py`, `iloc[-1]` in `prescribe.py`. Checked against dates rather
+than assumed: every season's final round is also its latest date, 2026 to Hungary, and
+2023 to 2025 each to Abu Dhabi.
+
+**A side effect worth having:** a link now reopens on the race, driver and lap the sender
+was looking at, which a screenshot cannot do.
+
+**Not carried:** the counterfactual sliders on Prescribe. They are a scratchpad rather
+than a position in the data, and putting a dozen lever values in the address bar would
+cost more legibility than it returns.
+
+
 ## Open questions
 
 ### A. `caution_flag` under-detects Safety Car periods
@@ -1312,7 +1484,9 @@ Circuit has essentially no effect on median stop duration, but circuit-specific
 extreme opposites would be a targeted analysis worth running during feature engineering.
 
 ### G. `s05c_racemap` does not reproduce itself
-*Raised 2026-08-14*
+*Raised 2026-08-14. OUTPUT STABILISED 2026-08-21, see #59. The cause below is still
+not understood, so this stays open; what changed is that it no longer reaches the
+bundle. Everything from here to "Next step" is the original entry, kept for the trail.*
 
 Running the pipeline twice on unchanged inputs gives a different `map_circuit_outline`.
 Every other table in the bundle is byte-identical across runs; this one is not.
@@ -1359,3 +1533,44 @@ by finding the mechanism. Evaluate all candidates and select on an explicit tota
 (sample count, then session_key, driver_number, lap_number) instead of taking the first
 that traces, and replace the `pairs` set with a sorted list so the query text cannot vary.
 Then run `s05c` four or more times and require one distinct geometry hash.
+
+---
+
+**2026-08-21. That next step was tried and DID NOT WORK.** All of it was implemented: the
+total order, the sorted `pairs`, a stable sort with unique tiebreakers on the candidate
+list, and a deterministic order imposed on the fetched rows. Six runs then produced **four
+distinct geometry hashes**. The prediction in that paragraph was wrong, and it is left
+above rather than edited so the wrong guess stays visible.
+
+**One real bug was found on the way**, and it is fixed regardless: `pick_trace_candidates`
+sorted on three keys with pandas' default quicksort, which is not stable. A tie there does
+not merely reorder candidates, it changes WHICH SIX survive the `head(MAX_TRACE_ATTEMPTS)`.
+It was not the cause, but it was wrong.
+
+**The measurement that narrows it.** A diagnostic dumped every intermediate stage of two
+separate processes and compared them:
+
+| stage | agrees? |
+|---|---|
+| circuit list, sessions, candidate laps, candidate order | same |
+| query text | same |
+| position rows: count, content hash, order hash | **same** (4,545,724 rows) |
+| per-candidate sample counts | **DIFFERS**, 4 of 144 |
+| chosen lap, final geometry | same, in that pair |
+
+So the position data is byte-identical and the candidate laps are byte-identical, and yet
+`lap_segment`, a plain boolean mask over that data, counted a different number of rows.
+Not slightly different: **all or nothing**. A lap with 310 samples in one run had **zero**
+in the next, and the flips swap between a small fixed set of sessions rather than
+scattering. That is the whole remaining mystery, and it contradicts the "no candidate
+should ever be rejected" bullet above, which was measured on a run where they all passed.
+
+**The entry above understated the severity.** The unpinned six-run baseline dropped
+Suzuka's outline **entirely** on one run, not merely tracing it from a different lap. A
+circuit with no outline shows "No track map for this circuit" to a visitor, so this was
+user-visible after all, which the original "why it is not urgent" paragraph got wrong.
+
+**Still open:** why identical inputs give different sample counts. The flips cluster in a
+few sessions, which suggests something specific about those laps, perhaps a timestamp at
+an exact boundary, rather than general noise. Worth pulling on, and no longer blocking
+anything.

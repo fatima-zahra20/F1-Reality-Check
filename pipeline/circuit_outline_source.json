@@ -1,0 +1,198 @@
+{
+ "generated_at": "2026-08-21T17:12:37.822953+00:00",
+ "note": "Which lap each circuit's outline is traced from. Read on every run so the geometry reproduces exactly. Rewritten only by s05c_racemap.py --repick. See open question G.",
+ "circuits": [
+  {
+   "circuit_key": 2,
+   "circuit_short_name": "Silverstone",
+   "session_key": 9940,
+   "driver_number": 6,
+   "lap_number": 17,
+   "source_session": "2025 Practice 1"
+  },
+  {
+   "circuit_key": 4,
+   "circuit_short_name": "Hungaroring",
+   "session_key": 9129,
+   "driver_number": 44,
+   "lap_number": 16,
+   "source_session": "2023 Qualifying"
+  },
+  {
+   "circuit_key": 6,
+   "circuit_short_name": "Imola",
+   "session_key": 9511,
+   "driver_number": 16,
+   "lap_number": 20,
+   "source_session": "2024 Qualifying"
+  },
+  {
+   "circuit_key": 7,
+   "circuit_short_name": "Spa-Francorchamps",
+   "session_key": 9930,
+   "driver_number": 4,
+   "lap_number": 8,
+   "source_session": "2025 Sprint Qualifying"
+  },
+  {
+   "circuit_key": 9,
+   "circuit_short_name": "Austin",
+   "session_key": 9608,
+   "driver_number": 4,
+   "lap_number": 13,
+   "source_session": "2024 Qualifying"
+  },
+  {
+   "circuit_key": 10,
+   "circuit_short_name": "Melbourne",
+   "session_key": 9689,
+   "driver_number": 81,
+   "lap_number": 9,
+   "source_session": "2025 Qualifying"
+  },
+  {
+   "circuit_key": 14,
+   "circuit_short_name": "Interlagos",
+   "session_key": 9631,
+   "driver_number": 1,
+   "lap_number": 11,
+   "source_session": "2024 Sprint Qualifying"
+  },
+  {
+   "circuit_key": 15,
+   "circuit_short_name": "Catalunya",
+   "session_key": 9535,
+   "driver_number": 63,
+   "lap_number": 15,
+   "source_session": "2024 Qualifying"
+  },
+  {
+   "circuit_key": 19,
+   "circuit_short_name": "Spielberg",
+   "session_key": 9541,
+   "driver_number": 1,
+   "lap_number": 17,
+   "source_session": "2024 Qualifying"
+  },
+  {
+   "circuit_key": 22,
+   "circuit_short_name": "Monte Carlo",
+   "session_key": 9974,
+   "driver_number": 4,
+   "lap_number": 20,
+   "source_session": "2025 Practice 3"
+  },
+  {
+   "circuit_key": 23,
+   "circuit_short_name": "Montreal",
+   "session_key": 9958,
+   "driver_number": 63,
+   "lap_number": 9,
+   "source_session": "2025 Practice 3"
+  },
+  {
+   "circuit_key": 39,
+   "circuit_short_name": "Monza",
+   "session_key": 9908,
+   "driver_number": 81,
+   "lap_number": 15,
+   "source_session": "2025 Qualifying"
+  },
+  {
+   "circuit_key": 46,
+   "circuit_short_name": "Suzuka",
+   "session_key": 9492,
+   "driver_number": 4,
+   "lap_number": 9,
+   "source_session": "2024 Qualifying"
+  },
+  {
+   "circuit_key": 49,
+   "circuit_short_name": "Shanghai",
+   "session_key": 9994,
+   "driver_number": 1,
+   "lap_number": 14,
+   "source_session": "2025 Qualifying"
+  },
+  {
+   "circuit_key": 55,
+   "circuit_short_name": "Zandvoort",
+   "session_key": 9916,
+   "driver_number": 1,
+   "lap_number": 17,
+   "source_session": "2025 Qualifying"
+  },
+  {
+   "circuit_key": 61,
+   "circuit_short_name": "Singapore",
+   "session_key": 9599,
+   "driver_number": 1,
+   "lap_number": 12,
+   "source_session": "2024 Practice 1"
+  },
+  {
+   "circuit_key": 63,
+   "circuit_short_name": "Sakhir",
+   "session_key": 7953,
+   "driver_number": 4,
+   "lap_number": 50,
+   "source_session": "2023 Race"
+  },
+  {
+   "circuit_key": 65,
+   "circuit_short_name": "Mexico City",
+   "session_key": 9873,
+   "driver_number": 16,
+   "lap_number": 16,
+   "source_session": "2025 Qualifying"
+  },
+  {
+   "circuit_key": 70,
+   "circuit_short_name": "Yas Marina Circuit",
+   "session_key": 9835,
+   "driver_number": 81,
+   "lap_number": 5,
+   "source_session": "2025 Qualifying"
+  },
+  {
+   "circuit_key": 144,
+   "circuit_short_name": "Baku",
+   "session_key": 9594,
+   "driver_number": 55,
+   "lap_number": 22,
+   "source_session": "2024 Qualifying"
+  },
+  {
+   "circuit_key": 149,
+   "circuit_short_name": "Jeddah",
+   "session_key": 7779,
+   "driver_number": 14,
+   "lap_number": 50,
+   "source_session": "2023 Race"
+  },
+  {
+   "circuit_key": 150,
+   "circuit_short_name": "Lusail",
+   "session_key": 9841,
+   "driver_number": 4,
+   "lap_number": 14,
+   "source_session": "2025 Sprint Qualifying"
+  },
+  {
+   "circuit_key": 151,
+   "circuit_short_name": "Miami",
+   "session_key": 10024,
+   "driver_number": 16,
+   "lap_number": 15,
+   "source_session": "2025 Sprint Qualifying"
+  },
+  {
+   "circuit_key": 152,
+   "circuit_short_name": "Las Vegas",
+   "session_key": 9314,
+   "driver_number": 55,
+   "lap_number": 22,
+   "source_session": "2023 Qualifying"
+  }
+ ]
+}

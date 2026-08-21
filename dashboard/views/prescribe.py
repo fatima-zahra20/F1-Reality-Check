@@ -40,6 +40,7 @@ import lap_counterfactual as cf  # noqa: E402
 import lap_factors as lf  # noqa: E402
 import race_map as rm  # noqa: E402
 import theme  # noqa: E402
+import url_state  # noqa: E402
 from app_common import query, render_footer, team_colours  # noqa: E402
 from story_common import guide  # noqa: E402
 
@@ -67,17 +68,43 @@ races = query("""
            total_laps, circuit_type
     FROM dim_race ORDER BY year DESC, round
 """)
+# LEFT, not the default inner. An inner join silently DROPS any race that
+# dim_race knows about and map_coverage does not, so the race disappears from
+# the picker with nothing said: no warning, no gap, just a season quietly one
+# race short. The two tables are built by different steps (s04 and s05c) from
+# different sources, so nothing guarantees they agree, and the failure they can
+# produce together is invisible.
+#
+# The page already knows how to say "no track map for this circuit". A left
+# join routes a missing coverage row into that existing path instead of into a
+# vanishing act.
 races = races.merge(cover[["session_key", "circuit_key", "has_outline",
                            "has_measured_xy", "map_note", "north_rotation"]],
-                    on="session_key")
+                    on="session_key", how="left")
+
+# has_outline must end up a real 0/1: `not race.has_outline` is FALSE for NaN,
+# because bool(nan) is True, so an unfilled column would send a race with no
+# coverage straight into the map-drawing branch it was meant to skip.
+races["has_outline"] = races.has_outline.fillna(0).astype(int)
+races["has_measured_xy"] = races.has_measured_xy.fillna(0).astype(int)
+races["map_note"] = races.map_note.fillna(
+    "This race is not in the map coverage table, so no outline was traced "
+    "for it. Everything else on this page still works.")
 
 c1, c2 = st.columns([1, 3])
 years = sorted(races.year.unique(), reverse=True)
+# Restored before the widget: Streamlit reads session_state when it builds one,
+# so seeding it afterwards would be a rerun too late.
+url_state.restore("prescribe_year", int, valid=set(years))
 year = c1.selectbox("Season", years, key="prescribe_year")
 
 in_year = races[races.year == year].reset_index(drop=True)
+url_state.restore("prescribe_race", int, valid=set(in_year.session_key))
+# iloc[-1], NOT iloc[0]. The query orders year DESC then round, so within a
+# season the rounds ascend and iloc[0] is round 1: the page opened on the
+# oldest race of the newest season. The last row is the most recent round.
 if st.session_state.get("prescribe_race") not in set(in_year.session_key):
-    st.session_state["prescribe_race"] = int(in_year.session_key.iloc[0])
+    st.session_state["prescribe_race"] = int(in_year.session_key.iloc[-1])
 
 session_key = c2.selectbox(
     "Race", in_year.session_key, key="prescribe_race",
@@ -105,8 +132,14 @@ if not len(laps):
 
 max_lap = int(laps.lap_number.max())
 p1, p2, p3 = st.columns([1, 1, 2])
+
+# Each restored against what this race actually offers. A lap number from a
+# longer race, or a driver who did not start this one, would otherwise be handed
+# to a widget that cannot show it, which raises rather than degrading.
+url_state.restore("prescribe_lap_no", int, valid=range(1, max_lap + 1))
 lap_number = p1.number_input("Lap", min_value=1, max_value=max_lap, value=1,
                              step=1, key="prescribe_lap_no")
+url_state.restore("prescribe_sector", str, valid=rm.SECTOR_CHOICES)
 sector_label = p2.selectbox("Sector", rm.SECTOR_CHOICES, index=1,
                             key="prescribe_sector")
 sector = None if sector_label == rm.SECTOR_CHOICES[0] else int(sector_label[-1])
@@ -115,6 +148,9 @@ drivers = (laps[["driver_number", "driver"]].drop_duplicates()
                                             .sort_values("driver"))
 options = [None] + drivers.driver_number.tolist()
 names = dict(zip(drivers.driver_number, drivers.driver))
+# None is "All cars", a real choice rather than an absent one, so it round-trips
+# through the URL as an empty value.
+url_state.restore("prescribe_driver", int, valid=options)
 focus = p3.selectbox("Driver", options, key="prescribe_driver",
                      format_func=lambda d: "All cars" if d is None else names[d])
 
@@ -139,6 +175,7 @@ else:
         cars, n_measured = rm.apply_measured(
             cars, rm.measured_positions(int(session_key)), moment)
 
+    url_state.restore("prescribe_view", str, valid=["3D elevation", "Flat"])
     view = st.radio("View", ["3D elevation", "Flat"], horizontal=True,
                     key="prescribe_view",
                     disabled=not solid,
@@ -539,6 +576,7 @@ else:
             before[t] = derived.get(t, before.get(t))
         before["lap_number"] = lap3.lap_number
 
+        url_state.restore("cf_widen", url_state.as_bool, valid=(True, False))
         widen = st.toggle(
             "Allow values from any race, not just this one",
             value=False, key="cf_widen",
@@ -580,17 +618,23 @@ else:
             for i, (term, label, kind, unit) in enumerate(levers):
                 col = cols[i % 3]
                 current = before.get(term)
+                key = f"cf_{term}"
                 if kind == "choice":
                     opts = cf.COMPOUNDS
                     idx = (opts.index(current)
                            if isinstance(current, str) and current in opts
                            else 0)
-                    after[term] = col.selectbox(label, opts, index=idx,
-                                                key=f"cf_{term}")
+                    url_state.restore(key, str, valid=opts)
+                    after[term] = col.selectbox(label, opts, index=idx, key=key)
                 elif kind == "flag":
+                    # valid pins it to a real bool. An empty parameter means
+                    # None, which is right for "All cars" and wrong for a
+                    # checkbox, which has no third state.
+                    url_state.restore(key, url_state.as_bool,
+                                      valid=(True, False))
                     after[term] = float(col.checkbox(
                         f"{label}", value=bool(current and float(current) >= 0.5),
-                        key=f"cf_{term}", help=unit))
+                        key=key, help=unit))
                 else:
                     lim = cf.limits(cbounds, term, widen)
                     if lim is None or pd.isna(current):
@@ -600,13 +644,26 @@ else:
                     lo, hi = lim
                     value = float(min(max(float(current), lo), hi))
                     if kind == "int":
+                        lo_i, hi_i = int(lo), int(hi)
+                        # Bounds, not membership: a slider's range is continuous.
+                        # The clamp is for a range that has SHRUNK, which happens
+                        # with no URL involved when the widen toggle goes off
+                        # under a value only the wide range allowed.
+                        url_state.restore(
+                            key, int,
+                            valid=lambda v, a=lo_i, b=hi_i: a <= v <= b)
+                        url_state.clamp(key, lo_i, hi_i)
                         after[term] = float(col.slider(
-                            f"{label} ({unit})", int(lo), int(hi), int(value),
-                            key=f"cf_{term}"))
+                            f"{label} ({unit})", lo_i, hi_i, int(value),
+                            key=key))
                     else:
+                        lo_f, hi_f = float(lo), float(hi)
+                        url_state.restore(
+                            key, float,
+                            valid=lambda v, a=lo_f, b=hi_f: a <= v <= b)
+                        url_state.clamp(key, lo_f, hi_f)
                         after[term] = float(col.slider(
-                            f"{label} ({unit})", float(lo), float(hi), value,
-                            key=f"cf_{term}"))
+                            f"{label} ({unit})", lo_f, hi_f, value, key=key))
 
         parts = cf.evaluate(cmodel, before, after, circuit_name)
         moved = float(parts.seconds.sum())
@@ -667,5 +724,18 @@ else:
             "the lap unchanged."
             + resid_note
         )
+
+# Written after every widget on the page has rendered, so session_state holds
+# what the reader actually chose rather than what it held on arrival. This is
+# what makes a reload, a bookmark and a shared link all reopen on the same race,
+# driver and lap.
+url_state.remember("prescribe_year", "prescribe_race", "prescribe_lap_no",
+                   "prescribe_sector", "prescribe_driver", "prescribe_view",
+                   "cf_widen",
+                   # Levers only exist once a driver and a traceable lap are
+                   # picked, so most runs will not have set them. remember()
+                   # skips keys with no value rather than writing them empty.
+                   *[f"cf_{t}" for t, _l, _k, _u
+                     in cf.CHOICE_LEVERS + cf.CONDITION_LEVERS])
 
 render_footer()

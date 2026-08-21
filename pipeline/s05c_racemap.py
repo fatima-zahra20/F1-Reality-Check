@@ -174,14 +174,22 @@ def pick_trace_candidates(silver, loc_sessions: pd.DataFrame,
     best = laps.groupby("circuit_key")["lap_duration"].transform("min")
     laps = laps[laps.lap_duration <= 1.15 * best]
 
-    laps = laps.sort_values(["circuit_key", "pref", "lap_duration"])
-    return laps.groupby("circuit_key").head(MAX_TRACE_ATTEMPTS).reset_index(drop=True)
+    # A total order, and a stable sort to apply it. Three keys left ties
+    # possible, and a tie decided by whatever order the rows happened to be in
+    # changes WHICH SIX laps survive the head() below, not just their order.
+    # session_key, driver_number and lap_number are unique together, so nothing
+    # reaches the end still tied.
+    laps = laps.sort_values(["circuit_key", "pref", "lap_duration",
+                             "session_key", "driver_number", "lap_number"],
+                            kind="mergesort")
+    return laps.groupby("circuit_key", sort=True) \
+               .head(MAX_TRACE_ATTEMPTS).reset_index(drop=True)
 
 
 # --- the single bronze scan ------------------------------------------------------
 
-def fetch_positions(bronze, pairs: set[tuple[int, int]],
-                    whole_sessions: set[int]) -> pd.DataFrame:
+def fetch_positions(bronze, pairs: list[tuple[int, int]],
+                    whole_sessions: list[int]) -> pd.DataFrame:
     """
     One pass over location for everything this module needs.
 
@@ -189,6 +197,13 @@ def fetch_positions(bronze, pairs: set[tuple[int, int]],
     tracing; `whole_sessions` are sessions wanted in full, for the measured
     race. Both go into a single WHERE so the 25.8M-row table is scanned once
     rather than once per circuit.
+
+    BOTH ARRIVE AS SORTED SEQUENCES, NOT SETS, and that is load-bearing rather
+    than tidiness. Iterating a set to build the OR clauses meant the query TEXT
+    could differ between runs while describing exactly the same rows. Different
+    text is a different query plan, a different plan is a different row order,
+    and everything downstream that resolves a tie by position then resolves it
+    differently. See open question G.
     """
     clauses = []
     if pairs:
@@ -213,7 +228,14 @@ def fetch_positions(bronze, pairs: set[tuple[int, int]],
     df["session_key"] = df["session_key"].astype(int)
     df["driver_number"] = df["driver_number"].astype(int)
     df["date"] = pd.to_datetime(df["date"], format="ISO8601", utc=True)
-    return df
+
+    # Sorted here, once, rather than trusted from SQLite. The query carries no
+    # ORDER BY, so its row order is whatever the plan happened to produce, and
+    # 4.5M rows is cheap to order in memory. mergesort because it is the stable
+    # one: samples sharing a timestamp keep a fixed relative order instead of
+    # an arbitrary one.
+    return df.sort_values(["session_key", "driver_number", "date"],
+                          kind="mergesort").reset_index(drop=True)
 
 
 # --- tracing ---------------------------------------------------------------------
@@ -273,15 +295,28 @@ def resample_path(x: np.ndarray, y: np.ndarray, z: np.ndarray, t: np.ndarray,
     })
 
 
-def trace_outline(pos: pd.DataFrame, lap: pd.Series) -> pd.DataFrame:
-    """The x/y path of one lap, respaced. Empty when the lap is too gappy."""
+def lap_segment(pos: pd.DataFrame, lap) -> tuple[pd.DataFrame, pd.Timestamp]:
+    """
+    The position samples falling inside one lap, and that lap's start.
+
+    The single definition of "which samples belong to this lap". Scoring a
+    candidate and tracing it must agree exactly, and they only agree for
+    certain if they are the same code.
+
+    No sort here: `pos` arrives ordered by session, driver and time from
+    fetch_positions, and a boolean mask preserves that order.
+    """
     start = pd.to_datetime(lap.date_start, format="ISO8601", utc=True)
     end = start + pd.to_timedelta(float(lap.lap_duration), unit="s")
-
     seg = pos[(pos.session_key == lap.session_key)
               & (pos.driver_number == lap.driver_number)
-              & (pos.date >= start) & (pos.date <= end)].sort_values("date")
+              & (pos.date >= start) & (pos.date <= end)]
+    return seg, start
 
+
+def trace_outline(pos: pd.DataFrame, lap) -> pd.DataFrame:
+    """The x/y path of one lap, respaced. Empty when the lap is too gappy."""
+    seg, start = lap_segment(pos, lap)
     if len(seg) < MIN_OUTLINE_SAMPLES:
         return pd.DataFrame()
 
@@ -292,23 +327,134 @@ def trace_outline(pos: pd.DataFrame, lap: pd.Series) -> pd.DataFrame:
                          elapsed, OUTLINE_POINTS)
 
 
-def build_outlines(pos: pd.DataFrame, candidates: pd.DataFrame) -> pd.DataFrame:
-    """One outline per circuit, from the first candidate lap that traces."""
-    out = []
-    for circuit_key, laps in candidates.groupby("circuit_key"):
-        for lap in laps.itertuples():
-            path = trace_outline(pos, lap)
-            if path.empty:
+def pinned_choices() -> dict[int, tuple[int, int, int]]:
+    """
+    circuit_key -> (session_key, driver_number, lap_number), from the committed
+    file. Empty when the file is absent, which makes every circuit unpinned and
+    the run behave as it did before pinning existed.
+    """
+    if not PIN_PATH.exists():
+        return {}
+    payload = json.loads(PIN_PATH.read_text(encoding="utf-8"))
+    return {int(c["circuit_key"]): (int(c["session_key"]),
+                                    int(c["driver_number"]),
+                                    int(c["lap_number"]))
+            for c in payload["circuits"]}
+
+
+def build_outlines(pos: pd.DataFrame, candidates: pd.DataFrame,
+                   repick: bool = False) -> pd.DataFrame:
+    """
+    One outline per circuit, traced from a PINNED reference lap.
+
+    WHY THE LAP IS RECORDED RATHER THAN RE-CHOSEN. This step did not reproduce
+    itself. One or two circuits of 24 traced from a different reference lap per
+    run, and the geometry moved with it. Open question G chased that through
+    the candidate list, the query text, the fetched rows and the sort keys, and
+    proved the inputs identical by hash while the outputs still differed. The
+    mechanism is still not understood.
+
+    So the choice stopped being a computation. Which lap best represents a
+    circuit is a DECISION, and decisions belong in a file that is committed and
+    read, not re-made on every run. circuit_north.json already works exactly
+    this way in this module, for the same reason: a constant should not be
+    re-derived weekly, because re-deriving it is a chance to get a different
+    answer.
+
+    That makes the output stable whether or not the underlying flapping is ever
+    explained, which is what restores "run it twice and diff it" as a way to
+    check this project. The flapping itself remains open question G.
+
+    A circuit with no pin, which means a new one, is chosen here and reported so
+    it can be added to the file. --repick re-chooses every circuit deliberately.
+    Selection order is most samples first, because a denser lap draws a cleaner
+    outline, then session, driver and lap number, which are unique together and
+    so leave nothing tied.
+    """
+    def best_of(laps) -> tuple | None:
+        """Highest-scoring candidate that traces, or None if none does."""
+        scored = []
+        for cand in laps.itertuples():
+            seg, _ = lap_segment(pos, cand)
+            if len(seg) >= MIN_OUTLINE_SAMPLES:
+                scored.append(((-len(seg), int(cand.session_key),
+                                int(cand.driver_number),
+                                int(cand.lap_number)), cand))
+        if not scored:
+            return None
+        scored.sort(key=lambda item: item[0])
+        return scored[0][1]
+
+    pins = {} if repick else pinned_choices()
+    out, chosen, unpinned, fell_back = [], {}, [], []
+
+    for circuit_key, laps in candidates.groupby("circuit_key", sort=True):
+        circuit_key = int(circuit_key)
+        lap, path = None, pd.DataFrame()
+
+        pin = pins.get(circuit_key)
+        if pin is not None:
+            match = laps[(laps.session_key == pin[0])
+                         & (laps.driver_number == pin[1])
+                         & (laps.lap_number == pin[2])]
+            if len(match):
+                lap = next(match.itertuples())
+                path = trace_outline(pos, lap)
+            else:
+                # The pinned lap is no longer a candidate: the data behind it
+                # changed. Say so rather than silently choosing another, because
+                # a pin that stops matching is a fact about the data worth
+                # hearing, not a detail to paper over.
+                print(f"  [WARN] circuit {circuit_key}: pinned lap "
+                      f"{pin} is no longer a candidate; choosing again")
+
+        # A pin that does not trace THIS RUN must not cost the circuit its map.
+        # Some laps intermittently return no samples at all, which is open
+        # question G, and at least one pinned lap is known to be one of them.
+        # Falling back keeps a circuit that has a valid outline available from
+        # ever showing "no track map", which would be a worse regression than
+        # the instability this pinning exists to remove.
+        if path.empty:
+            if lap is not None:
+                fell_back.append(circuit_key)
+            lap = best_of(laps)
+            if lap is None:
                 continue
-            path["circuit_key"] = circuit_key
-            path["circuit_short_name"] = lap.circuit_short_name
-            path["source_session_key"] = lap.session_key
-            path["source_session"] = f"{lap.year} {lap.session_name}"
-            path["source_driver_number"] = lap.driver_number
-            path["source_lap_number"] = lap.lap_number
-            path["source_lap_duration"] = round(float(lap.lap_duration), 3)
-            out.append(path)
-            break
+            path = trace_outline(pos, lap)
+            if pin is None:
+                unpinned.append(circuit_key)
+        if path.empty:
+            continue
+        path["circuit_key"] = circuit_key
+        path["circuit_short_name"] = lap.circuit_short_name
+        path["source_session_key"] = lap.session_key
+        path["source_session"] = f"{lap.year} {lap.session_name}"
+        path["source_driver_number"] = lap.driver_number
+        path["source_lap_number"] = lap.lap_number
+        path["source_lap_duration"] = round(float(lap.lap_duration), 3)
+        out.append(path)
+        chosen[circuit_key] = {
+            "circuit_key": circuit_key,
+            "circuit_short_name": lap.circuit_short_name,
+            "session_key": int(lap.session_key),
+            "driver_number": int(lap.driver_number),
+            "lap_number": int(lap.lap_number),
+            "source_session": f"{lap.year} {lap.session_name}",
+        }
+
+    print(f"outlines pinned: {len(pins) - len(fell_back)} of {len(chosen)} "
+          "circuits traced from their pinned lap")
+    if unpinned:
+        print(f"  chosen fresh (not yet pinned): {sorted(unpinned)}")
+        print(f"  run with --repick to write {PIN_PATH.name}")
+    if fell_back:
+        # Not fatal, and not silent either. A pinned lap that did not trace is
+        # the one thing that can still make two runs differ, so it has to be
+        # visible in the log rather than absorbed.
+        print(f"  [WARN] pinned lap did not trace this run, fell back: "
+              f"{sorted(fell_back)}")
+
+    build_outlines.last_choices = chosen
     if not out:
         return pd.DataFrame()
 
@@ -444,6 +590,12 @@ TABLES = ["map_circuit_outline", "map_measured_xy", "map_coverage"]
 
 NORTH_PATH = Path(__file__).resolve().parent / "circuit_north.json"
 
+# Which lap each circuit's outline is traced from. Committed, and read on every
+# run so the same lap is traced every time. See build_outlines for why the
+# choice is recorded rather than recomputed, and open question G for the
+# behaviour that made recomputing it untrustworthy.
+PIN_PATH = Path(__file__).resolve().parent / "circuit_outline_source.json"
+
 
 def attach_north(coverage: pd.DataFrame) -> pd.DataFrame:
     """
@@ -489,6 +641,11 @@ def main() -> int:
                     help="compute and report without writing anything")
     ap.add_argument("--csv", action="store_true",
                     help="also write each table as CSV, for reading by eye")
+    ap.add_argument("--repick", action="store_true",
+                    help=f"re-choose every circuit's reference lap and rewrite "
+                         f"{PIN_PATH.name}. Normal runs trace the pinned laps, "
+                         f"so the outlines reproduce exactly; use this when you "
+                         f"deliberately want them re-chosen.")
     args = ap.parse_args()
 
     for p in (DB_PATH, BRONZE_DB_PATH):
@@ -523,8 +680,10 @@ def main() -> int:
     n_circuits = candidates.circuit_key.nunique() if not candidates.empty else 0
     print(f"circuits with a candidate lap: {n_circuits}")
 
-    pairs = set(zip(candidates.session_key, candidates.driver_number)) \
-        if not candidates.empty else set()
+    # Sorted list, not a set: this becomes the OR clauses of the location
+    # query, so its order is the query's text. See fetch_positions.
+    pairs = sorted(set(zip(candidates.session_key, candidates.driver_number))) \
+        if not candidates.empty else []
 
     # Every Grand Prix that actually has position data gets its real x/y, and
     # every one that has car telemetry is flagged. Both are discovered from
@@ -541,13 +700,29 @@ def main() -> int:
     print(f"races with car telemetry:      {len(set(gp) & car_keys)}")
 
     t0 = time.time()
-    pos = fetch_positions(bronze, pairs, set(measured_keys))
+    pos = fetch_positions(bronze, pairs, sorted(measured_keys))
     print(f"position rows fetched: {len(pos):,}  ({time.time() - t0:.1f}s, "
           "one scan)")
 
-    outlines = build_outlines(pos, candidates)
+    outlines = build_outlines(pos, candidates, repick=args.repick)
     traced = outlines.circuit_key.nunique() if not outlines.empty else 0
     print(f"circuits traced: {traced}")
+
+    # Written only when asked for. A normal run must never rewrite the pins,
+    # or the file would silently absorb whatever this run happened to choose
+    # and the whole point of pinning would be lost.
+    choices = getattr(build_outlines, "last_choices", {})
+    if args.repick and choices and not args.dry_run:
+        PIN_PATH.write_text(json.dumps({
+            "generated_at": generated_at,
+            "note": ("Which lap each circuit's outline is traced from. Read on "
+                     "every run so the geometry reproduces exactly. Rewritten "
+                     "only by s05c_racemap.py --repick. See open question G."),
+            "circuits": [choices[k] for k in sorted(choices)],
+        }, indent=1) + "\n", encoding="utf-8")
+        print(f"wrote {PIN_PATH.name}: {len(choices)} circuits")
+    elif args.repick and args.dry_run:
+        print(f"DRY RUN: would write {PIN_PATH.name} with {len(choices)} circuits")
 
     measured = build_measured(pos, silver, measured_keys)
     print(f"measured positions: {len(measured):,} rows across "

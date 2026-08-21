@@ -114,9 +114,41 @@ def active() -> str:
     browser last rendered, which follows the visitor's system preference when
     they have not chosen, and letting it decide is exactly how the app ended up
     opening dark against its own configured default.
+
+    THE CHOICE IS KEPT IN THE URL, not only in session state. Reloading a page
+    starts a NEW session, and session state does not survive that, so the switch
+    silently snapped back to light on every refresh. The query string is the one
+    thing a reload carries with it, so it is what the choice is stored in. It
+    also means a reader who bookmarks or shares the page keeps the theme.
     """
     chosen = st.session_state.get(_CHOICE_KEY)
+    if chosen is None:
+        chosen = st.query_params.get("theme")
+        chosen = chosen if chosen in ("light", "dark") else "light"
+        # Settled once per session, including the light default. Leaving it
+        # unset would make "never chosen" and "chose light" indistinguishable a
+        # few lines below, and the switch would then rerun on every first load
+        # trying to apply a theme that was already correct.
+        st.session_state[_CHOICE_KEY] = chosen
     return "dark" if chosen == "dark" else "light"
+
+
+def _sync_chrome(wanted: str) -> bool:
+    """
+    Make the config match `wanted`. True when it had to change.
+
+    Compares against the LIVE config rather than remembering what this session
+    last wrote, because config is process wide: another visitor's flip can move
+    it underneath this session. Reading the real value makes this self
+    correcting, and returning False when it already matches is what stops a
+    fresh session paying for a pointless rerun.
+    """
+    chrome = (DARK if wanted == "dark" else LIGHT)["chrome"]
+    if _st_config.get_option("theme.base") == chrome["theme.base"]:
+        return False
+    for option, value in chrome.items():
+        _st_config.set_option(option, value)
+    return True
 
 
 def palette() -> dict:
@@ -164,13 +196,31 @@ def render_toggle(container=None) -> None:
 
     on = where.toggle(
         "Dark mode", value=(active() == "dark"), key="dark_mode_switch",
-        help="Switches the whole page, charts included.",
+        help="Switches the whole page, charts included. Kept on reload.",
     )
     wanted = "dark" if on else "light"
 
-    if st.session_state.get(_CHOICE_KEY) != wanted:
+    # active() ran when the toggle's value was computed, so this is always
+    # "light" or "dark", never None.
+    previous = st.session_state[_CHOICE_KEY]
+    flipped = previous != wanted
+
+    if flipped:
         st.session_state[_CHOICE_KEY] = wanted
-        for option, value in (DARK if wanted == "dark" else LIGHT)["chrome"].items():
-            _st_config.set_option(option, value)
+
+    # The URL is the only thing a reload carries, so BOTH values are written,
+    # not just dark. Recording only the non-default would mean "light" was
+    # spelled as an absent parameter, and an absent parameter is also what a
+    # first visit looks like: the two states would be indistinguishable, and
+    # choosing light then reloading would land on light by accident rather than
+    # by instruction. Written every run, not only on a flip, so a page reached
+    # by a link that omits it still ends up carrying it.
+    st.query_params["theme"] = wanted
+
+    # Two reasons to rerun, and both are needed. The reader just flipped the
+    # switch; or this session arrived carrying a theme the process config does
+    # not yet reflect, which is exactly what a reload with ?theme=dark looks
+    # like, and also what another visitor's flip leaves behind.
+    if _sync_chrome(wanted) or flipped:
         apply()
         st.rerun()

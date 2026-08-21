@@ -61,6 +61,7 @@ Usage
 from __future__ import annotations
 
 import argparse
+import json
 import re
 import sqlite3
 import subprocess
@@ -356,6 +357,33 @@ def main() -> int:
     runner.log(f"publish:  {publish_status}")
     runner.log(f"log:      {runner.log_path}")
     runner.log("=" * 74)
+
+    # A machine-readable record of how this run ended, at a FIXED path.
+    #
+    # The scheduled task used to report success with a MessageBox, which only
+    # appears if somebody is logged in and looking. NOTES_LOG #43 is what that
+    # cost: the task failed instantly for four months and the absence of a popup
+    # read as "no news" rather than "never started". A popup cannot distinguish
+    # "did not run" from "nobody was at the machine"; a file with a timestamp
+    # can, because a stale timestamp is evidence and a missing popup is not.
+    #
+    # Written last and wrapped, because a status file that breaks the run it is
+    # reporting on would be worse than no status file.
+    try:
+        status_path = LOGS_DIR / "last_run.json"
+        status_path.write_text(json.dumps({
+            "finished_at": datetime.now(timezone.utc).isoformat(),
+            "elapsed_seconds": round(elapsed, 1),
+            "new_rows": new_rows,
+            "gate": "PASS" if gate_passed else "FAIL",
+            "serving": serving_status,
+            "publish": publish_status,
+            "failed_steps": serving_failed,
+            "log": runner.log_path.name,
+        }, indent=1) + "\n", encoding="utf-8")
+        runner.log(f"status:   {status_path}")
+    except Exception as e:
+        runner.log(f"[WARN] could not write last_run.json: {type(e).__name__}")
 
     runner.flush()
 

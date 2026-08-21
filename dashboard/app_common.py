@@ -347,13 +347,50 @@ def find_asset_b64(stem: str) -> str | None:
 
 # --- footer -------------------------------------------------------------------
 
+@st.cache_data(ttl=BUNDLE_TTL, show_spinner=False)
+def data_vintage() -> str:
+    """
+    "Data through 26 July 2026, 81 races", or "" if it cannot be read.
+
+    WHY THIS IS ON EVERY PAGE. Two reasons, and the second is the one that
+    earned it.
+
+    For a reader: it dates everything above it. A dashboard that states findings
+    without saying when the data stops is asking to be read as current forever,
+    and any sentence that does drift is at least now read against a date rather
+    than as a claim about today.
+
+    For you: it is the only way to see what the deployed app is actually
+    serving. Before this, confirming a publish had landed meant rebooting and
+    hoping, because a page that looks right looks identical whether it is
+    showing this week's bundle or last month's.
+
+    Returns an empty string rather than raising. This runs at the bottom of
+    every page including ones already reporting a problem, and a footer is
+    never worth an error.
+    """
+    try:
+        row = query("SELECT MAX(race_date) AS latest, COUNT(*) AS races "
+                    "FROM dim_race")
+        latest = pd.to_datetime(row.latest.iloc[0])
+        if pd.isna(latest):
+            return ""
+        # lstrip("0") so a single-digit day reads "6 June" rather than "06 June".
+        return (f"Data through {latest.strftime('%d %B %Y').lstrip('0')}, "
+                f"{int(row.races.iloc[0])} races")
+    except Exception:
+        return ""
+
+
 def render_footer() -> None:
-    """Author credit, shown at the bottom of every page for consistency."""
+    """Author credit and data vintage, at the bottom of every page."""
     st.divider()
+    vintage = data_vintage()
     st.markdown(
-        """
+        f"""
         <div style="text-align:center; color:#6B6B76; font-size:0.85rem;
                     padding: 0 0 1.5rem;">
+            {f'{vintage}<br><br>' if vintage else ''}
             Data Analyst<br>
             Boutkhil Fatima Zahra<br>
             <a href="https://github.com/fatima-zahra20" target="_blank"

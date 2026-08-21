@@ -820,11 +820,18 @@ points = query("SELECT * FROM diag_points")
 theme.render_toggle()
 
 st.title("Diagnose")
+
+# int() of a NaN raises, and diag_tests being empty, or its n column being
+# entirely null, would make this line the first thing to run and the thing that
+# kills the page. A caption is not worth a traceback where the whole page should
+# be, so it degrades to a sentence without a number.
+_n_obs = tests.n.max() if len(tests) else None
+_scope = (f"all {int(_n_obs):,} observations available to it"
+          if _n_obs is not None and pd.notna(_n_obs)
+          else "every observation available to it")
 st.caption(
     "Why it happened. Every finding below is the output of a statistical test "
-    "run over all "
-    f"{int(tests.n.max()):,} observations available to it, not an impression "
-    "formed from watching races."
+    f"run over {_scope}, not an impression formed from watching races."
 )
 
 c1, c2, c3 = st.columns(3)

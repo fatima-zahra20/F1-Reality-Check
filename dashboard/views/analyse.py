@@ -26,6 +26,7 @@ import story_driver  # noqa: E402
 import story_race  # noqa: E402
 import story_team  # noqa: E402
 import theme  # noqa: E402
+import url_state  # noqa: E402
 from app_common import query, render_footer  # noqa: E402
 
 # --- shared filters -----------------------------------------------------------
@@ -47,9 +48,9 @@ st.sidebar.caption(f"{len(races)} races · {races.year.min()}-{races.year.max()}
 # apart.
 theme.render_toggle()
 
-season = st.sidebar.selectbox(
-    "Season", sorted(races.year.unique(), reverse=True), key="season_choice",
-)
+seasons = sorted(races.year.unique(), reverse=True)
+url_state.restore("season_choice", int, valid=set(seasons))
+season = st.sidebar.selectbox("Season", seasons, key="season_choice")
 season_races = races[races.year == season]
 
 # Options are session_keys, not names: two seasons share race names, and the
@@ -63,8 +64,15 @@ options = list(labels)
 # Changing season leaves the previous season's race in session state, which is
 # no longer a valid option. Reset it before the widget renders - Streamlit
 # will otherwise try to format a value it cannot find and raise.
+#
+# options[-1], NOT options[0]. `races` is ordered year DESC then round, so
+# within a season the rounds run ASCENDING and options[0] is round 1. The page
+# therefore opened on the oldest race of the newest season, which is the least
+# interesting race it could have picked and reads as a bug. The last entry is
+# the most recent round, so the default is now the newest race there is.
+url_state.restore("race_choice", int, valid=options)
 if st.session_state.get("race_choice") not in options:
-    st.session_state["race_choice"] = options[0]
+    st.session_state["race_choice"] = options[-1]
 
 session_key = st.sidebar.selectbox(
     "Race",
@@ -82,6 +90,7 @@ STORIES = ["Story of a Race", "Story of a Driver", "Story of a Team"]
 # Streamlit 1.51's own AppTest harness cannot model a segmented_control's
 # state, which breaks every automated check of this page after the first
 # render. A testable page is worth more than the pills.
+url_state.restore("story_choice", str, valid=STORIES)
 story = st.radio(
     "Story", STORIES, horizontal=True, label_visibility="collapsed",
     key="story_choice",
@@ -124,6 +133,7 @@ section_keys = list(section_titles)
 # Switching story changes which sections exist, and Diagnose can hand over a
 # section directly. Fall back to the first section rather than raising when the
 # stored key is not valid here.
+url_state.restore("section_choice", str, valid=section_keys)
 if st.session_state.get("section_choice") not in section_keys:
     st.session_state["section_choice"] = section_keys[0]
 
@@ -200,6 +210,7 @@ elif story == "Story of a Driver":
 
         # Changing race leaves the previous race's driver selected, who may
         # not have entered this one. Reset before the widget renders.
+        url_state.restore("driver_choice", int, valid=driver_options)
         if st.session_state.get("driver_choice") not in driver_options:
             st.session_state["driver_choice"] = driver_options[0]
 
@@ -224,12 +235,19 @@ else:
 
         # Changing race can leave a team selected that did not enter this one
         # (Cadillac joined in 2026). Reset before the widget renders.
+        url_state.restore("team_choice", str, valid=team_options)
         if st.session_state.get("team_choice") not in team_options:
             st.session_state["team_choice"] = team_options[0]
 
         team = st.sidebar.selectbox("Team", team_options, key="team_choice")
         if story_team.intro(race, team):
             render_story(lambda k: story_team.render(race, team, k))
+
+# After every widget, so session_state holds what the reader chose rather than
+# what it held on arrival. driver_choice and team_choice are mutually exclusive
+# by story; remember() skips whichever is not set rather than writing it empty.
+url_state.remember("season_choice", "race_choice", "story_choice",
+                   "section_choice", "driver_choice", "team_choice")
 
 st.sidebar.divider()
 st.sidebar.caption(
