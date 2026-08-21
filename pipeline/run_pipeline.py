@@ -7,19 +7,29 @@ Order
     s02_build_silver  rebuild silver from bronze   (skipped if nothing new)
     s02b_caution_flags rebuild derived flag tables (skipped if nothing new)
     s03_verify        invariant gate               (always runs)
-    s07_build_gold    gold layer, the source for everything below
+    s07_build_gold    gold layer, the source for the two below it
     s04_descriptive   descriptive serving layer    (only if the gate passed)
     s05_diagnostic    diagnostic serving layer     (only if the gate passed)
+    s05b_prescriptive lap-factor and counterfactual models  (gate passed)
+    s05c_racemap      circuit geometry                      (gate passed)
+    s05d_telemetry    tow and DRS effects                   (gate passed)
     s06_publish       push data to the dashboard   (only with --publish)
 
 Skipping matters: most weeks bring no new data, and rebuilding 2.1M interval
 rows to produce a byte-identical result is wasted time. The gate always runs, so
 a no-op week still confirms the database is sound.
 
-The serving layers do NOT follow that skip rule. They are cheap and fully
-derived, so they rebuild on every successful run rather than only when
-ingestion found rows — otherwise a manual run to refresh the dashboard would
-silently do nothing, which is the more expensive failure.
+The serving layers do NOT follow that skip rule. They are fully derived, so they
+rebuild on every successful run rather than only when ingestion found rows.
+Otherwise a manual run to refresh the dashboard would silently do nothing, which
+is the more expensive failure.
+
+That used to be free, because the serving layers were seconds of work. It is not
+free now: s05b, s05c and s05d read bronze telemetry, and s05c scans a 25.8M-row
+location table. The rule is kept anyway. A refresh that quietly does nothing has
+already cost this project twice, and a run that takes longer is the cheaper
+mistake. To rebuild one layer without paying for all of them, run that step
+directly rather than reaching for a flag here.
 
 They are gated on s03 passing. Publishing a serving layer built on a database
 that failed its own invariants would put wrong data in front of someone as
@@ -273,9 +283,33 @@ def main() -> int:
         #
         # It also runs before s04, which now writes its seven tables straight
         # into dashboard.db rather than to CSV.
+        # s05b, s05c and s05d were missing from this list, and that was a real
+        # defect rather than a deliberate omission. They produce ten of the
+        # twenty-one bundled tables: the lap-factor and counterfactual models,
+        # the circuit geometry, and the tow and DRS effects. Because nothing
+        # ran them, every publish shipped new races priced by coefficients
+        # fitted whenever those three were last run BY HAND. The rows were
+        # current and the analysis of them was not, which is the worst of the
+        # two states because nothing on screen looks wrong.
+        #
+        # They read silver and bronze directly, not gold, so they do not depend
+        # on the three above and only need silver to be current. Order here is
+        # therefore presentation, not requirement. serving.write_table replaces
+        # one named table at a time, so no step can clobber another's output.
+        #
+        # THEY ARE NOT CHEAP, unlike the three above. s05c scans a 25.8M-row
+        # location table and s05b and s05d both read bronze telemetry, so this
+        # loop is now minutes rather than seconds. Running them every time
+        # anyway, for the reason the serving layers already rebuild every time:
+        # a refresh that silently does nothing is a more expensive failure than
+        # a slow one, and it is the failure this project has already been bitten
+        # by twice (check [17], NOTES_LOG #43).
         for name, script in (("gold", "s07_build_gold.py"),
                              ("descriptive", "s04_descriptive.py"),
-                             ("diagnostic", "s05_diagnostic.py")):
+                             ("diagnostic", "s05_diagnostic.py"),
+                             ("prescriptive", "s05b_prescriptive.py"),
+                             ("racemap", "s05c_racemap.py"),
+                             ("telemetry", "s05d_telemetry.py")):
             extra = ["--execute"] if name == "gold" else None
             rc, _ = runner.run_step(name, script, extra)
             if rc != 0:

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import base64
 import gzip
+import hashlib
 import io
 import shutil
 import sqlite3
@@ -23,6 +24,30 @@ import streamlit as st
 
 REPO = "fatima-zahra20/F1-Reality-Check"
 ASSET_URL = f"https://github.com/{REPO}/releases/download/data-latest/dashboard.db.gz"
+
+# How long the app may serve a bundle without re-checking the Release behind it.
+#
+# This used to be forever. The download was cached under a FIXED name in the
+# container's temp directory and reused for the life of that container, so:
+#
+#   publishing new data changed nothing until somebody clicked Reboot, and
+#   a download that arrived truncated stayed broken for exactly as long.
+#
+# Fifteen minutes is a bounded staleness window, not a guess. The check is one
+# HEAD request of a few hundred milliseconds, and it runs only when this cache
+# expires, never per page view. Publishing now reaches visitors on its own,
+# which is the thing that lets the pipeline run unattended.
+BUNDLE_TTL = 900
+
+# Checked after every download. Deliberately a few core names rather than all
+# twenty-one: the app should keep working when the pipeline gains a table, and
+# should refuse to start when it has been handed something that is not this
+# bundle at all.
+REQUIRED_TABLES = {"dim_race", "fact_lap", "diag_tests", "map_coverage"}
+
+
+class BundleUnavailable(RuntimeError):
+    """Carries a message already fit to show a visitor."""
 
 # Resolved from this file's own location, not the current working directory,
 # so it doesn't matter whether streamlit was launched from the repo root or
@@ -44,41 +69,176 @@ NEUTRAL = "#8A8A94"
 
 # --- data -----------------------------------------------------------------
 
-@st.cache_resource(show_spinner="Loading race data…")
+CACHE_PREFIX = "f1_reality_check_"
+
+
+@st.cache_data(ttl=BUNDLE_TTL, show_spinner=False)
+def _asset_stamp() -> str:
+    """
+    A short string identifying the bundle currently on the Release.
+
+    Whatever the CDN offers, in order of usefulness: an ETag is derived from the
+    content and so changes exactly when the file does; Last-Modified and
+    Content-Length together are a workable substitute.
+
+    Returns "unknown" rather than raising. A HEAD that fails should fall through
+    to the download, which produces a real error with a real message, rather
+    than breaking here on a header that happened to be absent.
+    """
+    try:
+        r = requests.head(ASSET_URL, timeout=15, allow_redirects=True)
+        parts = [r.headers.get("ETag", ""),
+                 r.headers.get("Last-Modified", ""),
+                 r.headers.get("Content-Length", "")]
+    except requests.RequestException:
+        return "unknown"
+    joined = "|".join(p for p in parts if p)
+    if not joined:
+        return "unknown"
+    return hashlib.sha256(joined.encode()).hexdigest()[:16]
+
+
+def _check_readable(path: Path) -> None:
+    """Open what was just written and confirm it is this project's bundle."""
+    con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        names = {r[0] for r in con.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")}
+    finally:
+        con.close()
+    missing = REQUIRED_TABLES - names
+    if missing:
+        raise BundleUnavailable(
+            "the downloaded file is missing " + ", ".join(sorted(missing)))
+
+
+def _download_to(path: Path) -> None:
+    """
+    Fetch, decompress and check the bundle, then move it into place.
+
+    Written to a .part file and renamed only once it is a database that opens
+    and holds the tables the app needs, so a partial download can never be
+    mistaken for a finished one. That mistake used to persist until somebody
+    rebooted the app, because the half-written file satisfied the "does it
+    exist" test that was the only thing guarding the cache.
+
+    Truncation is caught for free: gzip carries a CRC and an uncompressed length
+    in its trailer, so decompressing a cut-short stream raises rather than
+    quietly producing a short file. That is why there is no separate checksum
+    here.
+    """
+    part = path.with_suffix(".part")
+    try:
+        r = requests.get(ASSET_URL, timeout=180)
+    except requests.RequestException as e:
+        raise BundleUnavailable(
+            f"the data could not be downloaded ({type(e).__name__})") from e
+
+    if r.status_code == 404:
+        raise BundleUnavailable("NOT_PUBLISHED")
+    if r.status_code != 200:
+        raise BundleUnavailable(
+            f"the download returned HTTP {r.status_code}")
+
+    try:
+        with gzip.open(io.BytesIO(r.content), "rb") as src, open(part, "wb") as dst:
+            shutil.copyfileobj(src, dst)
+        _check_readable(part)
+    except BundleUnavailable:
+        part.unlink(missing_ok=True)
+        raise
+    except Exception as e:
+        part.unlink(missing_ok=True)
+        raise BundleUnavailable(
+            f"the download arrived damaged ({type(e).__name__})") from e
+
+    part.replace(path)
+
+
+def _cached_bundles() -> list[Path]:
+    """Previously downloaded bundles, newest first."""
+    tmp = Path(tempfile.gettempdir())
+    return sorted(tmp.glob(f"{CACHE_PREFIX}*.db"),
+                  key=lambda p: p.stat().st_mtime, reverse=True)
+
+
+def _prune(keep: Path) -> None:
+    """
+    Drop bundles from earlier publishes.
+
+    Unlinking a file another session still has open is safe on Linux, which is
+    what Streamlit Cloud runs: the open handle keeps working and the name simply
+    goes away. Windows refuses, which is why this never raises. Local runs use
+    LOCAL_DB and never reach here at all.
+    """
+    for old in _cached_bundles():
+        if old != keep:
+            try:
+                old.unlink()
+            except OSError:
+                pass
+
+
+@st.cache_resource(ttl=BUNDLE_TTL, show_spinner="Loading race data…")
 def get_connection() -> sqlite3.Connection:
     """
     One connection per server process, not per session - the download and the
-    23 MB file are shared by every visitor rather than repeated for each.
+    67 MB file are shared by every visitor rather than repeated for each.
+
+    Re-checked every BUNDLE_TTL seconds. The bundle is stored under a name
+    derived from the Release's own ETag, so a new publish lands in a NEW file
+    and sessions still reading the old one are never pulled out from under.
     """
     if LOCAL_DB.exists():
-        path = LOCAL_DB
-    else:
-        tmp = Path(tempfile.gettempdir()) / "f1_reality_check_dashboard.db"
-        if not tmp.exists():
-            r = requests.get(ASSET_URL, timeout=120)
-            if r.status_code == 404:
-                st.error(
-                    "The data has not been published yet.\n\n"
-                    "Run `python pipeline/s06_publish.py --execute` to upload it "
-                    f"to the `data-latest` release of `{REPO}`."
-                )
+        return sqlite3.connect(LOCAL_DB, check_same_thread=False)
+
+    target = Path(tempfile.gettempdir()) / f"{CACHE_PREFIX}{_asset_stamp()}.db"
+
+    if not target.exists():
+        try:
+            _download_to(target)
+        except BundleUnavailable as e:
+            # Serving slightly old data beats serving an error page. A failed
+            # refresh should not take down an app that was working a minute
+            # ago, so a previous bundle is used if there is one.
+            fallback = next((p for p in _cached_bundles() if p != target), None)
+            if fallback is None:
+                if str(e) == "NOT_PUBLISHED":
+                    st.error(
+                        "The data has not been published yet.\n\n"
+                        "Run `python pipeline/s06_publish.py --execute` to "
+                        f"upload it to the `data-latest` release of `{REPO}`."
+                    )
+                else:
+                    st.error(
+                        f"**The race data could not be loaded**, because "
+                        f"{e}.\n\nThis is usually temporary. Refreshing the "
+                        "page in a minute will try again."
+                    )
                 st.stop()
-            r.raise_for_status()
-            with gzip.open(io.BytesIO(r.content), "rb") as src, open(tmp, "wb") as dst:
-                shutil.copyfileobj(src, dst)
-        path = tmp
+            st.warning(
+                "**Showing the previously downloaded data.** The latest "
+                f"version could not be fetched, because {e}."
+            )
+            return sqlite3.connect(fallback, check_same_thread=False)
+
+    _prune(keep=target)
 
     # check_same_thread=False: Streamlit serves reruns from a worker pool, so
     # the connection is touched by threads other than the one that opened it.
-    return sqlite3.connect(path, check_same_thread=False)
+    return sqlite3.connect(target, check_same_thread=False)
 
 
-@st.cache_data(show_spinner=False)
+# Same TTL as the connection, deliberately. Without it these results would
+# outlive the bundle they were read from: the connection would quietly move to
+# newly published data while every chart on the page went on showing values
+# cached from the old one, which is the original bug wearing a different hat.
+@st.cache_data(ttl=BUNDLE_TTL, show_spinner=False)
 def query(sql: str, params: tuple = ()) -> pd.DataFrame:
     return pd.read_sql(sql, get_connection(), params=params)
 
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(ttl=BUNDLE_TTL, show_spinner=False)
 def team_colours() -> dict[str, str]:
     df = query("SELECT team_name, team_colour FROM dim_team")
     return {

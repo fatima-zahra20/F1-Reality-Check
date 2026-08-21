@@ -45,7 +45,7 @@
         "driver_number": 0.0,
         "first_name": 0.0014,
         "full_name": 0.0,
-        "headshot_url": 0.0355,
+        "headshot_url": 0.0356,
         "last_name": 0.0014,
         "meeting_key": 0.0,
         "name_acronym": 0.0,
@@ -82,7 +82,7 @@
         "vsc_flag": 0.002,
         "yellow_sector_flag": 0.002
       },
-      "rows": 239102
+      "rows": 239795
     },
     "silver_laps": {
       "in_scope": 420,
@@ -90,22 +90,22 @@
       "nulls": {
         "date_start": 0.002,
         "driver_number": 0.0,
-        "duration_sector_1": 0.0918,
-        "duration_sector_2": 0.0097,
-        "duration_sector_3": 0.0267,
-        "i1_speed": 0.0902,
-        "i2_speed": 0.0141,
+        "duration_sector_1": 0.0919,
+        "duration_sector_2": 0.0096,
+        "duration_sector_3": 0.0266,
+        "i1_speed": 0.09,
+        "i2_speed": 0.014,
         "is_pit_out_lap": 0.0,
         "lap_duration": 0.0386,
         "lap_number": 0.0,
         "meeting_key": 0.0,
         "segments_sector_1": 0.0094,
-        "segments_sector_2": 0.0095,
-        "segments_sector_3": 0.0099,
+        "segments_sector_2": 0.0094,
+        "segments_sector_3": 0.0098,
         "session_key": 0.0,
-        "st_speed": 0.0692
+        "st_speed": 0.0694
       },
-      "rows": 239102,
+      "rows": 239795,
       "scope": "any"
     },
     "silver_meetings": {
@@ -172,7 +172,7 @@
         "position": 0.0,
         "session_key": 0.0
       },
-      "rows": 310397,
+      "rows": 311200,
       "scope": "any"
     },
     "silver_race_control": {
@@ -181,18 +181,18 @@
       "nulls": {
         "category": 0.0,
         "date": 0.0,
-        "driver_number": 0.878,
-        "flag": 0.5175,
+        "driver_number": 0.8784,
+        "flag": 0.517,
         "id": 0.0,
-        "lap_number": 0.5806,
+        "lap_number": 0.5819,
         "meeting_key": 0.0,
         "message": 0.0,
-        "qualifying_phase": 0.8634,
-        "scope": 0.5175,
-        "sector": 0.7247,
+        "qualifying_phase": 0.8638,
+        "scope": 0.517,
+        "sector": 0.7237,
         "session_key": 0.0
       },
-      "rows": 22423,
+      "rows": 22491,
       "scope": "any"
     },
     "silver_session_result": {
@@ -203,18 +203,18 @@
         "dns": 0.0,
         "driver_number": 0.0,
         "dsq": 0.0,
-        "duration_quali_json": 0.7543,
-        "duration_race_seconds": 0.3318,
-        "gap_to_leader_laps": 0.9548,
-        "gap_to_leader_quali_json": 0.7543,
-        "gap_to_leader_seconds": 0.3319,
+        "duration_quali_json": 0.755,
+        "duration_race_seconds": 0.3309,
+        "gap_to_leader_laps": 0.9549,
+        "gap_to_leader_quali_json": 0.755,
+        "gap_to_leader_seconds": 0.331,
         "meeting_key": 0.0,
         "number_of_laps": 0.0009,
-        "points": 0.7536,
-        "position": 0.0337,
+        "points": 0.7543,
+        "position": 0.0336,
         "session_key": 0.0
       },
-      "rows": 8467,
+      "rows": 8489,
       "scope": "competitive"
     },
     "silver_sessions": {
@@ -263,7 +263,7 @@
         "stint_number": 0.0,
         "tyre_age_at_start": 0.0009
       },
-      "rows": 34567,
+      "rows": 34664,
       "scope": "any"
     },
     "silver_team_radio": {
@@ -295,9 +295,9 @@
         "wind_direction": 0.0,
         "wind_speed": 0.0
       },
-      "rows": 47726,
+      "rows": 47808,
       "scope": "any"
     }
   },
-  "written_at": "2026-08-17T10:37:02+00:00"
+  "written_at": "2026-08-21T13:39:51+00:00"
 }

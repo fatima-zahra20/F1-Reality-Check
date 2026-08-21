@@ -1149,6 +1149,67 @@ read as current. Rewritten to carry both the old conclusion and why it stopped h
 page was live, and `s07_build_gold.py` described its consumer as "the perfect-lap tool".
 
 
+### 55. New data reaching the dashboard, in two halves
+
+*2026-08-21. Pre-ship work. Two defects that combined to mean a new race could not
+actually arrive on the live site without hand-holding at both ends.*
+
+**Half one: the analysis was never refitted.** `run_pipeline` built three serving layers,
+gold, descriptive and diagnostic, and stopped. `s05b`, `s05c` and `s05d` produce **ten of
+the twenty-one bundled tables** and nothing ran them, so every publish shipped new laps
+priced by coefficients fitted whenever those three were last run by hand. This is the
+worst shape a staleness bug can take, because the rows are current and nothing on screen
+looks wrong. Entry #53 recorded it as found and not yet fixed; this fixes it.
+
+They read silver and bronze rather than gold, so they had no ordering requirement, and
+`serving.write_table` replaces one named table at a time so no step can clobber another.
+Verified by running all ten steps end to end: every step exit 0, all 21 tables present and
+rewritten, checked against `s06_publish.DB_TABLES` rather than a hand-typed list.
+
+**The cost is real and worth stating.** The three new steps add **6m 18s**, of which
+`s05c` is 295.7s and almost all of that is one 4,545,724-row scan of bronze `location`.
+The twice-weekly job goes from about 8 minutes to about 11. The docstring's claim that the
+serving layers are "cheap" was true of the three that were there and is not true now, so
+it was corrected rather than left to mislead.
+
+**Half two: the app could not see a new publish.** `app_common.get_connection` cached the
+downloaded bundle under a FIXED name and reused it whenever the file existed. Two
+consequences, and the second is the bad one:
+
+  publishing changed nothing until somebody clicked Reboot, and
+  a download that arrived truncated satisfied "does it exist" and stayed broken
+  for exactly as long.
+
+Now stamped from the Release's own ETag, checked every `BUNDLE_TTL` (900s). The stamp goes
+in the filename, so a new publish lands in a NEW file and sessions reading the old one are
+never pulled out from under. Confirmed the header exists rather than assuming it:
+`ETag: "0x8DEFD4063FC01E8"`, content-derived, so a republish of identical size is still
+detected.
+
+**`query` got the same TTL, and that is not incidental.** Refreshing the connection alone
+would have moved the app to new data while every chart went on showing values cached from
+the old bundle: the same bug wearing a different hat, and harder to see.
+
+**Truncation needs no checksum.** gzip carries a CRC and an uncompressed length in its
+trailer, so a cut-short stream raises on decompression. Downloads go to a `.part` file and
+are renamed only after they open and hold the tables the app needs, so a partial file can
+never be mistaken for a finished one.
+
+**A failed refresh no longer takes the app down.** If the network fails and an earlier
+bundle is on disk, it is served with a visible warning. Serving slightly old data beats an
+error page on an app that worked a minute ago.
+
+Sixteen checks, all passing, including a real 67 MB download from the live Release, a
+deliberately truncated stream, a valid gzip of the wrong database, a 404, a connection
+error, and pruning. Also confirmed a local run makes **zero** network calls: `LOCAL_DB`
+short-circuits before any request, so development never depends on the internet.
+
+**Still needed for a new race to appear unattended:** `--publish` in `run_weekly.bat` and
+`GITHUB_TOKEN` as a persistent variable. Deliberately not done yet; publishing replaces
+the data behind a public URL and should not be switched to automatic in the same change
+that rewrote how it is fetched.
+
+
 ## Open questions
 
 ### A. `caution_flag` under-detects Safety Car periods
