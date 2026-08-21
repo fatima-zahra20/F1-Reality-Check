@@ -247,6 +247,65 @@ def team_colours() -> dict[str, str]:
     }
 
 
+def _join_and(items: list[str]) -> str:
+    """["a", "b", "c"] -> "a, b and c"."""
+    if len(items) == 1:
+        return items[0]
+    return ", ".join(items[:-1]) + " and " + items[-1]
+
+
+@st.cache_data(ttl=BUNDLE_TTL, show_spinner=False)
+def coverage_gaps(kind: str) -> str:
+    """
+    Which seasons are missing a kind of record, counted rather than remembered.
+
+    Returns a phrase like "6 of 22 races in 2023 and 3 of 11 in 2026", or an
+    empty string when every race is covered.
+
+    WHY THIS IS COMPUTED. Three pages carried this sentence with the numbers
+    written in by hand: "6 of 22 races in 2023", "8 of 11 races in 2026",
+    "2,744 messages across 2023, but 217 across 2026". Every one was true when
+    it was typed. The 2023 figures still are, because that season is closed and
+    its numbers are final. The 2026 figures stopped being true at the next race
+    weekend and would go stale again after every one after that.
+
+    This is the same drift that had the landing page announcing 70 races while
+    the sidebar, which counted, said 81. A number nobody recomputes does not
+    stay wrong quietly for long, and a dashboard whose whole claim is that it
+    tests things should not be the last to notice.
+    """
+    if kind == "championship":
+        covered = "SELECT DISTINCT session_key FROM fact_championship"
+        params: tuple = ()
+    else:
+        covered = ("SELECT DISTINCT session_key FROM fact_event "
+                   "WHERE event_type = ?")
+        params = (kind,)
+
+    rows = query(f"""
+        SELECT r.year AS year,
+               COUNT(*) AS races,
+               SUM(CASE WHEN c.session_key IS NULL THEN 1 ELSE 0 END) AS missing
+        FROM dim_race r
+        LEFT JOIN ({covered}) c ON c.session_key = r.session_key
+        GROUP BY r.year
+        ORDER BY r.year
+    """, params)
+
+    gaps = rows[rows.missing > 0]
+    if gaps.empty:
+        return ""
+
+    parts = [f"{int(g.missing)} of {int(g.races)} in {int(g.year)}"
+             for g in gaps.itertuples()]
+    # The first one carries the noun so the list reads as a sentence rather
+    # than as three bare ratios.
+    first = gaps.iloc[0]
+    parts[0] = (f"{int(first.missing)} of {int(first.races)} races "
+                f"in {int(first.year)}")
+    return _join_and(parts)
+
+
 # --- formatting -------------------------------------------------------------
 
 def fmt_lap(seconds) -> str:

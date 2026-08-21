@@ -27,7 +27,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-from app_common import fmt_gap, fmt_lap, query, team_colours
+from app_common import coverage_gaps, fmt_gap, fmt_lap, query, team_colours
 from story_common import (
     ACCENT, AXIS_BASE, CLEAN_LAP, MUTED, PLOT_BASE, ink,
     field, guide, line_layout,
@@ -266,7 +266,7 @@ def _pits(session_key: int, cars: pd.DataFrame) -> None:
     if stops.empty:
         st.caption(
             "No individual pit records for either car. Pit coverage is "
-            "incomplete in 2023, where 6 of 22 races have none."
+            f"incomplete: {coverage_gaps('pit_stop')} have none."
         )
         return
 
@@ -409,7 +409,7 @@ def _standings(session_key: int, team: str) -> None:
     if row.empty:
         st.info(
             "No championship standings recorded for this race. Coverage is "
-            "complete for 2023 to 2025 but reaches only 8 of 11 races in 2026."
+            f"incomplete: {coverage_gaps('championship')} have none."
         )
         return
 

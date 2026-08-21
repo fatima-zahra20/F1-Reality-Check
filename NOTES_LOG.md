@@ -1210,6 +1210,51 @@ the data behind a public URL and should not be switched to automatic in the same
 that rewrote how it is fetched.
 
 
+### 56. Sentences that stopped being true
+
+*2026-08-21. Pre-ship work, continuing #55. Rows and models were made to follow the data
+in #55; this is the prose that did not.*
+
+**The rule applied, because these are not all the same kind of number.** Anything
+describing current coverage or scale is computed. Anything that is a fitted coefficient is
+read from the table it already lives in. Anything that is a one-off validation keeps its
+value and gains a date, because recomputing a study on every page load would be both
+wasteful and a misdescription of what it is.
+
+**`coverage_gaps()` replaces five hand-written sentences** across `story_race`,
+`story_driver` and `story_team`: "6 of 22 races in 2023" for pit stops, twice; "2,744
+messages across 2023, but 217 across 2026" for radio, twice; "8 of 11 races in 2026" for
+championship standings. Each was true when typed. The 2023 figures still are, that season
+being closed. The 2026 ones went stale on the next race weekend.
+
+Checked against raw counts before being trusted: `pit_stop` returns 6 of 22 in 2023,
+matching the sentence it replaced exactly, which is what proves the query and not just
+that it runs.
+
+**The radio sentence changed meaning, deliberately.** It quoted message volume while
+appearing under the heading "No team radio recorded for this race", so it answered a
+question nobody had asked. It now reports coverage, which is what a reader who just hit an
+empty panel actually wants.
+
+**The `76%` was wrong by six points.** The same quantity is computed at the top of the
+same page and displayed there, so one page stated two different numbers for one thing and
+the wrong one was the one a reader met last. Computed, it is **70%**.
+
+**"No race except one in 2026 has recorded car positions" was the sharpest example.** The
+rebuild in #55 put the count at **six**: 2023 Bahrain, Saudi Arabia, Spain and Belgium,
+plus 2026 Monaco and Hungary. The page had been asserting a scarcity the data no longer
+supported, and would have gone on asserting it. Now counted from `map_coverage`.
+
+The accuracy study beside it kept its 24 metres and 0.96 correlation and gained "Measured
+in August 2026", with a closing line saying plainly that those are one study on one day
+rather than live figures.
+
+**Found while checking encodings, unrelated to any of the above.** `story_race.py:616`
+read `Air {..}Â°C, track {..}Â°C`, a UTF-8 degree sign decoded once as latin-1. Present in
+`HEAD`, so it has been shipping visible garbage on the race page for some time. Fixed, and
+the whole dashboard swept for `Â`, `Ã` and the replacement character: clean.
+
+
 ## Open questions
 
 ### A. `caution_flag` under-detects Safety Car periods

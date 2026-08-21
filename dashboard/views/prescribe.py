@@ -53,6 +53,11 @@ st.caption(
 
 cover = rm.coverage()
 
+# Read once, used in the "positions are derived" note far below. Counted rather
+# than written down, for the reason given there.
+n_races = int(cover.session_key.nunique())
+n_position_races = int(cover.has_measured_xy.fillna(0).astype(int).sum())
+
 # --- pickers ------------------------------------------------------------------
 # At the top of the page rather than in the sidebar: this page is one scroll
 # and the choices belong with the thing they change.
@@ -284,18 +289,25 @@ else:
             "the dots are derived from lap timing. Try an earlier lap."
         )
     else:
+        # Counted, not remembered. This used to read "no race except one in
+        # 2026", which was true when written and is not now: the position feed
+        # covers six races, four of them in 2023. A sentence about how much
+        # data exists has to be read from the data, or it becomes a claim the
+        # page is disproving one table away.
         st.info(
-            "**Positions are derived, not recorded.** No race except one in "
-            "2026 has recorded car positions, so each car is placed by how "
-            "far through its own lap it was at this instant. It cannot know "
-            "the racing line or which side of the track a car was on.\n\n"
+            f"**Positions are derived, not recorded.** Only {n_position_races} "
+            f"of {n_races} races have recorded car positions, so each car is "
+            "placed by how far through its own lap it was at this instant. It "
+            "cannot know the racing line or which side of the track a car was "
+            "on.\n\n"
             "How accurate that is has been measured rather than assumed. "
-            "Checked against the 2026 Monaco Grand Prix, the one race with "
-            "real recorded positions, the derived dot sits a median of 24 "
-            "metres from where the car actually was, which is 0.7% of a lap. "
-            "Checked against the timing feed's own gap to leader across 12 "
-            "races, spacing correlates at 0.96 with a median error of 1.7 "
-            "seconds. Both are worst on lap 1, when the field is still bunched."
+            "Measured in August 2026 against the Monaco Grand Prix, the "
+            "derived dot sat a median of 24 metres from where the car actually "
+            "was, which is 0.7% of a lap. Checked against the timing feed's "
+            "own gap to leader across 12 races, spacing correlated at 0.96 "
+            "with a median error of 1.7 seconds. Both are worst on lap 1, when "
+            "the field is still bunched. Those are the results of one study on "
+            "one day, not live figures, which is why they carry their date."
         )
 
 # --- the single car ---------------------------------------------------------------
@@ -644,10 +656,15 @@ else:
                 f" On this lap that unexplained part is "
                 f"{t3['unexplained']:+.3f}s.")
 
+        # unexplained_pct, not a written-in 76. The same figure is computed at
+        # the top of section 2 and shown there, so a constant here meant one
+        # page stating two different numbers for one quantity, and the wrong
+        # one was the one a reader met last.
         st.warning(
             "**This is the real lap with the changes added to it, not a lap "
             "rebuilt from scratch.** Everything the model cannot explain, "
-            "which is 76% of why laps differ, travels with the lap unchanged."
+            f"which is {unexplained_pct:.0f}% of why laps differ, travels with "
+            "the lap unchanged."
             + resid_note
         )
 

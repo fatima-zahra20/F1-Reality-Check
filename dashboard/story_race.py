@@ -26,7 +26,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-from app_common import NEUTRAL, fmt_lap, query, team_colours
+from app_common import NEUTRAL, coverage_gaps, fmt_lap, query, team_colours
 from story_common import (
     AXIS_BASE, CLEAN_LAP, FIGHTING_SECONDS, PLOT_BASE, ink,
     field as _field, guide as _guide, hbar as _bar, labels as _labels,
@@ -376,8 +376,8 @@ def _pit_stops(session_key: int) -> None:
 
     if stops.empty:
         st.info(
-            "No pit stop data recorded for this race. Coverage is incomplete "
-            "in 2023, where 6 of 22 races have no pit records."
+            "No pit stop data recorded for this race. Coverage is incomplete: "
+            f"{coverage_gaps('pit_stop')} have no pit records."
         )
         return
 
@@ -613,7 +613,7 @@ def _incidents(session_key: int, race) -> None:
               f"{wet_pct:.0f}% of samples wet")
 
     st.caption(
-        f"Air {race.avg_air_temp:.0f}Â°C, track {race.avg_track_temp:.0f}Â°C "
+        f"Air {race.avg_air_temp:.0f}°C, track {race.avg_track_temp:.0f}°C "
         "on average across the race."
         if pd.notna(race.avg_air_temp) and pd.notna(race.avg_track_temp)
         else "Temperature not recorded for this race."
@@ -689,8 +689,8 @@ def _team_radio(session_key: int) -> None:
 
     if radio.empty:
         st.info(
-            "No team radio recorded for this race. Coverage falls away sharply "
-            "in later seasons: 2,744 messages across 2023, but 217 across 2026."
+            "No team radio recorded for this race. Coverage is incomplete: "
+            f"{coverage_gaps('team_radio')} have none."
         )
         return
 
