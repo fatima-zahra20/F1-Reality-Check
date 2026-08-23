@@ -156,13 +156,14 @@ VALID_COMPOUNDS = ["SOFT", "MEDIUM", "HARD", "INTERMEDIATE", "WET"]
 # session rather than hardcoded to Miami so the rule survives new data.
 MAX_PLAUSIBLE_START_AGE = 10
 
-# Same dynamic scope as s04 and s05, so all three cover the same races.
+# Same dynamic scope as s04 and s05, so all three cover the same races. See s04
+# for why the date test uses julianday rather than comparing the strings.
 RACE_SCOPE = """
     SELECT s.session_key, s.meeting_key
     FROM silver_sessions s
     WHERE s.session_name = 'Race'
       AND s.is_cancelled = 0
-      AND s.date_start < datetime('now')
+      AND julianday(s.date_start) < julianday('now')
       AND EXISTS (SELECT 1 FROM silver_laps l WHERE l.session_key = s.session_key)
       AND EXISTS (SELECT 1 FROM silver_session_result r WHERE r.session_key = s.session_key)
 """

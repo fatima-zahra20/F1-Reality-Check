@@ -1422,9 +1422,114 @@ than assumed: every season's final round is also its latest date, 2026 to Hungar
 **A side effect worth having:** a link now reopens on the race, driver and lap the sender
 was looking at, which a screenshot cannot do.
 
-**Not carried:** the counterfactual sliders on Prescribe. They are a scratchpad rather
-than a position in the data, and putting a dozen lever values in the address bar would
-cost more legibility than it returns.
+**Also carried, on request:** the counterfactual levers. Three things made them harder than
+the pickers. A slider's range is continuous, so `valid` had to accept a predicate as well
+as a container. Booleans arrive as text, and `"False"` is a non-empty string and therefore
+truthy, so reading one back naively turns every unchecked box into a checked one. And a
+range can SHRINK under a stored value: Streamlit takes a widget's value from session_state
+when the key is present and ignores the `value` argument, so turning the widen toggle off
+while a lever sits at a wide-range-only number hands the slider something outside its own
+bounds, which raises. `clamp` fixes that, and it was a latent bug with no URL involved.
+
+A test caught a real mistake here: an empty parameter set `None`, which is right for "All
+cars" and wrong for a checkbox, which has no third state. The test was right and the code
+was wrong, so the bool restores are pinned to `valid=(True, False)`.
+
+
+### 61. The footer that worked everywhere except in production
+
+*2026-08-21. Small bug, and the reason it took so long is the part worth keeping.*
+
+The data-vintage line from #58 rendered correctly on this machine and was **absent on
+Streamlit Cloud**, which runs Python 3.14 and its own pandas against the same bundle.
+
+Everything checkable locally checked out. The markup was verified by capturing what
+`render_footer` actually passes to `st.markdown`: the vintage line sat at the same
+indentation as "Data Analyst", which was displaying fine. `data_vintage()` returned the
+right sentence. Both changes were in the same commit, and two other things from that
+commit were confirmed live, so it was deployed.
+
+**The cause was never proven, because the code threw the evidence away.**
+`except Exception: return ""` degrades gracefully and says nothing, so a failure in
+production is indistinguishable from a legitimately empty result. That is the actual
+defect; the parsing was only the trigger.
+
+Two suspects, both removed rather than chosen between. `pd.to_datetime` on a tz-aware ISO
+string, whose behaviour has moved across pandas versions. And `strftime("%B")`, which
+formats the month name in the **server's** locale, so a dashboard written in English can
+start speaking another language purely because of where it is hosted. `race_date` is ISO
+8601 and always begins `YYYY-MM-DD`, so the first ten characters are all this needs, and
+month names are now a plain tuple. Neither can vary by host.
+
+The handler now prints the exception before degrading. Silence in a fallback path costs
+more than the fallback saves.
+
+
+### 62. A race that finished three hours ago was not yet in the past
+
+*2026-08-23. The first real test of automatic responsiveness, on the first new race after
+shipping. It failed, and reported success while failing.*
+
+The Dutch Grand Prix ran that afternoon. Ingest fetched all 23 pairs, 47,274 rows, silver
+gained 2,252 laps, the gate passed, all six serving layers rebuilt, the publish replaced
+the asset, and the run finished `exit 0` with `publish: published`. **The bundle it
+published still ended at Hungary.** Every layer agreed the run had worked. The total went
+from 534,065 rows to 534,091, a gain of 26, and nothing said so.
+
+**The cause is one character.** Every serving layer scoped its races with
+`s.date_start < datetime('now')`. SQLite has no date type, so that is a string comparison.
+`date_start` is ISO 8601, `2026-08-23T13:00:00+00:00`. `datetime('now')` is
+space-separated, `2026-08-23 16:10:40`. The first ten characters are equal, and at
+character 10 the comparison weighs `'T'` against `' '`. `T` is the larger byte, so the
+test fails.
+
+**The shape of the failure is what makes it worth an entry.** It excludes only races held
+on the current calendar date, and it excludes all of them regardless of the hour. Every
+race from any previous day passes, because the date prefix already differs. So the defect
+is invisible to a next-day run and repairs itself overnight, which means the twice-weekly
+scheduled job would never have shown it. It fires exactly when somebody watches a race and
+runs the pipeline the same evening, and it fires every single time.
+
+**It also split the layers apart, which is how it was caught at all.** `s05_diagnostic`
+counts its scope from `gold_session.is_analysable`, computed in `s07_build_gold` and free
+of the defect, so it reported **82** while `s04_descriptive`, `s05b_prescriptive` and
+`s05c_racemap` reported **81**. The published bundle therefore carried diagnostic figures
+fitted over a race that `dim_race` did not contain and the footer did not count. Nothing
+raised. Two layers reading the same database disagreed about what was in it, and the only
+symptom was two numbers in a log that nobody had a reason to compare.
+
+The comment above `RACE_SCOPE` in `s05_diagnostic` claimed the silver and gold forms were
+"the same 81 races, verified identical with zero divergence either way". That was true when
+written and false a fortnight later. It has been rewritten to say what happened, because a
+comment asserting two things agree is worth less than one saying when they stopped.
+
+**The fix** is `julianday()` on both sides, in all four files. That parses both operands as
+dates instead of comparing their spelling. Confirmed no race is lost to a value julianday
+cannot read: the scope returns exactly 82, not fewer.
+
+**Verified before rerunning, not after.** Each module's own `RACE_SCOPE` constant was
+imported and executed against silver: all three return 82 with the Dutch GP present, gold
+returns 82, and `s05c`'s inline query returns 82. Five independent definitions, one answer.
+Then the full pipeline, which found nothing new to ingest, correctly skipped the silver
+rebuild, rebuilt the serving layers anyway as designed, and published 536,240 rows.
+`dim_race` 82, `fact_lap` carrying all 1,369 Dutch laps, `map_coverage` 82, footer reading
+"Data through 23 August 2026, 82 races".
+
+**The pinning from #59 held on its first unattended encounter with new data.** 24 of 24
+circuits traced from their pinned lap, no fallbacks, `map_circuit_outline` unchanged at
+9,600 rows while the race count moved. A new race added a mapped race without perturbing
+any existing geometry, which is exactly what pinning was for.
+
+**Bahrain and Saudi Arabia 2026 are absent from the season and always were.** Not this bug.
+OpenF1 returns HTTP 404 on `/laps` for both. The pipeline was right to omit them, and 2026
+reads 12 races of 14 run for that reason.
+
+**The lesson is the one from #61 in a different costume.** A run that says `publish:
+published` has reported the publish, not the contents. Nothing in the pipeline compares
+what it shipped against what it holds, so shipping a bundle one race short is a silent
+success. Worth considering: the run already knows how many races the gate counted in silver
+and how many rows went into the bundle, and a step that refuses to publish when those
+disagree would have turned this into a loud failure instead of a quiet one.
 
 
 ## Open questions

@@ -544,7 +544,7 @@ def build_coverage(silver, outlines: pd.DataFrame, measured: pd.DataFrame,
         FROM silver_sessions s
         JOIN silver_meetings m ON m.meeting_key = s.meeting_key
         WHERE s.session_name = 'Race' AND s.is_cancelled = 0
-          AND s.date_start < datetime('now')
+          AND julianday(s.date_start) < julianday('now')
         ORDER BY s.year, s.date_start
     """, silver)
 

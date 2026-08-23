@@ -88,12 +88,19 @@ TEAM_NAME_MAP = {
 
 # Every completed Grand Prix with both laps and results. The EXISTS clauses are
 # what make this dynamic — no year list to maintain.
+#
+# julianday on both sides, not a bare `date_start < datetime('now')`. That form
+# compares two strings: date_start is ISO ("2026-08-23T13:00:00+00:00") and
+# datetime('now') is space-separated ("2026-08-23 16:10:40"), so at character 10
+# it weighs 'T' against ' ' and 'T' wins. Every race held on the current date is
+# excluded no matter how long ago it finished, and only on that date, so the
+# defect disappears by itself overnight. It cost the Dutch GP a publish.
 RACE_SCOPE = """
     SELECT s.session_key, s.meeting_key
     FROM silver_sessions s
     WHERE s.session_name = 'Race'
       AND s.is_cancelled = 0
-      AND s.date_start < datetime('now')
+      AND julianday(s.date_start) < julianday('now')
       AND EXISTS (SELECT 1 FROM silver_laps l WHERE l.session_key = s.session_key)
       AND EXISTS (SELECT 1 FROM silver_session_result r WHERE r.session_key = s.session_key)
 """

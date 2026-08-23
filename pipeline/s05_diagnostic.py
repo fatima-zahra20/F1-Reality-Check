@@ -99,17 +99,21 @@ ALPHA = 0.05
 # two report on the same set of pairings.
 MIN_PAIR_SESSIONS = 8
 
-# Same dynamic scope as s04 — no year list to maintain.
+# Same dynamic scope as s04 — no year list to maintain. See s04 for why the date
+# test uses julianday rather than comparing the strings.
 #
 # Kept for the query sites still reading silver directly. The gold form below is
-# the same 81 races, verified identical with zero divergence either way, and is
-# what the shared loaders use.
+# the same races and is what the shared loaders use. The two were verified
+# identical once and were not identical forever: on 23 Aug 2026 the string
+# comparison held this form at 81 races while gold_session.is_analysable, which
+# never had the defect, returned 82. Divergence between them is a symptom worth
+# checking, not a settled question.
 RACE_SCOPE = """
     SELECT s.session_key, s.meeting_key
     FROM silver_sessions s
     WHERE s.session_name = 'Race'
       AND s.is_cancelled = 0
-      AND s.date_start < datetime('now')
+      AND julianday(s.date_start) < julianday('now')
       AND EXISTS (SELECT 1 FROM silver_laps l WHERE l.session_key = s.session_key)
       AND EXISTS (SELECT 1 FROM silver_session_result r WHERE r.session_key = s.session_key)
 """
