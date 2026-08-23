@@ -1532,6 +1532,75 @@ and how many rows went into the bundle, and a step that refuses to publish when 
 disagree would have turned this into a loud failure instead of a quiet one.
 
 
+### 63. A verdict recorded before the race it describes
+
+*2026-08-23, an hour after #62. Found by reading the dashboard rather than the logs: the
+Dutch GP pit section said 0 stops for a driver who made three.*
+
+**The page was right and the data was wrong.** Bronze held no pit rows for the race.
+OpenF1 held 65, covering 21 drivers. The ingest had never asked.
+
+**The record that caused it**, for the race session, endpoint `pit`:
+
+    rows 0    status None    http None    2026-06-30 13:03:39
+
+Recorded on **30 June, 54 days before the race was run**. The old ingestion script
+registered every session on the published calendar, including ones that had not happened,
+and wrote a zero for each. A zero written about a race that does not yet exist is not an
+observation.
+
+**Why it was permanent.** `build_session_plan` calls
+`expected_endpoints(session_name, include_optional=is_new)`, and any session with a
+progress row is not new. `pit` and `team_radio` are the optional endpoints, so they were
+not skipped by the retry rule below, they were **never placed in the plan for it to
+judge**. The retry logic is careful and correct and was never reached.
+
+**The scale is the part worth keeping.** Every remaining 2026 race carried the same 30 June
+zero: Italy, Spain, Azerbaijan, Bahrain, Singapore, Austin, Mexico, Sao Paulo, Las Vegas,
+Qatar, Abu Dhabi. **Eleven races, each set to arrive with no pit stops and no team radio,
+each reporting a successful run.** Not a defect that happened once; a defect scheduled to
+happen eleven more times.
+
+**It had been signalling for weeks in a check that already passes.** Gate check 18 reports
+team radio missing for **27 sessions in 2026** against 3, 3 and 6 for the earlier seasons.
+That asymmetry was the bug, visible, printed on every run, and read as upstream absence
+because the line says "absent upstream, not a fetch failure". A WARN nobody can act on
+becomes scenery.
+
+**What hid it.** March to June 2026 were fetched on 30 June, by which time they had already
+been raced, so they have real data. British, Belgian and Hungarian carry a verdict of 27
+July with status `ok`, from a manual `--include-optional` backfill after Hungary. A manual
+rescue that nobody recorded as a rescue is indistinguishable from the system working.
+
+**The fix.** An optional endpoint whose verdict predates its own session's start is
+reconsidered once, then falls back to the normal rules. Deliberately narrow: it does not
+weaken the reason optional endpoints are excluded, which is not re-querying a practice
+session that genuinely had no stops. `julianday` on both sides, because `fetched_at` is
+space-separated and `date_start` is ISO, and comparing those as strings is #62.
+
+**Verified as a dry run before executing**, which is the only reason it can be called
+narrow: exactly **10 pairs**, five Dutch sessions times two endpoints, nothing else in the
+database disturbed. The run then fetched 396 rows, `silver_pit` +330 and
+`silver_team_radio` +66, and published.
+
+**And it immediately exposed something else, which is left open.** Antonelli now reads
+**4 pit stops** for a race in which he made three. The fourth is lap 2, `lane_duration`
+1572.5s, sitting in the pit lane through `RED FLAG - RACE SUSPENDED`. The dashboard cannot
+tell that from a stop because the data does not distinguish them.
+
+Measured across every race and sprint in the database: **162 pit records over ten minutes**
+and 19 more between one and ten, spread over **14 races**. The signature is unmistakable,
+16 to 21 records in a single race, close to the whole field at once, which is what a red
+flag looks like and what no pit stop looks like. 2023 Dutch, Japan, Mexico, Sao Paulo; 2024
+Japan, Monaco, Sao Paulo; 2025 Sao Paulo; 2026 Australia, Barcelona, Canada, Monaco, Dutch.
+
+This is not new and was not caused by anything here. It has been inflating `pit_stops` and
+skewing any pit-duration figure on those 14 races since 2023, and it surfaced now only
+because someone knew the right answer for one driver and checked. Recorded as open question
+H rather than fixed in the same breath, because deciding what counts as a pit stop is a
+modelling decision and not a bug fix.
+
+
 ## Open questions
 
 ### A. `caution_flag` under-detects Safety Car periods
@@ -1679,3 +1748,34 @@ user-visible after all, which the original "why it is not urgent" paragraph got 
 few sessions, which suggests something specific about those laps, perhaps a timestamp at
 an exact boundary, rather than general noise. Worth pulling on, and no longer blocking
 anything.
+
+### H. A red flag is recorded as a pit stop
+*Raised 2026-08-23, see #63. Present since 2023, found only when a known answer was
+checked against the page.*
+
+`silver_pit` records time in the pit lane, and a race suspension puts the whole field in
+the pit lane. Nothing in the data distinguishes the two, so a red flag arrives as a pit
+stop with a `lane_duration` of ten to forty minutes.
+
+**Measured over every race and sprint:** 162 records above ten minutes, 19 more between
+one and ten, across 14 races. 2023 Dutch, Japan, Mexico, Sao Paulo; 2024 Japan, Monaco,
+Sao Paulo; 2025 Sao Paulo; 2026 Australia, Barcelona, Canada, Monaco, Dutch. The tell is
+the count per race, 16 to 21 records at once, which is the field rather than a strategy.
+
+**What it corrupts.** `fact_driver_race.pit_stops` is inflated by one for every driver in
+an affected race: Antonelli reads 4 for the 2026 Dutch GP having made three. Any mean or
+maximum over `lane_duration` on those races is meaningless, which includes the "disaster
+stop" framing on the pit section. 14 of 82 races is not a rounding error.
+
+**Why it is not a one-line fix.** A threshold is the obvious move and it is a modelling
+decision, not a bug fix. A genuine catastrophic stop and a short suspension can occupy the
+same range, so any cutoff trades false positives against false negatives and the honest
+version of this page has to say which it chose and why. The materials for a better answer
+already exist: `silver_caution_periods` knows when the race was red-flagged, so a pit
+record overlapping a RED period can be **labelled** rather than guessed at by duration.
+That is the approach to try first, and it is the same range-overlap idea that resolved
+questions A and B.
+
+**Do not simply drop these rows.** The car really was in the pit lane, and for tyre
+strategy a red-flag tyre change is a real event with real consequences. The requirement is
+to tell the two apart, not to delete one.

@@ -151,14 +151,14 @@
       "nulls": {
         "date": 0.0,
         "driver_number": 0.0,
-        "lane_duration": 0.2257,
+        "lane_duration": 0.2254,
         "lap_number": 0.0,
         "meeting_key": 0.0,
-        "pit_duration": 0.2257,
+        "pit_duration": 0.2254,
         "session_key": 0.0,
-        "stop_duration": 0.9649
+        "stop_duration": 0.9653
       },
-      "rows": 29573,
+      "rows": 29903,
       "scope": "race"
     },
     "silver_position": {
@@ -277,7 +277,7 @@
         "recording_url": 0.0,
         "session_key": 0.0
       },
-      "rows": 16880,
+      "rows": 16946,
       "scope": "any"
     },
     "silver_weather": {
@@ -299,5 +299,5 @@
       "scope": "any"
     }
   },
-  "written_at": "2026-08-23T16:18:04+00:00"
+  "written_at": "2026-08-23T17:38:12+00:00"
 }

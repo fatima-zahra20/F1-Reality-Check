@@ -24,6 +24,11 @@ Two jobs, in order:
    team_radio); previously-seen sessions only get the core retry set, so a
    legitimately empty practice session is not re-queried every week.
 
+   One exception, and it is not a refinement: an optional endpoint whose
+   verdict predates the session's own start time is reconsidered once. A
+   session can be "previously seen" because a calendar entry was registered
+   months before it was raced, and a zero recorded then describes nothing.
+
 Telemetry (car_data, location) is never fetched here — ~35M rows covering only
 32 of 490 sessions, unusable as model features. Fetch it manually on demand.
 
@@ -46,6 +51,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from config import DB_PATH, BRONZE_DB_PATH  # noqa: E402
 from s01_backfill import (  # noqa: E402
+    OPTIONAL_ENDPOINTS,
     ensure_status_columns,
     expected_endpoints,
     fetch,
@@ -141,10 +147,36 @@ def build_session_plan(con: sqlite3.Connection):
 
     new_pairs, retry_pairs = [], []
 
-    for session_key, session_name, meeting_name, _ in sessions:
+    for session_key, session_name, meeting_name, date_start in sessions:
         is_new = str(session_key) not in seen
 
-        for endpoint in expected_endpoints(session_name, include_optional=is_new):
+        endpoints = expected_endpoints(session_name, include_optional=is_new)
+
+        # A verdict recorded BEFORE the session ran is not a verdict, it is a
+        # guess about the future, and optional endpoints are otherwise never
+        # reconsidered once a session is seen. The old ingestion script
+        # registered every session on the published calendar, so the whole 2026
+        # season carries "pit: 0 rows, 2026-06-30" written months before those
+        # races existed. Without this, that data can never arrive: found
+        # 2026-08-23, when the Dutch GP had 65 pit rows on the API and none
+        # here, and the ten races after it were set to fail the same way.
+        #
+        # julianday because fetched_at is space-separated and date_start is
+        # ISO, and comparing them as strings is the bug in NOTES_LOG #62.
+        if not is_new:
+            for endpoint in OPTIONAL_ENDPOINTS:
+                if endpoint in endpoints:
+                    continue
+                settled = con.execute(
+                    "SELECT 1 FROM _ingestion_progress "
+                    "WHERE endpoint = ? AND session_key = ? "
+                    "  AND julianday(fetched_at) >= julianday(?)",
+                    (endpoint, str(session_key), date_start),
+                ).fetchone()
+                if settled is None:
+                    endpoints.append(endpoint)
+
+        for endpoint in endpoints:
             if is_new:
                 new_pairs.append((session_key, session_name, meeting_name, endpoint))
                 continue
