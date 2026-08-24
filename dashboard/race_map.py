@@ -410,6 +410,16 @@ CAMERA_DISTANCE_MAX = 3.4
 
 ARROW_COUNT = 8
 
+# A chevron, not a filled arrowhead. The 3D view drew cones at sizeref = 5% of
+# the circuit's width, which on screen is a black wedge sitting ON the track
+# rather than a mark along it, wide enough to hide the racing line underneath.
+# Two thin strokes meeting at a point say the same thing and obscure nothing.
+#
+# Sized as a fraction of the circuit rather than in pixels, so a mark keeps its
+# proportion to the track at any zoom, and so the flat and 3D views agree.
+ARROW_LENGTH_FRACTION = 0.010   # tip to tail, along the direction of travel
+ARROW_WIDTH_FRACTION = 0.006    # half the spread across it
+
 # The inset sits in the top-right corner of the 3D scene, in paper coordinates.
 DIAL_DOMAIN = [0.80, 0.99]
 
@@ -453,45 +463,77 @@ def _heading_points(path: pd.DataFrame, n: int) -> pd.DataFrame:
     out["dz"] = ((ahead.z.to_numpy() - back.z.to_numpy())
                  if "z" in here else np.zeros(len(out)))
 
-    # Plotly measures marker.angle clockwise from straight up; atan2 measures
-    # counter-clockwise from the positive x axis. Hence 90 minus, not plus.
-    out["angle"] = 90.0 - np.degrees(np.arctan2(out.dy, out.dx))
     return out
+
+
+def _chevrons(pts: pd.DataFrame, span: float):
+    """
+    Chevron vertices for every heading point, as flat x, y and z lists.
+
+    A None between chevrons is what stops Plotly joining the end of one to the
+    start of the next. Drawing all eight as a single lines trace rather than
+    eight traces keeps the figure cheap and the legend clean.
+    """
+    length = span * ARROW_LENGTH_FRACTION
+    width = span * ARROW_WIDTH_FRACTION
+
+    dx, dy = pts.dx.to_numpy(float), pts.dy.to_numpy(float)
+    norm = np.hypot(dx, dy)
+    norm[norm == 0] = 1.0          # a stationary point has no heading to draw
+    ux, uy = dx / norm, dy / norm
+
+    # Perpendicular in the ground plane only. Elevation runs to tens of metres
+    # against kilometres of track, so a chevron kept level reads as flat on the
+    # road; tilting it into the true 3D normal would make it look broken.
+    px, py = -uy, ux
+
+    xs, ys, zs = [], [], []
+    for i in range(len(pts)):
+        cx, cy = float(pts.x.iloc[i]), float(pts.y.iloc[i])
+        cz = float(pts.z.iloc[i])
+        tip_x, tip_y = cx + ux[i] * length, cy + uy[i] * length
+        back_x, back_y = cx - ux[i] * length, cy - uy[i] * length
+        xs += [back_x + px[i] * width, tip_x, back_x - px[i] * width, None]
+        ys += [back_y + py[i] * width, tip_y, back_y - py[i] * width, None]
+        zs += [cz, cz, cz, None]
+    return xs, ys, zs
 
 
 def travel_arrows_2d(path: pd.DataFrame, colour: str,
                      n: int = ARROW_COUNT) -> go.Scatter | None:
-    """Arrowheads along the flat outline, pointing the way the lap is run."""
+    """Chevrons along the flat outline, pointing the way the lap is run."""
     pts = _heading_points(path, n)
     if pts.empty:
         return None
+    span = float(max(path.x.max() - path.x.min(), path.y.max() - path.y.min()))
+    xs, ys, _ = _chevrons(pts, span)
     return go.Scatter(
-        x=pts.x, y=pts.y, mode="markers", name="Direction of travel",
-        marker=dict(symbol="arrow", size=13, angle=pts.angle,
-                    color=colour, line=dict(width=0)),
+        x=xs, y=ys, mode="lines", name="Direction of travel",
+        line=dict(color=colour, width=2),
         hovertemplate="The lap runs this way<extra></extra>",
         showlegend=False,
     )
 
 
 def travel_arrows_3d(path: pd.DataFrame, colour: str,
-                     n: int = ARROW_COUNT) -> go.Cone | None:
+                     n: int = ARROW_COUNT) -> go.Scatter3d | None:
     """
-    The same arrows in the 3D scene.
+    The same chevrons in the 3D scene.
 
-    Cones rather than markers because Scatter3d cannot rotate a symbol, so a
-    marker would point the same way whatever the car is doing.
+    Drawn as line segments rather than a rotated marker because Scatter3d
+    cannot rotate a symbol, and rather than a Cone because a cone is a solid
+    sized in absolute units and reads as an obstacle on the track.
     """
     pts = _heading_points(path, n)
     if pts.empty:
         return None
     span = float(max(path.x.max() - path.x.min(), path.y.max() - path.y.min()))
-    return go.Cone(
-        x=pts.x, y=pts.y, z=pts.z,
-        u=pts.dx, v=pts.dy, w=pts.dz,
-        sizemode="absolute", sizeref=span * 0.05, anchor="tail",
-        showscale=False, colorscale=[[0, colour], [1, colour]],
+    xs, ys, zs = _chevrons(pts, span)
+    return go.Scatter3d(
+        x=xs, y=ys, z=zs, mode="lines", name="Direction of travel",
+        line=dict(color=colour, width=4),
         hovertemplate="The lap runs this way<extra></extra>",
+        showlegend=False,
     )
 
 
