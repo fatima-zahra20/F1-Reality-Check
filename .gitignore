@@ -232,6 +232,8 @@ cython_debug/
 *.db.backup*
 *.sqlite
 *.sqlite3
+*.duckdb
+*.duckdb.wal
 
 # Local tool config
 .claude/

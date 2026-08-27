@@ -1,5 +1,5 @@
 {
-  "sessions_in_scope": 420,
+  "sessions_in_scope": 425,
   "tables": {
     "silver_caution_periods": {
       "nulls": {
@@ -56,7 +56,7 @@
       "rows": 9949
     },
     "silver_intervals": {
-      "in_scope": 103,
+      "in_scope": 105,
       "missing_sessions": 0,
       "nulls": {
         "date": 0.0,
@@ -85,7 +85,7 @@
       "rows": 242301
     },
     "silver_laps": {
-      "in_scope": 420,
+      "in_scope": 425,
       "missing_sessions": 1,
       "nulls": {
         "date_start": 0.002,
@@ -132,7 +132,7 @@
       "rows": 101
     },
     "silver_overtakes": {
-      "in_scope": 103,
+      "in_scope": 105,
       "missing_sessions": 0,
       "nulls": {
         "date": 0.0,
@@ -146,7 +146,7 @@
       "scope": "race"
     },
     "silver_pit": {
-      "in_scope": 103,
+      "in_scope": 105,
       "missing_sessions": 13,
       "nulls": {
         "date": 0.0,
@@ -162,7 +162,7 @@
       "scope": "race"
     },
     "silver_position": {
-      "in_scope": 420,
+      "in_scope": 425,
       "missing_sessions": 0,
       "nulls": {
         "date": 0.0,
@@ -176,7 +176,7 @@
       "scope": "any"
     },
     "silver_race_control": {
-      "in_scope": 420,
+      "in_scope": 425,
       "missing_sessions": 0,
       "nulls": {
         "category": 0.0,
@@ -196,7 +196,7 @@
       "scope": "any"
     },
     "silver_session_result": {
-      "in_scope": 405,
+      "in_scope": 410,
       "missing_sessions": 0,
       "nulls": {
         "dnf": 0.0,
@@ -238,7 +238,7 @@
       "rows": 495
     },
     "silver_starting_grid": {
-      "in_scope": 103,
+      "in_scope": 105,
       "missing_sessions": 1,
       "nulls": {
         "driver_number": 0.0,
@@ -251,7 +251,7 @@
       "scope": "quali"
     },
     "silver_stints": {
-      "in_scope": 420,
+      "in_scope": 425,
       "missing_sessions": 0,
       "nulls": {
         "compound": 0.0027,
@@ -267,7 +267,7 @@
       "scope": "any"
     },
     "silver_team_radio": {
-      "in_scope": 420,
+      "in_scope": 425,
       "missing_sessions": 39,
       "nulls": {
         "date": 0.0,
@@ -281,7 +281,7 @@
       "scope": "any"
     },
     "silver_weather": {
-      "in_scope": 420,
+      "in_scope": 425,
       "missing_sessions": 0,
       "nulls": {
         "air_temperature": 0.0,
@@ -299,5 +299,5 @@
       "scope": "any"
     }
   },
-  "written_at": "2026-08-24T08:00:51+00:00"
+  "written_at": "2026-08-27T08:01:02+00:00"
 }
