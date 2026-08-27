@@ -43,7 +43,7 @@ Usage
 from __future__ import annotations
 
 import argparse
-import sqlite3
+import duckdb
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -64,7 +64,7 @@ GLOBAL_ENDPOINTS = ["meetings", "sessions", "drivers"]
 
 # --- global tables ---------------------------------------------------------------
 
-def refresh_global(con: sqlite3.Connection, endpoint: str, execute: bool) -> tuple[int, int]:
+def refresh_global(con: duckdb.DuckDBPyConnection, endpoint: str, execute: bool) -> tuple[int, int]:
     """
     Truncate-and-reload one global table. Returns (rows_before, rows_after).
 
@@ -74,7 +74,7 @@ def refresh_global(con: sqlite3.Connection, endpoint: str, execute: bool) -> tup
     """
     try:
         before = con.execute(f'SELECT COUNT(*) FROM "{endpoint}"').fetchone()[0]
-    except sqlite3.OperationalError:
+    except duckdb.Error:
         before = 0
 
     print(f"\n  /{endpoint}")
@@ -101,7 +101,7 @@ def refresh_global(con: sqlite3.Connection, endpoint: str, execute: bool) -> tup
         print(f"    would replace ({len(rows) - before:+,})")
         return before, len(rows)
 
-    con.execute("BEGIN")
+    con.execute("BEGIN TRANSACTION")
     try:
         con.execute(f'DELETE FROM "{endpoint}"')
         n = insert_rows(con, endpoint, rows)
@@ -117,7 +117,8 @@ def refresh_global(con: sqlite3.Connection, endpoint: str, execute: bool) -> tup
 
 # --- per-session planning --------------------------------------------------------
 
-def build_session_plan(con: sqlite3.Connection):
+def build_session_plan(con: duckdb.DuckDBPyConnection):
+
     """
     Returns (new_pairs, retry_pairs).
 
@@ -142,8 +143,9 @@ def build_session_plan(con: sqlite3.Connection):
         row[0] for row in con.execute(
             "SELECT DISTINCT session_key FROM _ingestion_progress "
             "WHERE session_key != '__global__'"
-        )
+        ).fetchall()
     }
+
 
     new_pairs, retry_pairs = [], []
 
@@ -161,8 +163,11 @@ def build_session_plan(con: sqlite3.Connection):
         # 2026-08-23, when the Dutch GP had 65 pit rows on the API and none
         # here, and the ten races after it were set to fail the same way.
         #
-        # julianday because fetched_at is space-separated and date_start is
-        # ISO, and comparing them as strings is the bug in NOTES_LOG #62.
+        # Both sides are cast to a timestamp rather than compared as strings,
+        # because fetched_at is space-separated and date_start is ISO, and
+        # comparing those as text is the bug in NOTES_LOG #62. date_start is
+        # trimmed to 19 characters to drop its "+00:00", since fetched_at
+        # carries no offset and both are already UTC.
         if not is_new:
             for endpoint in OPTIONAL_ENDPOINTS:
                 if endpoint in endpoints:
@@ -170,7 +175,8 @@ def build_session_plan(con: sqlite3.Connection):
                 settled = con.execute(
                     "SELECT 1 FROM _ingestion_progress "
                     "WHERE endpoint = ? AND session_key = ? "
-                    "  AND julianday(fetched_at) >= julianday(?)",
+                    "  AND CAST(fetched_at AS TIMESTAMP) "
+                    "      >= CAST(substr(?, 1, 19) AS TIMESTAMP)",
                     (endpoint, str(session_key), date_start),
                 ).fetchone()
                 if settled is None:
@@ -201,7 +207,7 @@ def build_session_plan(con: sqlite3.Connection):
     return new_pairs, retry_pairs
 
 
-def run_pairs(con: sqlite3.Connection, pairs, label: str) -> dict:
+def run_pairs(con: duckdb.DuckDBPyConnection, pairs, label: str) -> dict:
     counts = {"ok": 0, "empty": 0, "failed": 0, "rows": 0}
 
     for i, (session_key, session_name, meeting_name, endpoint) in enumerate(pairs, 1):
@@ -249,10 +255,11 @@ def main() -> int:
         print(f"[FAIL] bronze database not found at {BRONZE_DB_PATH}")
         return 1
 
-    con = sqlite3.connect(str(BRONZE_DB_PATH))
-    con.execute("PRAGMA journal_mode=WAL")
-    con.execute(f"ATTACH DATABASE '{DB_PATH.as_posix()}' AS silver")
-    ensure_status_columns(con)
+    con = duckdb.connect(str(BRONZE_DB_PATH))
+    # No journal_mode. DuckDB has no WAL pragma and needs no tuning here; the
+    # SQLite version set it because a 3 GB row store with default journalling
+    con.execute(f"ATTACH '{DB_PATH.as_posix()}' AS silver")
+
 
     mode = "EXECUTE" if args.execute else "DRY RUN"
     print("=" * 74)

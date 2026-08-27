@@ -28,16 +28,25 @@ After a backfill, rebuild the tables whose bronze data changed:
 from __future__ import annotations
 
 import argparse
-import sqlite3
 import sys
 import time
 from pathlib import Path
+
+import duckdb
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from config import DB_PATH, BRONZE_DB_PATH  # noqa: E402
 
 # Each entry: bronze source table -> list of statements, executed in order.
 # Keys are the bare names; silver tables are silver_<key>.
+#
+# DOUBLE, never REAL. The two mean different things in the two engines and the
+# difference is silent: SQLite's REAL is 8 bytes, DuckDB's is 4. Written as REAL
+# here, every float in silver would quietly lose half its precision, so a lap
+# time of 91.057 comes back as 91.05699920654297 and the regressions downstream
+# fit slightly different coefficients for no stated reason. Caught by comparing
+# the DuckDB build against the SQLite one rather than by reading the code, which
+# is the only way a difference this quiet shows up.
 BUILD: dict[str, list[str]] = {}
 
 BUILD["meetings"] = ["""
@@ -105,8 +114,20 @@ CREATE TABLE silver_sessions (
     location            TEXT    NOT NULL,
     gmt_offset          TEXT    NOT NULL,
     year                INTEGER NOT NULL,
-    is_cancelled        INTEGER NOT NULL CHECK (is_cancelled IN (0, 1)),
-    FOREIGN KEY (meeting_key) REFERENCES silver_meetings(meeting_key)
+    is_cancelled        INTEGER NOT NULL CHECK (is_cancelled IN (0, 1))
+    -- The FOREIGN KEY on meeting_key that used to sit here is gone, and it was
+    -- never doing anything: SQLite has foreign keys off unless PRAGMA
+    -- foreign_keys=ON, which this build never set, so it was documentation
+    -- wearing the clothes of a constraint.
+    --
+    -- DuckDB does enforce them, which turned it into a problem rather than a
+    -- comment: silver_meetings could no longer be dropped while this table
+    -- referenced it, so rebuilding one table on its own became impossible and
+    -- the weekly run would have failed on its second pass.
+    --
+    -- The relationship itself is still checked, by s03_verify check 12, which
+    -- looks for session_key orphans on real data. A test that runs beats a
+    -- constraint that did not.
 )
 """, """
 INSERT INTO silver_sessions
@@ -168,13 +189,13 @@ CREATE TABLE silver_laps (
     lap_number          INTEGER NOT NULL,
     meeting_key         INTEGER NOT NULL,
     date_start          TEXT,
-    duration_sector_1   REAL,
-    duration_sector_2   REAL,
-    duration_sector_3   REAL,
-    i1_speed            REAL,
-    i2_speed            REAL,
-    st_speed            REAL,
-    lap_duration        REAL,
+    duration_sector_1   DOUBLE,
+    duration_sector_2   DOUBLE,
+    duration_sector_3   DOUBLE,
+    i1_speed            DOUBLE,
+    i2_speed            DOUBLE,
+    st_speed            DOUBLE,
+    lap_duration        DOUBLE,
     is_pit_out_lap      INTEGER CHECK (is_pit_out_lap IN (0, 1) OR is_pit_out_lap IS NULL),
     segments_sector_1   TEXT,
     segments_sector_2   TEXT,
@@ -189,13 +210,13 @@ SELECT
     CAST(lap_number    AS INTEGER),
     CAST(meeting_key   AS INTEGER),
     date_start,
-    CAST(duration_sector_1 AS REAL),
-    CAST(duration_sector_2 AS REAL),
-    CAST(duration_sector_3 AS REAL),
-    CAST(i1_speed AS REAL),
-    CAST(i2_speed AS REAL),
-    CAST(st_speed AS REAL),
-    CAST(lap_duration AS REAL),
+    CAST(duration_sector_1 AS DOUBLE),
+    CAST(duration_sector_2 AS DOUBLE),
+    CAST(duration_sector_3 AS DOUBLE),
+    CAST(i1_speed AS DOUBLE),
+    CAST(i2_speed AS DOUBLE),
+    CAST(st_speed AS DOUBLE),
+    CAST(lap_duration AS DOUBLE),
     CASE is_pit_out_lap WHEN 'True' THEN 1 WHEN 'False' THEN 0 ELSE NULL END,
     segments_sector_1,
     segments_sector_2,
@@ -240,9 +261,9 @@ CREATE TABLE silver_pit (
     lap_number     INTEGER NOT NULL,
     meeting_key    INTEGER NOT NULL,
     "date"         TEXT    NOT NULL,
-    stop_duration  REAL,
-    lane_duration  REAL,
-    pit_duration   REAL,
+    stop_duration  DOUBLE,
+    lane_duration  DOUBLE,
+    pit_duration   DOUBLE,
     PRIMARY KEY (session_key, driver_number, lap_number)
 )
 """, """
@@ -253,17 +274,22 @@ SELECT
     CAST(lap_number    AS INTEGER),
     CAST(meeting_key   AS INTEGER),
     "date",
-    CAST(stop_duration AS REAL),
-    CAST(lane_duration AS REAL),
-    CAST(pit_duration  AS REAL)
+    CAST(stop_duration AS DOUBLE),
+    CAST(lane_duration AS DOUBLE),
+    CAST(pit_duration  AS DOUBLE)
 FROM bronze.pit
 """]
 
 BUILD["position"] = ["""
 DROP TABLE IF EXISTS silver_position
 """, """
+-- No surrogate id. It existed because SQLite wanted a primary key and this
+-- table has no natural one: a driver can hold the same position at the same
+-- timestamp more than once. DuckDB has no AUTOINCREMENT and needs no key, and
+-- nothing in the project ever selected the column, so it is gone rather than
+-- reproduced with a sequence. Dropping it also removes a value that would have
+-- been numbered differently on every rebuild.
 CREATE TABLE silver_position (
-    id             INTEGER PRIMARY KEY AUTOINCREMENT,
     session_key    INTEGER NOT NULL,
     driver_number  INTEGER NOT NULL,
     meeting_key    INTEGER NOT NULL,
@@ -292,9 +318,9 @@ CREATE TABLE silver_intervals (
     driver_number          INTEGER NOT NULL,
     "date"                 TEXT    NOT NULL,
     meeting_key            INTEGER NOT NULL,
-    interval_seconds       REAL,
+    interval_seconds       DOUBLE,
     interval_laps          INTEGER,
-    gap_to_leader_seconds  REAL,
+    gap_to_leader_seconds  DOUBLE,
     gap_to_leader_laps     INTEGER,
     PRIMARY KEY (session_key, driver_number, "date")
 )
@@ -307,7 +333,7 @@ SELECT
     CAST(meeting_key   AS INTEGER),
     CASE
         WHEN "interval" LIKE '%LAP%' THEN NULL
-        ELSE CAST("interval" AS REAL)
+        ELSE CAST("interval" AS DOUBLE)
     END,
     CASE
         WHEN "interval" LIKE '%LAP%'
@@ -316,7 +342,7 @@ SELECT
     END,
     CASE
         WHEN gap_to_leader LIKE '%LAP%' THEN NULL
-        ELSE CAST(gap_to_leader AS REAL)
+        ELSE CAST(gap_to_leader AS DOUBLE)
     END,
     CASE
         WHEN gap_to_leader LIKE '%LAP%'
@@ -354,8 +380,8 @@ FROM bronze.overtakes
 BUILD["race_control"] = ["""
 DROP TABLE IF EXISTS silver_race_control
 """, """
+-- No surrogate id, for the reason given on silver_position.
 CREATE TABLE silver_race_control (
-    id                INTEGER PRIMARY KEY AUTOINCREMENT,
     session_key       INTEGER NOT NULL,
     meeting_key       INTEGER NOT NULL,
     "date"            TEXT    NOT NULL,
@@ -404,12 +430,12 @@ CREATE TABLE silver_session_result (
     dnf                    INTEGER NOT NULL CHECK (dnf IN (0, 1)),
     dns                    INTEGER NOT NULL CHECK (dns IN (0, 1)),
     dsq                    INTEGER NOT NULL CHECK (dsq IN (0, 1)),
-    duration_race_seconds  REAL,
+    duration_race_seconds  DOUBLE,
     duration_quali_json    TEXT,
-    gap_to_leader_seconds  REAL,
+    gap_to_leader_seconds  DOUBLE,
     gap_to_leader_laps     INTEGER,
     gap_to_leader_quali_json TEXT,
-    points                 REAL,
+    points                 DOUBLE,
     PRIMARY KEY (session_key, driver_number)
 )
 """, """
@@ -423,12 +449,12 @@ SELECT
     CASE dnf WHEN 'True' THEN 1 WHEN 'False' THEN 0 END,
     CASE dns WHEN 'True' THEN 1 WHEN 'False' THEN 0 END,
     CASE dsq WHEN 'True' THEN 1 WHEN 'False' THEN 0 END,
-    CASE WHEN duration LIKE '[%' THEN NULL ELSE CAST(duration AS REAL) END,
+    CASE WHEN duration LIKE '[%' THEN NULL ELSE CAST(duration AS DOUBLE) END,
     CASE WHEN duration LIKE '[%' THEN duration ELSE NULL END,
     CASE
         WHEN gap_to_leader LIKE '[%' THEN NULL
         WHEN gap_to_leader LIKE '%LAP%' THEN NULL
-        ELSE CAST(gap_to_leader AS REAL)
+        ELSE CAST(gap_to_leader AS DOUBLE)
     END,
     CASE
         WHEN gap_to_leader LIKE '%LAP%'
@@ -436,7 +462,7 @@ SELECT
         ELSE NULL
     END,
     CASE WHEN gap_to_leader LIKE '[%' THEN gap_to_leader ELSE NULL END,
-    CAST(points AS REAL)
+    CAST(points AS DOUBLE)
 FROM bronze.session_result
 """]
 
@@ -448,7 +474,7 @@ CREATE TABLE silver_starting_grid (
     driver_number  INTEGER NOT NULL,
     meeting_key    INTEGER NOT NULL,
     "position"     INTEGER NOT NULL,
-    lap_duration   REAL,
+    lap_duration   DOUBLE,
     PRIMARY KEY (session_key, driver_number)
 )
 """, """
@@ -458,15 +484,16 @@ SELECT
     CAST(driver_number AS INTEGER),
     CAST(meeting_key   AS INTEGER),
     CAST("position"    AS INTEGER),
-    CAST(lap_duration  AS REAL)
+    CAST(lap_duration  AS DOUBLE)
 FROM bronze.starting_grid
 """]
 
 BUILD["team_radio"] = ["""
 DROP TABLE IF EXISTS silver_team_radio
 """, """
+-- No surrogate id, for the reason given on silver_position. This one keeps a
+-- real key regardless: the UNIQUE below is its natural one.
 CREATE TABLE silver_team_radio (
-    id             INTEGER PRIMARY KEY AUTOINCREMENT,
     session_key    INTEGER NOT NULL,
     driver_number  INTEGER NOT NULL,
     "date"         TEXT    NOT NULL,
@@ -495,12 +522,12 @@ CREATE TABLE silver_weather (
     session_key         INTEGER NOT NULL,
     "date"              TEXT    NOT NULL,
     meeting_key         INTEGER NOT NULL,
-    humidity            REAL    NOT NULL,
-    pressure            REAL    NOT NULL,
+    humidity            DOUBLE    NOT NULL,
+    pressure            DOUBLE    NOT NULL,
     rainfall            INTEGER NOT NULL CHECK (rainfall IN (0, 1)),
-    track_temperature   REAL    NOT NULL,
-    air_temperature     REAL    NOT NULL,
-    wind_speed          REAL    NOT NULL,
+    track_temperature   DOUBLE    NOT NULL,
+    air_temperature     DOUBLE    NOT NULL,
+    wind_speed          DOUBLE    NOT NULL,
     wind_direction      INTEGER NOT NULL CHECK (wind_direction BETWEEN 0 AND 360),
     PRIMARY KEY (session_key, "date")
 )
@@ -510,12 +537,12 @@ SELECT DISTINCT
     CAST(session_key AS INTEGER),
     "date",
     CAST(meeting_key AS INTEGER),
-    CAST(humidity          AS REAL),
-    CAST(pressure          AS REAL),
+    CAST(humidity          AS DOUBLE),
+    CAST(pressure          AS DOUBLE),
     CAST(rainfall          AS INTEGER),
-    CAST(track_temperature AS REAL),
-    CAST(air_temperature   AS REAL),
-    CAST(wind_speed        AS REAL),
+    CAST(track_temperature AS DOUBLE),
+    CAST(air_temperature   AS DOUBLE),
+    CAST(wind_speed        AS DOUBLE),
     CAST(wind_direction    AS INTEGER)
 FROM bronze.weather
 """]
@@ -529,8 +556,8 @@ CREATE TABLE silver_championship_drivers (
     meeting_key       INTEGER NOT NULL,
     position_start    INTEGER,
     position_current  INTEGER NOT NULL,
-    points_start      REAL    NOT NULL,
-    points_current    REAL    NOT NULL,
+    points_start      DOUBLE    NOT NULL,
+    points_current    DOUBLE    NOT NULL,
     PRIMARY KEY (session_key, driver_number)
 )
 """, """
@@ -541,8 +568,8 @@ SELECT
     CAST(meeting_key      AS INTEGER),
     CAST(position_start   AS INTEGER),
     CAST(position_current AS INTEGER),
-    CAST(points_start     AS REAL),
-    CAST(points_current   AS REAL)
+    CAST(points_start     AS DOUBLE),
+    CAST(points_current   AS DOUBLE)
 FROM bronze.championship_drivers
 """]
 
@@ -555,8 +582,8 @@ CREATE TABLE silver_championship_teams (
     meeting_key       INTEGER NOT NULL,
     position_start    INTEGER,
     position_current  INTEGER NOT NULL,
-    points_start      REAL    NOT NULL,
-    points_current    REAL    NOT NULL,
+    points_start      DOUBLE    NOT NULL,
+    points_current    DOUBLE    NOT NULL,
     PRIMARY KEY (session_key, team_name)
 )
 """, """
@@ -567,8 +594,8 @@ SELECT
     CAST(meeting_key      AS INTEGER),
     CAST(position_start   AS INTEGER),
     CAST(position_current AS INTEGER),
-    CAST(points_start     AS REAL),
-    CAST(points_current   AS REAL)
+    CAST(points_start     AS DOUBLE),
+    CAST(points_current   AS DOUBLE)
 FROM bronze.championship_teams
 """]
 
@@ -576,14 +603,14 @@ FROM bronze.championship_teams
 
 # --- runner ----------------------------------------------------------------------
 
-def count(con: sqlite3.Connection, table: str, schema: str = "main"):
+def count(con: duckdb.DuckDBPyConnection, table: str, schema: str = "main"):
     try:
         return con.execute(f'SELECT COUNT(*) FROM {schema}."{table}"').fetchone()[0]
-    except sqlite3.OperationalError:
+    except duckdb.Error:
         return None
 
 
-def record_build_state(con: sqlite3.Connection, name: str,
+def record_build_state(con: duckdb.DuckDBPyConnection, name: str,
                        bronze_rows: int, silver_rows: int) -> None:
     """
     Record how much bronze this silver table was built from.
@@ -610,15 +637,24 @@ def record_build_state(con: sqlite3.Connection, name: str,
             built_at     TEXT    NOT NULL
         )
     """)
+    # DELETE then INSERT rather than an upsert, matching s01_backfill.record.
+    # The table declares a primary key so ON CONFLICT would work here, but one
+    # way of replacing a row across the project is worth more than saving a
+    # statement on a table with sixteen of them.
+    #
+    # The timestamp is formatted rather than taken raw so it keeps the exact
+    # 'YYYY-MM-DD HH:MM:SS' shape SQLite's datetime('now') produced, since s03
+    # reads built_at and rows written either side of the migration have to stay
+    # comparable.
+    con.execute("DELETE FROM _silver_build_state WHERE table_name = ?", [name])
     con.execute("""
-        INSERT OR REPLACE INTO _silver_build_state
+        INSERT INTO _silver_build_state
             (table_name, bronze_rows, silver_rows, built_at)
-        VALUES (?, ?, ?, datetime('now'))
-    """, (name, bronze_rows, silver_rows))
-    con.commit()
+        VALUES (?, ?, ?, strftime(now(), '%Y-%m-%d %H:%M:%S'))
+    """, [name, bronze_rows, silver_rows])
 
 
-def build_table(con: sqlite3.Connection, name: str) -> tuple[bool, str]:
+def build_table(con: duckdb.DuckDBPyConnection, name: str) -> tuple[bool, str]:
     """Runs one table's statements inside a transaction. Returns (ok, message)."""
     silver = f"silver_{name}"
     before = count(con, silver)
@@ -629,12 +665,12 @@ def build_table(con: sqlite3.Connection, name: str) -> tuple[bool, str]:
 
     started = time.time()
     try:
-        con.execute("BEGIN")
+        con.execute("BEGIN TRANSACTION")
         for stmt in BUILD[name]:
             con.execute(stmt)
-        con.commit()
+        con.execute("COMMIT")
     except Exception as exc:
-        con.rollback()
+        con.execute("ROLLBACK")
         return False, f"{type(exc).__name__}: {exc}"
 
     after = count(con, silver)
@@ -683,14 +719,14 @@ def main() -> int:
     print(f"tables: {', '.join(targets)}")
     print("=" * 74)
 
-    con = sqlite3.connect(str(DB_PATH))
-    con.execute("PRAGMA journal_mode=WAL")
-    con.execute("PRAGMA synchronous=NORMAL")
-    con.execute("PRAGMA cache_size=-65536")
+    con = duckdb.connect(str(DB_PATH))
+    # The three PRAGMA lines that were here tuned SQLite's journalling and page
+    # cache for writing a multi-gigabyte row store. DuckDB has no equivalent
+    # knobs and needs none: it manages its own buffer pool and writes columns.
 
     # Bronze lives in its own file since the 2026-07-28 split; the build reads
     # from it via ATTACH and writes into main (silver).
-    con.execute(f"ATTACH DATABASE '{BRONZE_DB_PATH.as_posix()}' AS bronze")
+    con.execute(f"ATTACH '{BRONZE_DB_PATH.as_posix()}' AS bronze")
 
     failures = []
     for name in targets:

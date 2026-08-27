@@ -44,7 +44,7 @@ asked again in August.
 from __future__ import annotations
 
 import argparse
-import sqlite3
+import duckdb
 import sys
 import time
 from collections import defaultdict
@@ -118,7 +118,7 @@ QUALI_SESSION_NAMES = {"Qualifying", "Sprint Qualifying", "Sprint Shootout"}
 
 # --- progress table -------------------------------------------------------------
 
-def ensure_status_columns(con: sqlite3.Connection) -> None:
+def ensure_status_columns(con: duckdb.DuckDBPyConnection) -> None:
     """
     Adds status / http_status / note columns to _ingestion_progress if absent.
 
@@ -129,14 +129,16 @@ def ensure_status_columns(con: sqlite3.Connection) -> None:
     # PRAGMA on a table that does not exist returns nothing rather than raising,
     # so without this the ALTER TABLE below fails with a message that says
     # nothing about the real cause.
-    if not con.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
-                       "AND name='_ingestion_progress'").fetchone():
+    if not con.execute("SELECT 1 FROM information_schema.tables "
+                       "WHERE table_name = '_ingestion_progress'").fetchone():
         raise RuntimeError(
             "_ingestion_progress is missing from bronze. It is created by "
             "openf1_ingestion.py; this script only ever amends it."
         )
 
-    existing = {r[1] for r in con.execute("PRAGMA table_info(_ingestion_progress)")}
+    existing = {r[0] for r in con.execute(
+        "SELECT column_name FROM information_schema.columns "
+        "WHERE table_name = '_ingestion_progress'").fetchall()}
     for col, decl in [
         ("status", "TEXT"),          # 'ok' | 'empty' | 'failed'
         ("http_status", "INTEGER"),  # last HTTP status seen, NULL on timeout
@@ -146,41 +148,34 @@ def ensure_status_columns(con: sqlite3.Connection) -> None:
             con.execute(f"ALTER TABLE _ingestion_progress ADD COLUMN {col} {decl}")
     con.commit()
 
-    ensure_progress_key(con)
-
-
-def ensure_progress_key(con: sqlite3.Connection) -> None:
-    """
-    Restores the uniqueness of (endpoint, session_key).
-
-    openf1_ingestion.py declares this table with PRIMARY KEY (endpoint,
-    session_key), and both it and this script rely on INSERT OR REPLACE to
-    update a row in place. The 2026-07-28 database split rebuilt the table in
-    bronze without the key, so OR REPLACE has nothing to replace against and
-    silently appends instead. Every re-fetch then leaves its old 'zero rows'
-    row sitting beside the new one, and build_plan reads whichever it reaches
-    first: it can queue a re-fetch of data already held, or read a stale 'ok'
-    over a real failure.
-
-    Deduplicates keeping the most recent row per pair, then adds the unique
-    index so it cannot drift again.
-    """
     has_index = con.execute(
-        "SELECT 1 FROM sqlite_master WHERE type='index' "
-        "AND name='ix_progress_pair'").fetchone()
+        "SELECT 1 FROM duckdb_indexes() "
+        "WHERE index_name = 'ix_progress_pair'").fetchone()
     if has_index:
         return
 
-    con.execute("""
-        DELETE FROM _ingestion_progress
-        WHERE rowid NOT IN (
-            SELECT MAX(rowid) FROM _ingestion_progress
-            GROUP BY endpoint, session_key
-        )
-    """)
+    # Deduplicate on fetched_at rather than on physical row order. The SQLite
+    # version kept MAX(rowid), which is "whichever was written last" and only
+    # coincidentally the most recent. Ordering by the timestamp the row records
+    # says what was actually meant, and it does not depend on a pseudocolumn.
+    dupes = con.execute("""
+        SELECT COUNT(*) FROM (
+            SELECT endpoint, session_key FROM _ingestion_progress
+            GROUP BY endpoint, session_key HAVING COUNT(*) > 1)
+    """).fetchone()[0]
+    if dupes:
+        con.execute("""
+            CREATE OR REPLACE TABLE _ingestion_progress AS
+            SELECT * EXCLUDE (_rn) FROM (
+                SELECT *, ROW_NUMBER() OVER (
+                    PARTITION BY endpoint, session_key
+                    ORDER BY fetched_at DESC) AS _rn
+                FROM _ingestion_progress)
+            WHERE _rn = 1
+        """)
     con.execute("CREATE UNIQUE INDEX ix_progress_pair "
                 "ON _ingestion_progress (endpoint, session_key)")
-    con.commit()
+
 
 
 # --- HTTP ------------------------------------------------------------------------
@@ -360,15 +355,13 @@ def fetch_session(endpoint: str, session_key: int, drivers: list[int]):
 
 # --- writing ---------------------------------------------------------------------
 
-def ensure_columns(con: sqlite3.Connection, table: str, cols) -> None:
-    existing = {r[1] for r in con.execute(f'PRAGMA table_info("{table}")')}
-    for col in cols:
-        if col not in existing:
-            con.execute(f'ALTER TABLE "{table}" ADD COLUMN "{col}" TEXT')
-    con.commit()
+def ensure_columns(con: duckdb.DuckDBPyConnection, table: str, cols) -> None:
+    existing = {r[0] for r in con.execute(
+        "SELECT column_name FROM information_schema.columns "
+        "WHERE table_name = ?", [table]).fetchall()}
 
 
-def insert_rows(con: sqlite3.Connection, table: str, rows) -> int:
+def insert_rows(con: duckdb.DuckDBPyConnection, table: str, rows) -> int:
     """
     Mirrors openf1_ingestion.insert_rows: everything stored as TEXT in bronze,
     typing happens in the silver build.
@@ -381,7 +374,8 @@ def insert_rows(con: sqlite3.Connection, table: str, rows) -> int:
 
     cols = list(rows[0].keys())
     exists = con.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table,)
+        "SELECT table_name FROM information_schema.tables "
+        "WHERE table_name = ?", [table]
     ).fetchone()
 
     if not exists:
@@ -414,26 +408,59 @@ def clear_session(con, table: str, session_key: int) -> int:
     this script would otherwise double every row it touched.
     """
     exists = con.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
-        (table,)).fetchone()
+        "SELECT table_name FROM information_schema.tables WHERE table_name = ?",
+        [table]).fetchone()
     if not exists:
         return 0
-    cur = con.execute(f'DELETE FROM "{table}" WHERE CAST(session_key AS INT) = ?',
-                      (int(session_key),))
-    con.commit()
-    return cur.rowcount
+
+    # Counted before the delete rather than read from cursor.rowcount, which
+    # sqlite3 populates and DuckDB does not: DuckDB's execute hands back the
+    # connection, so rowcount is not a number this can report. Two statements
+    # against a session's worth of rows is not worth optimising.
+    n = con.execute(f'SELECT COUNT(*) FROM "{table}" '
+                    f'WHERE CAST(session_key AS INT) = ?',
+                    [int(session_key)]).fetchone()[0]
+    con.execute(f'DELETE FROM "{table}" WHERE CAST(session_key AS INT) = ?',
+                [int(session_key)])
+    return n
 
 
 def record(con, endpoint, session_key, n, status, http_status, note=None) -> None:
-    con.execute(
-        """
-        INSERT OR REPLACE INTO _ingestion_progress
-            (endpoint, session_key, rows_inserted, fetched_at, status, http_status, note)
-        VALUES (?, ?, ?, datetime('now'), ?, ?, ?)
-        """,
-        (endpoint, str(session_key), n, status, http_status, note),
-    )
-    con.commit()
+    """
+    Replace this pair's progress row.
+
+    DELETE then INSERT rather than an upsert. DuckDB's ON CONFLICT would work,
+    but it binds the behaviour to exactly which constraint the table carries,
+    and this table has already lost its key once (see ensure_progress_key). Two
+    statements in a transaction cannot be surprised that way, and the table is
+    6,375 rows written a few dozen times a run, so the cost is nothing.
+
+    The timestamp is formatted rather than taken raw, so it keeps the exact
+    'YYYY-MM-DD HH:MM:SS' shape SQLite's datetime('now') produced. Rows written
+    before and after the migration have to stay comparable: build_session_plan
+    compares fetched_at against a session's start time.
+    """
+    con.execute("BEGIN TRANSACTION")
+    try:
+        con.execute(
+            "DELETE FROM _ingestion_progress "
+            "WHERE endpoint = ? AND session_key = ?",
+            [endpoint, str(session_key)],
+        )
+        con.execute(
+            """
+            INSERT INTO _ingestion_progress
+                (endpoint, session_key, rows_inserted, fetched_at, status,
+                 http_status, note)
+            VALUES (?, ?, ?, strftime(now(), '%Y-%m-%d %H:%M:%S'), ?, ?, ?)
+            """,
+            [endpoint, str(session_key), n, status, http_status, note],
+        )
+        con.execute("COMMIT")
+    except Exception:
+        con.execute("ROLLBACK")
+        raise
+
 
 
 # --- planning --------------------------------------------------------------------
@@ -560,12 +587,12 @@ def run_telemetry(con, sessions, execute: bool) -> int:
               f"  session {session_key}, {len(drivers)} drivers")
         for endpoint in TELEMETRY_ENDPOINTS:
             have = 0
-            if con.execute("SELECT name FROM sqlite_master WHERE type='table' "
-                           "AND name=?", (endpoint,)).fetchone():
+            if con.execute("SELECT table_name FROM information_schema.tables "
+                           "WHERE table_name = ?", [endpoint]).fetchone():
                 have = con.execute(
                     f'SELECT COUNT(*) FROM "{endpoint}" '
                     f'WHERE CAST(session_key AS INT) = ?',
-                    (session_key,)).fetchone()[0]
+                    [session_key]).fetchone()[0]
             print(f"  {endpoint:10s} currently {have:>9,} rows", end="")
 
             if not execute:
@@ -628,9 +655,8 @@ def main() -> int:
 
     # Writes go to bronze; planning reads silver_sessions from the silver file,
     # attached read-only.
-    con = sqlite3.connect(str(BRONZE_DB_PATH))
-    con.execute("PRAGMA journal_mode=WAL")
-    con.execute(f"ATTACH DATABASE '{DB_PATH.as_posix()}' AS silver")
+    con = duckdb.connect(str(BRONZE_DB_PATH))
+    con.execute(f"ATTACH '{DB_PATH.as_posix()}' AS silver")
     ensure_status_columns(con)
 
     if args.telemetry:

@@ -39,34 +39,17 @@ visitor.
 
 from __future__ import annotations
 
-import sqlite3
 import sys
 from pathlib import Path
-
+import duckdb
 import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from config import OUTPUTS_DIR, PROJECT_ROOT  # noqa: E402
 
-# The one definition. Everything that reads or writes the bundle imports these.
-#
-# The bundle lives BESIDE THE APP, in dashboard/data/, not under outputs/. There
-# used to be two folders called "dashboard": the app's source code, and the build
-# output. Same name, opposite things, one written by hand and one regenerated
-# every run. Putting the database next to the app it serves leaves one folder
-# with that name and makes the app's own lookup a sibling path rather than a
-# walk up and back down.
-#
-# The data/ subfolder keeps the 67 MB generated file out of the folder listing
-# you read when you are looking for a page's source, so hand-written code and
-# build output stay visually separate even though they now share a parent.
-#
-# It is kept out of git three times over: the *.db and *.gz rules match on the
-# filename rather than the folder, so moving it again cannot silently drop a
-# 67 MB file into the repository, and the data/ rule ignores this folder whole.
 BUNDLE_DIR = PROJECT_ROOT / "dashboard" / "data"
-BUNDLE_DB = BUNDLE_DIR / "dashboard.db"
-BUNDLE_GZ = BUNDLE_DIR / "dashboard.db.gz"
+BUNDLE_DB = BUNDLE_DIR / "dashboard.duckdb"
+BUNDLE_GZ = BUNDLE_DIR / "dashboard.duckdb.gz"
 
 # Analysis output that is NOT part of the bundle, and so must not sit in the
 # bundle folder. Keeping such files beside the shipped ones is how s05b's four
@@ -81,24 +64,35 @@ BUNDLE_GZ = BUNDLE_DIR / "dashboard.db.gz"
 ANALYSIS_DIR = OUTPUTS_DIR / "analysis"
 
 
-def connect() -> sqlite3.Connection:
+def connect() -> duckdb.DuckDBPyConnection:
     """Open the bundle for writing, creating the folder on first run."""
     BUNDLE_DIR.mkdir(parents=True, exist_ok=True)
-    return sqlite3.connect(BUNDLE_DB)
+    return duckdb.connect(str(BUNDLE_DB))
 
 
-def write_table(df: pd.DataFrame, name: str, con: sqlite3.Connection,
+def write_table(df: pd.DataFrame, name: str, con: duckdb.DuckDBPyConnection,
                 csv: bool = False) -> int:
     """
     Write one table into the bundle, replacing whatever was there.
 
     Returns the row count, so callers can report what they wrote rather than
     what they intended to write.
+
+    Registered under a fixed private name rather than left to DuckDB's habit of
+    finding DataFrames by inspecting the caller's variables. That habit works,
+    but it would silently pick up a local called `df` in whichever function
+    happened to call this, and it would lose to a real table of the same name.
+    Registering and unregistering says exactly what is being written.
     """
-    df.to_sql(name, con, index=False, if_exists="replace")
+    con.register("_incoming", df)
+    try:
+        con.execute(f'CREATE OR REPLACE TABLE "{name}" AS SELECT * FROM _incoming')
+    finally:
+        con.unregister("_incoming")
     if csv:
         df.to_csv(BUNDLE_DIR / f"{name}.csv", index=False)
     return len(df)
+
 
 
 def write_analysis_csv(df: pd.DataFrame, name: str) -> int:
@@ -108,13 +102,14 @@ def write_analysis_csv(df: pd.DataFrame, name: str) -> int:
     return len(df)
 
 
-def table_names(con: sqlite3.Connection) -> list[str]:
+def table_names(con: duckdb.DuckDBPyConnection) -> list[str]:
     """Every table currently in the bundle."""
     return sorted(r[0] for r in con.execute(
-        "SELECT name FROM sqlite_master WHERE type='table'"))
+        "SELECT table_name FROM information_schema.tables "
+        "WHERE table_schema = 'main'").fetchall())
 
 
-def row_count(con: sqlite3.Connection, name: str) -> int | None:
+def row_count(con: duckdb.DuckDBPyConnection, name: str) -> int | None:
     """Rows in one table, or None if it is not there at all.
 
     s06 uses this to tell 'the step never ran' from 'the step ran and produced
@@ -123,5 +118,5 @@ def row_count(con: sqlite3.Connection, name: str) -> int | None:
     """
     try:
         return con.execute(f'SELECT COUNT(*) FROM "{name}"').fetchone()[0]
-    except sqlite3.OperationalError:
+    except duckdb.Error:
         return None

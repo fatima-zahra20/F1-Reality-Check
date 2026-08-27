@@ -46,9 +46,19 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 # Bronze is raw API output, read only by the silver build and re-fetchable, so it
 # lives outside the working database. Split on 2026-07-28: f1.db went from
 # 6.4 GB to 352 MB.
-BRONZE_DB_PATH = PROJECT_ROOT / "DATA INGESTION" / "bronze_f1.db"
-DB_PATH        = PROJECT_ROOT / "DATA INGESTION" / "f1.db"           # silver
-GOLD_DB_PATH   = PROJECT_ROOT / "DATA INGESTION" / "gold_f1.db"      # built later
+#
+# DuckDB since 2026-08-27, replacing SQLite. Columnar rather than row storage,
+# which is the shape this pipeline actually has: it never fetches a single row
+# and every step scans millions. Measured on this project's own data before
+# committing to it, 3.853 GB became 0.788 GB and the s05c position scan went
+# from 264.4s to 19.5s returning byte-identical rows.
+#
+# The silver file is renamed at the same time. It was the only layer not named
+# for itself, which was a small inconsistency that a rename makes free to fix.
+BRONZE_DB_PATH = PROJECT_ROOT / "DATA INGESTION" / "bronze_f1.duckdb"
+DB_PATH        = PROJECT_ROOT / "DATA INGESTION" / "silver_f1.duckdb"   # silver
+GOLD_DB_PATH   = PROJECT_ROOT / "DATA INGESTION" / "gold_f1.duckdb"     # built later
+
 
 INGESTION_SCRIPT = PROJECT_ROOT / "DATA INGESTION" / "openf1_ingestion.py"
 
