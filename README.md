@@ -70,7 +70,7 @@ first-order design decision rather than a detail.
 |---|---|
 | **Source** | [OpenF1 API](https://openf1.org) — unofficial public F1 data |
 | **Coverage** | 2023 – 2026 |
-| **Store** | SQLite, three files: `bronze_f1.db` 3.0 GB, `f1.db` 368 MB (silver), `gold_f1.db` 158 MB |
+| **Store** | DuckDB, three files: `bronze_f1.duckdb` 651 MB, `silver_f1.duckdb` 231 MB, `gold_f1.duckdb` 65 MB |
 | **Layers** | Bronze (raw) → Silver (18 typed, PK-enforced) → Gold (18 conformed, what analysis reads) |
 | **Grain** | Per driver, per lap, per session, down to ~3.7 Hz telemetry where available |
 
@@ -135,10 +135,10 @@ to 70 when the backfill recovered four previously-missing races.
 OpenF1 API
     │
     ▼
-[ s01_ingest / s01_backfill ]  ──▶  bronze_f1.db      3.0 GB, raw
+[ s01_ingest / s01_backfill ]  ──▶  bronze_f1.duckdb  651 MB, raw
     │
     ▼
-[ s02_build_silver ]  ──▶  f1.db                      368 MB, 18 typed, PK-enforced
+[ s02_build_silver ]  ──▶  silver_f1.duckdb           231 MB, 18 typed, PK-enforced
     │
     ▼
 [ s02b_caution_flags ]  ──▶  silver_caution_periods, silver_lap_flags
@@ -147,7 +147,7 @@ OpenF1 API
 [ s03_verify ]  ──▶  22-check invariant gate: FAIL halts the run
     │
     ▼
-[ s07_build_gold ]  ──▶  gold_f1.db                   158 MB, 18 conformed tables
+[ s07_build_gold ]  ──▶  gold_f1.duckdb               65 MB, 18 conformed tables
     │                    every question below reads this, not silver
     │
     ├──▶ [ s04_descriptive ]   ──▶  7 fact/dim tables
@@ -156,9 +156,9 @@ OpenF1 API
     ├──▶ [ s05c_racemap ]      ──▶  circuit geometry (bronze telemetry)
     └──▶ [ s05d_telemetry ]    ──▶  tow and DRS effects
                    │
-                   │  all five write straight into dashboard/data/dashboard.db
+                   │  all five write straight into dashboard/data/dashboard.duckdb
                    ▼
-        [ s06_publish ]  ──▶  validate 21 tables, index ──▶ gzip ──▶ GitHub Release
+        [ s06_publish ]  ──▶  validate 21 tables, compact ──▶ gzip ──▶ GitHub Release
                                                                         │
                                                                         ▼
                                                           Streamlit app downloads it
@@ -188,10 +188,11 @@ steady drip: results land early in the week, and grid position, the single stron
 individual predictor, does not exist until Saturday. Runs are therefore triggered off
 the session calendar in `silver_sessions`.
 
-**Telemetry lives in bronze only.** `car_data` (9.4M rows) and `location` (25.8M) cover
-32 of 490 sessions, so they cannot be model features or appear in season-wide
-aggregates. Their silver copies were **dropped in the 2026-07-28 split**, which took
-`f1.db` from 6.4 GB to 352 MB. `s05b`, `s05c` and `s05d` read them from bronze directly.
+**Telemetry lives in bronze only.** `car_data` (13.9M rows) and `location` (29.4M) cover
+a minority of the 495 sessions, so they cannot be model features or appear in
+season-wide aggregates. Their silver copies were **dropped in the 2026-07-28 split**,
+which took the combined database from 6.4 GB to 352 MB. `s05b`, `s05c` and `s05d` read
+them from bronze directly.
 They are excluded from the scheduled run and refreshed manually.
 
 ---
@@ -330,10 +331,9 @@ events, it very likely will not.
 ```
 F1-Reality-Check/
 ├── DATA INGESTION/
-│   ├── bronze_f1.db               raw API output, 3.0 GB (gitignored)
-│   ├── f1.db                      silver, 368 MB (gitignored)
-│   ├── gold_f1.db                 gold, 158 MB (gitignored, rebuilt by s07)
-│   └── openf1_ingestion.py        API ingestion
+│   ├── bronze_f1.duckdb           raw API output, 651 MB (gitignored)
+│   ├── silver_f1.duckdb           silver, 231 MB (gitignored)
+│   └── gold_f1.duckdb             gold, 65 MB (gitignored, rebuilt by s07)
 ├── SCHEMA MODELING/
 │   └── to_silver.sql              reference only; s02 is the executable build
 ├── DATA PROFILING/
@@ -346,7 +346,7 @@ F1-Reality-Check/
 ├── dashboard/                     Streamlit app: views, story pages, race map
 │   ├── assets/                    theme and images
 │   ├── views/                     one file per page
-│   └── data/                      dashboard.db and its gzip, both git-ignored
+│   └── data/                      dashboard.duckdb and its gzip, both git-ignored
 ├── pipeline/
 │   ├── config.py                  single source of truth for all paths
 │   ├── serving.py                 where the bundle lives, and how a table gets in
@@ -401,10 +401,10 @@ pip install -r requirements.txt
 ```
 
 **No database is in version control.** All three are regenerable output, not source, and
-`*.db` is gitignored. Rebuild from the API:
+`*.duckdb` is gitignored. Rebuild from the API:
 
 ```bash
-python "DATA INGESTION/openf1_ingestion.py"     # first-time ingest
+python pipeline/s01_ingest.py --execute         # first-time and incremental ingest
 python pipeline/s01_backfill.py                 # dry run, shows the plan
 python pipeline/s01_backfill.py --execute       # add --include-optional for pit/team_radio
 python pipeline/s01_backfill.py --recheck-empty # an "empty" verdict is not permanent
@@ -448,9 +448,15 @@ python pipeline/s06_publish.py --build-only     # validate, index and gzip, no u
 app caches the downloaded bundle in its container's temp directory, so **publishing takes
 effect on Reboot, not on Clear cache**.
 
-The bundle is built at `dashboard/data/dashboard.db` and gzipped beside it. Both are
+The bundle is built at `dashboard/data/dashboard.duckdb` and gzipped beside it. Both are
 git-ignored; the app reads the local file when it exists and downloads the GitHub Release
 asset when it does not, which is the normal deployed path.
+
+**`duckdb` is pinned to an exact version** in `requirements.txt`, and that pin is
+load-bearing rather than tidiness. DuckDB's storage format belongs to the release that
+wrote the file, and a reader from a different release refuses to open it outright. The
+pipeline writes the bundle and Streamlit Cloud reads it, so the two must agree. Change the
+pin here and in `environment-pipeline.yml` together, republish, then deploy.
 
 **Which layer to query.** Silver is the source of truth about what the API said. Gold is
 where the decisions live, and is what every analysis should read. Two audits keep that
@@ -619,8 +625,9 @@ not a rename — and is excluded from comparative analyses on sample-size ground
 **`country_code` in `silver_drivers` is NULL for 2025–2026.** The API stopped
 populating it.
 
-**DB Browser silently swallows INSERT errors.** Constraint violations must be surfaced
-through Python's `sqlite3` module.
+**DB Browser silently swallowed INSERT errors**, so constraint violations had to be
+surfaced through Python instead. This is history now: the store is DuckDB and the build
+runs through `s02_build_silver.py`, which raises on a violation rather than swallowing it.
 
 ---
 
@@ -646,8 +653,8 @@ are confounded by circuit mix.
 **Verify, never trust documentation.** The data dictionary was wrong at least twice.
 Every assumption, filter, and threshold got a confirming query before being accepted.
 
-**Composite keys join on all columns.** SQLite will not error on a partial key join, it
-will silently fan out.
+**Composite keys join on all columns.** Neither SQLite nor DuckDB errors on a partial key
+join, it silently fans out.
 
 **Filtering belongs downstream.** The silver layer preserves raw reality — a
 3,510-second "lap" is a car sitting under a red flag, and it stays. Filtering happens in
@@ -678,7 +685,7 @@ the diagnostic and predictive layers, where the choice is explicit and documente
   0 of 29 verdicts, 42 coefficients and 189 group statistics moved
 - Cut 7 duplicated CSVs and 25.2 MB; dropped 4 bundle tables nothing read
 - Removed the CSV round-trip entirely. All five serving steps now write straight into
-  `dashboard/data/dashboard.db` through one path definition (`pipeline/serving.py`),
+  `dashboard/data/dashboard.duckdb` through one path definition (`pipeline/serving.py`),
   instead of writing 18 CSVs for `s06` to read back. `outputs/` no longer exists
 
 **Near term**

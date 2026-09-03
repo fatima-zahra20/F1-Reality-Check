@@ -60,7 +60,10 @@ DB_PATH        = PROJECT_ROOT / "DATA INGESTION" / "silver_f1.duckdb"   # silver
 GOLD_DB_PATH   = PROJECT_ROOT / "DATA INGESTION" / "gold_f1.duckdb"     # built later
 
 
-INGESTION_SCRIPT = PROJECT_ROOT / "DATA INGESTION" / "openf1_ingestion.py"
+# INGESTION_SCRIPT stood here, pointing at DATA INGESTION/openf1_ingestion.py.
+# Both the constant and the script are gone: the script was superseded by
+# s01_ingest.py long before the DuckDB migration, nothing imported the constant,
+# and a path to a file that no longer exists is worse than no path at all.
 
 # Reference only — the executable build is pipeline/s02_build_silver.py
 SILVER_SQL = PROJECT_ROOT / "SCHEMA MODELING" / "to_silver.sql"
