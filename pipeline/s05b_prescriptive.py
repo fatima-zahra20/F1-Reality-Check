@@ -9,7 +9,8 @@ after Analyse, Diagnose and Predict. Only the naming moved. Every model, filter
 and coefficient below is unchanged, and the four perfect_* tables further down
 keep their own names for the reason given at ON_REQUEST.
 
-Writes five tables straight into the dashboard bundle, dashboard/data/dashboard.db:
+Writes five tables straight into the dashboard bundle,
+dashboard/data/dashboard.duckdb:
 
     lap_factor_anova       how much of within-race lap variation each factor explains
     lap_factor_model       every coefficient, so the app can decompose one lap
@@ -87,7 +88,8 @@ columns with separate ranks; the reader picks.
 CLEAN LAPS use silver_lap_flags.neutralised = 0 and the per-session derived
 bound, identical to s05.load_clean_laps. Same definition, same numbers.
 
-READ-ONLY ON SILVER AND BRONZE. gold_f1.db is untouched.
+READ-ONLY ON SILVER. Opened with read_only=True, so nothing here can write back
+into a layer it is only supposed to read. gold_f1.duckdb is untouched.
 
 Usage
 -----
@@ -101,19 +103,19 @@ Requires the pinned Anaconda environment. See NOTES_LOG #42.
 from __future__ import annotations
 
 import argparse
-import sqlite3
 import sys
 import time
 import warnings
 from datetime import datetime, timezone
 from pathlib import Path
 
+import duckdb
 import numpy as np
 import pandas as pd
 from scipy import stats
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from config import DB_PATH, LAP_OUTLIER_FACTOR  # noqa: E402
+from config import DB_PATH, LAP_OUTLIER_FACTOR, read_sql  # noqa: E402
 import serving  # noqa: E402
 
 import statsmodels.formula.api as smf  # noqa: E402
@@ -157,13 +159,15 @@ VALID_COMPOUNDS = ["SOFT", "MEDIUM", "HARD", "INTERMEDIATE", "WET"]
 MAX_PLAUSIBLE_START_AGE = 10
 
 # Same dynamic scope as s04 and s05, so all three cover the same races. See s04
-# for why the date test uses julianday rather than comparing the strings.
+# for why the date test casts both sides to a timestamp rather than comparing
+# the strings.
 RACE_SCOPE = """
     SELECT s.session_key, s.meeting_key
     FROM silver_sessions s
     WHERE s.session_name = 'Race'
       AND s.is_cancelled = 0
-      AND julianday(s.date_start) < julianday('now')
+      AND CAST(substr(s.date_start, 1, 19) AS TIMESTAMP)
+            < (now() AT TIME ZONE 'UTC')
       AND EXISTS (SELECT 1 FROM silver_laps l WHERE l.session_key = s.session_key)
       AND EXISTS (SELECT 1 FROM silver_session_result r WHERE r.session_key = s.session_key)
 """
@@ -287,7 +291,7 @@ def load_laps(con) -> pd.DataFrame:
     tyre and the stop happened at the end of it, so the lower stint_number is
     the correct attribution, not merely the convenient one.
     """
-    laps = pd.read_sql(f"""
+    laps = read_sql(f"""
         WITH scope AS ({RACE_SCOPE})
         SELECT l.session_key, l.driver_number, l.lap_number,
                l.date_start, l.lap_duration,
@@ -355,7 +359,7 @@ def attach_weather(con, laps: pd.DataFrame) -> pd.DataFrame:
     session, otherwise it will happily match a lap in Bahrain to a reading in
     Suzuka.
     """
-    wx = pd.read_sql(f"""
+    wx = read_sql(f"""
         WITH scope AS ({RACE_SCOPE})
         SELECT w.session_key, w.date, w.humidity, w.pressure, w.rainfall,
                w.track_temperature, w.air_temperature,
@@ -658,7 +662,7 @@ def attach_traffic(con, laps: pd.DataFrame) -> pd.DataFrame:
     figure was the artefact, not the finding. A driver held up behind another
     car matches that car's pace; it does not make their lap slower than it.
     """
-    intervals = pd.read_sql(f"""
+    intervals = read_sql(f"""
         WITH scope AS ({RACE_SCOPE})
         SELECT i.session_key, i.driver_number, i."date", i.interval_seconds,
                i.interval_laps, i.gap_to_leader_laps
@@ -1083,7 +1087,7 @@ def build_perfect_race(con, laps: pd.DataFrame) -> pd.DataFrame:
     car spends the race in traffic, which costs both. Two components pointing
     the same way is worth knowing before reading them as separate evidence.
     """
-    res = pd.read_sql(f"""
+    res = read_sql(f"""
         WITH scope AS ({RACE_SCOPE})
         SELECT r.session_key, r.driver_number, d.team_name, d.full_name,
                d.name_acronym, s.year, m.meeting_name, s.circuit_short_name,
@@ -1122,7 +1126,7 @@ def build_perfect_race(con, laps: pd.DataFrame) -> pd.DataFrame:
     df["session_typical_sd"] = df.groupby("session_key")["lap_sd_pct"].transform("median")
     df["consistency"] = df["lap_sd_pct"] / df["session_typical_sd"]
 
-    flagged = pd.read_sql(f"""
+    flagged = read_sql(f"""
         WITH scope AS ({RACE_SCOPE})
         SELECT rc.session_key, rc.driver_number, COUNT(*) AS rc_messages
         FROM scope JOIN silver_race_control rc ON rc.session_key = scope.session_key
@@ -1164,7 +1168,7 @@ def build_perfect_race(con, laps: pd.DataFrame) -> pd.DataFrame:
 
 # --- runner ----------------------------------------------------------------------
 
-# Bundled: the app queries these, so they go into dashboard.db.
+# Bundled: the app queries these, so they go into the dashboard bundle.
 BUNDLED = ["lap_factor_anova", "lap_factor_model", "lap_factor_reference",
            "lap_counterfactual_model", "lap_counterfactual_bounds"]
 
@@ -1236,7 +1240,7 @@ def main() -> int:
     print(f"python: {sys.version.split()[0]}  pandas {pd.__version__}")
     print("=" * 74)
 
-    con = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
+    con = duckdb.connect(str(DB_PATH), read_only=True)
 
     t0 = time.time()
     laps = load_laps(con)

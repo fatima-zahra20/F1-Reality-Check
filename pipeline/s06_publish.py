@@ -3,11 +3,12 @@ s06_publish.py — packages the serving layer and publishes it to a GitHub Relea
 
 Streamlit Cloud runs the app from GitHub and has no disk of its own, so the
 dashboard needs its data from somewhere the cloud can reach. This step checks
-dashboard.db is complete, compresses it, and uploads it as a Release asset.
+dashboard.duckdb is complete, compacts it, compresses it, and uploads it as a
+Release asset.
 
 It no longer BUILDS anything
 ----------------------------
-It used to read 14 CSV files and copy them into dashboard.db. Every one of those
+It used to read 14 CSV files and copy them into the bundle. Every one of those
 datasets therefore sat on disk twice, with nothing checking the copies agreed,
 and the app never read a CSV at all: the only read_csv in the entire project was
 the one in this file doing the copying. Each producing step now writes its tables
@@ -25,11 +26,18 @@ as a diff, so the repo would grow without bound and every clone would carry the
 entire history of it. Release assets live outside the git tree: they overwrite
 in place, never accumulate, and do not affect clone size.
 
-Why one SQLite file
+Why one DuckDB file
 -------------------
 One asset, one download, and the app can filter with SQL rather than loading 90k
 laps into memory to show one race. It also keeps the project's existing idiom:
-everything upstream is SQLite.
+everything upstream is DuckDB.
+
+THE ASSET IS VERSION-SENSITIVE IN A WAY THE SQLITE ONE WAS NOT. SQLite's file
+format is fixed for the life of the format; DuckDB's storage format is tied to
+the release that wrote it, and a reader too old for it refuses to open the file
+outright. That is why requirements.txt pins duckdb to an exact version rather
+than a floor: the pin is what guarantees the copy Streamlit Cloud installs can
+read the file this machine writes.
 
 The tag is fixed at data-latest and the asset is replaced each run, so the
 download URL never changes and the app can hardcode it. Deliberately not a
@@ -58,16 +66,17 @@ import argparse
 import gzip
 import os
 import shutil
-import sqlite3
 import sys
 import time
 from datetime import datetime, timezone
 
+import duckdb
 import requests
 
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from config import compact_database  # noqa: E402
 import serving  # noqa: E402
 
 # Aliased rather than redefined. serving.py is the single definition of where
@@ -78,7 +87,17 @@ GZ_FILE = serving.BUNDLE_GZ
 
 REPO = "fatima-zahra20/F1-Reality-Check"
 TAG = "data-latest"
-ASSET_NAME = "dashboard.db.gz"
+
+# RENAMED WITH THE ENGINE. The asset used to be dashboard.db.gz, and the name
+# has to change because the contents did: a DuckDB file called .db invites
+# somebody to open it with sqlite3 and get "file is not a database".
+#
+# dashboard/app_common.py ASSET_URL must name the same file. The two are a
+# matched pair and there is no way for either to detect the other is wrong: the
+# app would simply get a 404 and report that the data has not been published.
+# The old dashboard.db.gz stays on the release until deleted by hand, because
+# upload() only removes an asset whose name matches this one.
+ASSET_NAME = "dashboard.duckdb.gz"
 API = "https://api.github.com"
 
 # Tables to bundle. Anything else in the folder is ignored, so a stray file
@@ -130,30 +149,35 @@ DB_TABLES = {
 
 TABLES = list(DB_TABLES)
 
-# The app filters by race and by test far more than anything else. Without
-# these, every "show me this race" click scans 90k lap rows.
+# THE BUNDLE CARRIES NO INDEXES, AND THAT IS A MEASUREMENT RATHER THAN AN
+# OVERSIGHT.
 #
-# Filtered against TABLES rather than listed freely, because the two lists drifted
-# apart the moment the perfect_* tables stopped being bundled: the entries for
-# them survived here and the build failed with "no such table: main.perfect_lap"
-# AFTER it had already written every table. Deriving the list means removing a
-# table from the bundle cannot leave a dangling index behind.
-_INDEX_WISHLIST = [
-    ("fact_lap", "session_key"),
-    ("fact_driver_race", "session_key"),
-    ("fact_event", "session_key"),
-    ("fact_championship", "session_key"),
-    ("diag_coefficients", "test_id"),
-    ("diag_groups", "test_id"),
-    ("diag_points", "test_id"),
-    ("perfect_lap", "session_key"),
-    ("perfect_race", "session_key"),
-    ("map_circuit_outline", "circuit_key"),
-    ("map_coverage", "session_key"),
-    ("lap_factor_reference", "session_key"),
-    ("lap_counterfactual_bounds", "session_key"),
-]
-INDEXES = [(t, c) for t, c in _INDEX_WISHLIST if t in TABLES]
+# It used to build eleven, on the columns the app filters by: session_key on
+# fact_lap, fact_event and the rest, test_id on the diagnostic tables. Under
+# SQLite they were doing real work, because without one a "show me this race"
+# click means a full scan of 90k lap rows.
+#
+# DuckDB does not work that way. It is columnar and keeps min/max zone maps per
+# row group, so it already skips the blocks that cannot match, and its index is
+# an ART built for single-row lookups and constraint checks. Handing a
+# multi-row predicate to that index replaces a vectorised scan with row-by-row
+# probing. Timed on this bundle, twenty runs each:
+#
+#     one race's laps      18.16 ms unindexed    141.00 ms indexed
+#     one race's events     5.71 ms               18.21 ms
+#     one test's points     2.71 ms               22.05 ms
+#     one circuit outline   3.71 ms               17.22 ms
+#     one race's drivers    8.46 ms                8.32 ms
+#
+# Nothing got faster and most got several times slower, while the indexes added
+# 4.2 MB to a 14.0 MB file: 30% more for every visitor to download, to make the
+# app worse. So they are dropped rather than carried, and dropped explicitly
+# below rather than merely not created, because a bundle built before this
+# change still has them.
+#
+# If a genuine point lookup ever appears in the app, measure again before
+# concluding an index would help it.
+STALE_INDEX_PREFIX = "ix_"
 
 
 def human(n: float) -> str:
@@ -165,9 +189,27 @@ def human(n: float) -> str:
     return f"{n:,.1f} GB"
 
 
+def drop_stale_indexes() -> None:
+    """
+    Remove indexes an older build left on the bundle.
+
+    Dropped BEFORE compact_database rather than after, so the fresh copy never
+    carries them into the file that gets uploaded. See STALE_INDEX_PREFIX above
+    for why the bundle no longer has any indexes at all.
+    """
+    with duckdb.connect(str(DB_FILE)) as con:
+        stale = [r[0] for r in con.execute(
+            "SELECT index_name FROM duckdb_indexes() WHERE index_name LIKE ?",
+            [STALE_INDEX_PREFIX + "%"]).fetchall()]
+        for name in stale:
+            con.execute(f'DROP INDEX IF EXISTS "{name}"')
+    if stale:
+        print(f"  dropped {len(stale)} index(es) from an earlier build")
+
+
 def build_db() -> dict[str, int]:
     """
-    Checks dashboard.db is complete, drops anything stale, indexes it.
+    Checks the bundle is complete, drops anything stale, and compacts it.
 
     NO LONGER BUILDS ANYTHING. Every table is now written directly by the step
     that computes it, so this verifies rather than assembles. It used to read 14
@@ -187,15 +229,25 @@ def build_db() -> dict[str, int]:
             "tables straight into the bundle."
         )
 
-    # Drop and rewrite per table via to_sql(if_exists="replace"), matching
-    # s04/s05, rather than deleting the file first. On Windows the file delete
-    # fails outright if a local `streamlit run` still has dashboard.db open —
-    # replacing tables in place works regardless of who else has it open for
-    # reading. It is also what lets s04 write its tables before this runs.
+    # Tables are replaced in place by each step rather than the file being
+    # deleted first, which is what lets s04 write its tables before this runs.
+    #
+    # THE SECOND HALF OF THAT COMMENT USED TO SAY "regardless of who else has it
+    # open for reading". That was true of SQLite and is NOT true here. DuckDB
+    # allows many readers or one writer, per process, across the whole file, so
+    # a local `streamlit run` holding a read-only handle blocks this open
+    # entirely. serving.connect() carries the explanation the five serving steps
+    # need; this one connect is the only place in the publish path that can hit
+    # it, and it fails before anything is written.
+    #
+    # `with duckdb.connect(...)` CLOSES the connection on exit, where sqlite3's
+    # context manager only committed and left it open. That is the behaviour
+    # wanted here, because compact_database below opens the file itself.
     counts: dict[str, int] = {}
-    with sqlite3.connect(DB_FILE) as con:
+    with duckdb.connect(str(DB_FILE)) as con:
         present = {r[0] for r in con.execute(
-            "SELECT name FROM sqlite_master WHERE type='table'")}
+            "SELECT table_name FROM information_schema.tables "
+            "WHERE table_schema = 'main'").fetchall()}
         absent = [t for t in DB_TABLES if t not in present]
         if absent:
             by_step: dict[str, list[str]] = {}
@@ -215,29 +267,17 @@ def build_db() -> dict[str, int]:
         # Anything left over from a previous bundle would still be uploaded, so
         # it is dropped rather than carried. This is what removes the four
         # perfect_* tables nothing reads on the first run after that change.
-        stale = present - set(TABLES) - {"sqlite_sequence"}
+        # sqlite_sequence is no longer excluded here because DuckDB has no such
+        # table: it has no AUTOINCREMENT to keep a counter for.
+        stale = present - set(TABLES)
         for table in sorted(stale):
             con.execute(f'DROP TABLE IF EXISTS "{table}"')
             print(f"  dropped stale table: {table}")
 
-        # DROP TABLE (inside to_sql's replace) already drops that table's
-        # indexes, so recreating them here never collides with a stale one.
-        # The DB_TABLES indexes are not dropped by anything above, hence
-        # IF NOT EXISTS.
-        for table, col in INDEXES:
-            con.execute(
-                f"CREATE INDEX IF NOT EXISTS ix_{table}_{col} ON {table}({col})")
-
-    # VACUUM cannot run inside the transaction the context manager holds open,
-    # and needs exclusive access it may not get with another reader attached.
-    # It only reclaims space, so skip it rather than fail the whole publish.
-    try:
-        con = sqlite3.connect(DB_FILE)
-        con.execute("VACUUM")
-        con.close()
-    except sqlite3.OperationalError as exc:
-        print(f"  (skipped VACUUM: {exc} — file is still valid, just not compacted)")
-
+    drop_stale_indexes()
+    before, after = compact_database(DB_FILE)
+    if before > after:
+        print(f"  compacted {human(before)} -> {human(after)}")
     return counts
 
 
@@ -343,11 +383,12 @@ def main() -> int:
 
     counts = build_db()
     db_size = DB_FILE.stat().st_size
-    print(f"\n  dashboard.db     {human(db_size)}  ({sum(counts.values()):,} rows)")
+    print(f"\n  {DB_FILE.name:16s} {human(db_size)}  ({sum(counts.values()):,} rows)")
 
     compress()
     gz_size = GZ_FILE.stat().st_size
-    print(f"  dashboard.db.gz  {human(gz_size)}  ({db_size / gz_size:.1f}x smaller)")
+    print(f"  {GZ_FILE.name:16s} {human(gz_size)}  "
+          f"({db_size / gz_size:.1f}x smaller)")
 
     if args.build_only:
         print(f"\nBuilt in {time.time() - started:.1f}s. Not published (--build-only).")

@@ -13,3 +13,13 @@ dependencies:
   - requests
   - jupyterlab
   - ipykernel
+  - pip
+  - pip:
+      # Via pip rather than conda: the defaults channel does not carry duckdb.
+      #
+      # The exact version matters more than any other pin here. DuckDB's storage
+      # format belongs to the release that wrote the file, and a reader from a
+      # different release refuses to open it. This pin and the one in
+      # requirements.txt are what guarantee the pipeline and Streamlit Cloud
+      # agree about the bundle. Change both together.
+      - duckdb==1.5.5

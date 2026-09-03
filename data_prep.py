@@ -8,27 +8,47 @@ Connection policy
 There is deliberately NO eager module-level connection. Each loader opens a fresh
 READ-ONLY connection and closes it when done, because:
   - a read-write connection held open for the process lifetime can be mutated by
-    an accidental to_sql(), and keeps -wal / -shm files alive
-  - open connections cause lock contention with DB Browser
-  - sqlite3 connections are not safely shareable across threads by default
+    an accidental write, and keeps a .wal file alive
+  - DuckDB takes an exclusive lock on a file opened for writing, so one held
+    connection stops the pipeline from rebuilding silver at all
+  - a connection left open is one nobody remembers to close
 
 New code should use the context manager:
 
     with get_connection() as con:
-        df = pd.read_sql("SELECT ...", con)
+        df = read_sql("SELECT ...", con)
 
 The legacy `dbset` name is still importable for the existing notebooks (see the
 backward-compatibility section at the bottom), but it is now READ-ONLY and is
 only created if something actually references it.
+
+Where the database comes from
+-----------------------------
+THE PATH IS IMPORTED FROM pipeline/config.py AND IS NOT DECLARED HERE. It used
+to be, and that is precisely how this file went stale: it named
+"DATA INGESTION/f1.db" directly, so when the project moved to DuckDB it went on
+opening the old SQLite file. Nothing failed. The notebooks kept running and kept
+analysing a snapshot that stopped being updated, which is the worst of the three
+possible outcomes.
+
+Importing config also brings two things worth having here:
+
+  - the pandas 2.x guard, which matters more in a notebook than anywhere else.
+    NOTES_LOG #42 records pandas 3.x silently shifting results by a few percent.
+  - read_sql, which normalises DuckDB's dtypes back to the ones this project was
+    written against. Without it a nullable integer column arrives holding pd.NA
+    instead of NaN, and `if row["red_flag"] == 1` raises rather than being False.
 """
 
-import sqlite3
+import sys
 from contextlib import contextmanager
 from pathlib import Path
 
+import duckdb
 import pandas as pd
 
-DB_PATH = Path(__file__).resolve().parent / "DATA INGESTION" / "f1.db"
+sys.path.insert(0, str(Path(__file__).resolve().parent / "pipeline"))
+from config import DB_PATH, read_sql  # noqa: E402,F401
 
 # Confirmed team renames across 2023-2026 (see the original data-prep investigation
 # notebook for the evidence query and reasoning). Cadillac deliberately NOT mapped --
@@ -48,19 +68,27 @@ TEAM_NAME_MAP = {
 @contextmanager
 def get_connection(read_only=True):
     """
-    Yields a sqlite3 connection to f1.db and closes it on exit.
+    Yields a DuckDB connection to silver and closes it on exit.
 
-    read_only=True (the default) opens with mode=ro, so no code path using this
-    helper can modify the database. Pass read_only=False only from an explicit
-    write step such as the silver build.
+    read_only=True (the default) means no code path using this helper can modify
+    the database. Pass read_only=False only from an explicit write step.
+
+    TWO DUCKDB BEHAVIOURS TO KNOW ABOUT, both of which sqlite3 did not have.
+
+    A connection opened for writing takes an EXCLUSIVE lock on the file. Holding
+    one open in a notebook does not merely risk a stray write, it stops
+    s02_build_silver from running at all until the kernel is restarted. That is
+    the main reason read_only is the default rather than a nicety.
+
+    Two connections to the same file in one process must agree about read_only.
+    Asking for a writable one while `dbset` is already open read-only raises
+    "Can't open a connection to same database file with a different
+    configuration". Restart the kernel, or do the write from a script.
     """
     if not DB_PATH.exists():
         raise FileNotFoundError(f"database not found at {DB_PATH}")
 
-    if read_only:
-        con = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
-    else:
-        con = sqlite3.connect(str(DB_PATH))
+    con = duckdb.connect(str(DB_PATH), read_only=read_only)
     try:
         yield con
     finally:
@@ -70,7 +98,7 @@ def get_connection(read_only=True):
 def _read_sql(query, params=()):
     """Runs a query on a fresh read-only connection and returns a DataFrame."""
     with get_connection() as con:
-        return pd.read_sql(query, con, params=list(params))
+        return read_sql(query, con, list(params) if params else None)
 
 
 # --- cleaning --------------------------------------------------------------------
@@ -212,10 +240,16 @@ def load_pit_stops(year=None):
 # loader functions never hold a connection open.
 #
 # NOTE: `dbset` is now read-only. A notebook cell that wrote through it
-# (to_sql / INSERT / CREATE TABLE) will now raise
-#     sqlite3.OperationalError: attempt to write a readonly database
+# (INSERT / CREATE TABLE) will now raise
+#     duckdb.InvalidInputException: Cannot execute statement of type "CREATE"
+#     on database "silver_f1" which is attached in read-only mode
 # That is intentional -- such a write should be explicit, via
 # get_connection(read_only=False).
+#
+# IT IS ALSO A DUCKDB CONNECTION NOW, NOT A SQLITE ONE. A notebook cell doing
+# `pd.read_sql(..., dbset)` still works, but goes row by row through the DB-API
+# and throws away most of the reason for the migration. Prefer the loaders here,
+# or read_sql(sql, dbset), which goes through Arrow instead.
 #
 # New code should use `with get_connection() as con:` instead.
 
@@ -227,6 +261,6 @@ def __getattr__(name):
     global _dbset
     if name == "dbset":
         if _dbset is None:
-            _dbset = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
+            _dbset = duckdb.connect(str(DB_PATH), read_only=True)
         return _dbset
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

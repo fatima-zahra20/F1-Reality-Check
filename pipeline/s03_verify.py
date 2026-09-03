@@ -6,9 +6,10 @@ invariants established during the IDA and diagnostic phases, so the pipeline
 fails loudly instead of quietly producing wrong probabilities.
 
 Design notes:
-  - Introspects the live schema via PRAGMA rather than trusting the data
-    dictionary (which was wrong at least twice: starting_grid scope, the
-    session_result duration split).
+  - Introspects the live schema via information_schema rather than trusting the
+    data dictionary (which was wrong at least twice: starting_grid scope, the
+    session_result duration split). It used PRAGMA table_info until the DuckDB
+    migration, which has no PRAGMA; the reason for introspecting is unchanged.
   - Three tiers: FAIL (pipeline must stop), WARN (known/accepted quirk worth
     re-seeing), INFO (drift monitoring — log these and diff week over week).
   - Exit code 1 on any FAIL so a scheduler can halt the run.
@@ -21,10 +22,11 @@ Run:  python pipeline\\s03_verify.py       (from project root)
 from __future__ import annotations
 
 import json
-import sqlite3
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+
+import duckdb
 
 # Make `import config` work regardless of the current working directory.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -144,22 +146,29 @@ class Report:
         print(f"  [ ok ] {msg}")
 
 
-def q1(con: sqlite3.Connection, sql: str, params=()):
+def q1(con: duckdb.DuckDBPyConnection, sql: str, params=()):
     """Scalar query helper."""
-    row = con.execute(sql, params).fetchone()
+    cur = con.execute(sql, list(params)) if params else con.execute(sql)
+    row = cur.fetchone()
     return None if row is None else row[0]
 
 
-def table_exists(con: sqlite3.Connection, name: str) -> bool:
+def table_exists(con: duckdb.DuckDBPyConnection, name: str) -> bool:
     return q1(
         con,
-        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?",
+        "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = ?",
         (name,),
     ) > 0
 
 
-def columns_of(con: sqlite3.Connection, table: str) -> list[str]:
-    return [r[1] for r in con.execute(f'PRAGMA table_info("{table}")')]
+def columns_of(con: duckdb.DuckDBPyConnection, table: str) -> list[str]:
+    # information_schema hands back the name directly, where PRAGMA table_info
+    # returned a row per column with the name in position 1. Ordered by
+    # ordinal_position so the list still arrives in declaration order, which
+    # the split-column checks below rely on.
+    return [r[0] for r in con.execute(
+        "SELECT column_name FROM information_schema.columns "
+        "WHERE table_name = ? ORDER BY ordinal_position", [table]).fetchall()]
 
 
 # --- checks ---------------------------------------------------------------------
@@ -174,8 +183,9 @@ def check_tables_present(con, rep: Report) -> None:
 
     # Surface any silver_ table that exists but isn't in the expected list.
     actual = [r[0] for r in con.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'silver_%'"
-    )]
+        "SELECT table_name FROM information_schema.tables "
+        "WHERE table_name LIKE 'silver_%'"
+    ).fetchall()]
     extra = sorted(set(actual) - set(EXPECTED_TABLES) - set(DERIVED_TABLES))
     if extra:
         rep.warn(f"undocumented silver tables present: {extra}")
@@ -205,7 +215,7 @@ def check_lap_flags_fresh(con, rep: Report) -> None:
     if table_exists(con, "silver_caution_periods"):
         for kind, n in con.execute(
             "SELECT kind, COUNT(*) FROM silver_caution_periods GROUP BY kind ORDER BY 2 DESC"
-        ):
+        ).fetchall():
             rep.info(f"caution periods — {kind}: {n}")
 
 def check_split_columns(con, rep: Report) -> None:
@@ -380,7 +390,8 @@ def check_completed_races_have_data(con, rep: Report) -> None:
         JOIN silver_meetings m ON m.meeting_key = s.meeting_key
         WHERE s.session_name IN ('Race', 'Sprint')
           AND s.is_cancelled = 0
-          AND s.date_start < datetime('now', '-3 days')
+          AND CAST(substr(s.date_start, 1, 19) AS TIMESTAMP)
+                < (now() AT TIME ZONE 'UTC') - INTERVAL 3 DAY
         ORDER BY s.date_start
     """).fetchall()
 
@@ -436,7 +447,7 @@ def check_team_name_drift(con, rep: Report) -> None:
     names = [r[0] for r in con.execute("""
         SELECT DISTINCT team_name FROM silver_drivers
         WHERE team_name IS NOT NULL ORDER BY team_name
-    """)]
+    """).fetchall()]
     rep.info(f"{len(names)} distinct raw team_name values: {names}")
     rep.warn("apply normalize_team_names() before any multi-year team grouping")
 
@@ -453,13 +464,18 @@ def check_null_team_name(con, rep: Report) -> None:
     # Counted per session, not per row. The old message reported 14 rows against
     # "1 session known" and read as though the problem had grown thirteenfold,
     # when all 14 are the same documented session (verified 2026-08-10).
+    # Every grouped column is named. SQLite allowed a bare column beside a
+    # GROUP BY and picked an arbitrary row for it; DuckDB refuses. Since
+    # session_key determines all four, listing them changes no result.
     sessions = con.execute("""
         SELECT s.year, m.meeting_name, s.session_name, COUNT(*)
         FROM silver_drivers d
         JOIN silver_sessions s ON s.session_key = d.session_key
         JOIN silver_meetings m ON m.meeting_key = s.meeting_key
         WHERE d.team_name IS NULL
-        GROUP BY d.session_key ORDER BY s.date_start
+        GROUP BY d.session_key, s.year, m.meeting_name, s.session_name,
+                 s.date_start
+        ORDER BY s.date_start
     """).fetchall()
 
     if len(sessions) == 1:
@@ -479,7 +495,7 @@ def check_temporal_coverage(con, rep: Report) -> None:
         return
     for year, n in con.execute(
         "SELECT year, COUNT(*) FROM silver_sessions GROUP BY year ORDER BY year"
-    ):
+    ).fetchall():
         rep.info(f"{year}: {n} sessions")
     latest = con.execute("""
         SELECT s.date_start, m.meeting_name, s.session_name
@@ -530,7 +546,8 @@ def completed_sessions(con) -> list[tuple]:
         FROM silver_sessions s
         JOIN silver_meetings m ON m.meeting_key = s.meeting_key
         WHERE s.is_cancelled = 0
-          AND s.date_start < datetime('now', '-3 days')
+          AND CAST(substr(s.date_start, 1, 19) AS TIMESTAMP)
+                < (now() AT TIME ZONE 'UTC') - INTERVAL 3 DAY
         ORDER BY s.date_start
     """).fetchall()
 
@@ -582,7 +599,7 @@ def check_endpoint_coverage(con, rep: Report) -> None:
             continue
 
         have = {r[0] for r in con.execute(
-            f'SELECT DISTINCT session_key FROM "{table}"')}
+            f'SELECT DISTINCT session_key FROM "{table}"').fetchall()}
         scoped = [s for s in sessions if in_scope(scope, s[2])]
         missing = [s for s in scoped if s[0] not in have]
 
@@ -645,9 +662,10 @@ def check_silver_matches_bronze(con, rep: Report) -> None:
         return
 
     try:
-        con.execute("ATTACH DATABASE ? AS bronze",
-                    (f"file:{BRONZE_DB_PATH.as_posix()}?mode=ro",))
-    except sqlite3.Error as exc:
+        # DuckDB's ATTACH takes a literal path, not a bind parameter, and says
+        # read-only in its own clause rather than in a URI.
+        con.execute(f"ATTACH '{BRONZE_DB_PATH.as_posix()}' AS bronze (READ_ONLY)")
+    except duckdb.Error as exc:
         rep.warn(f"could not attach bronze ({exc}); skipping the staleness check")
         return
 
@@ -662,7 +680,7 @@ def check_silver_matches_bronze(con, rep: Report) -> None:
             try:
                 now = con.execute(
                     f'SELECT COUNT(*) FROM bronze."{name}"').fetchone()[0]
-            except sqlite3.Error:
+            except duckdb.Error:
                 rep.warn(f"{name}: recorded in build state but not in bronze")
                 continue
 
@@ -724,7 +742,7 @@ def check_coverage_snapshot(con, rep: Report) -> None:
         scope = ENDPOINT_SCOPE.get(table)
         if scope:
             have = {r[0] for r in con.execute(
-                f'SELECT DISTINCT session_key FROM "{table}"')}
+                f'SELECT DISTINCT session_key FROM "{table}"').fetchall()}
             scoped = [s for s in sessions if in_scope(scope, s[2])]
             entry["scope"] = scope
             entry["in_scope"] = len(scoped)
@@ -1056,7 +1074,7 @@ def main() -> int:
     print("=" * 74)
 
     rep = Report()
-    con = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
+    con = duckdb.connect(str(DB_PATH), read_only=True)
     try:
         for check in CHECKS:
             try:

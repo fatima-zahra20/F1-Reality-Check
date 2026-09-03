@@ -65,9 +65,51 @@ ANALYSIS_DIR = OUTPUTS_DIR / "analysis"
 
 
 def connect() -> duckdb.DuckDBPyConnection:
-    """Open the bundle for writing, creating the folder on first run."""
+    """
+    Open the bundle for writing, creating the folder on first run.
+
+    THE ERROR HANDLING IS THE POINT OF THIS BEING A FUNCTION NOW.
+
+    DuckDB allows many readers or one writer, and the lock is held per PROCESS
+    across the whole file. SQLite let a writer in while readers were attached,
+    so `streamlit run` against the local bundle cost nothing. It is no longer
+    free: a local dashboard holds a read-only handle, and that is enough to stop
+    every serving step from writing. Measured, across two processes.
+
+    Raw, the failure is an IOException from inside DuckDB naming a temp path and
+    a PID, which says nothing about what to do. Five steps hit this same line, so
+    the explanation belongs here rather than in each of them.
+
+    The same lock is why a notebook holding data_prep's `dbset` blocks a silver
+    rebuild. It has bitten this project once already.
+
+    RAISES SystemExit, NOT AN EXCEPTION TO CATCH. A locked file is an
+    operational condition with an obvious remedy, not a defect, and a traceback
+    for it is noise that buries the one line worth reading. Every caller of this
+    is a script whose main() would immediately print the message and exit 1
+    anyway, so doing it here avoids the same try/except in five files. Nothing
+    has been written when this fires.
+    """
     BUNDLE_DIR.mkdir(parents=True, exist_ok=True)
-    return duckdb.connect(str(BUNDLE_DB))
+    try:
+        return duckdb.connect(str(BUNDLE_DB))
+    except duckdb.IOException as exc:
+        raise SystemExit(
+            f"\n[FAIL] Cannot open {BUNDLE_DB.name} for writing: "
+            "another process has it.\n"
+            "\n"
+            "  DuckDB allows many readers or one writer, so anything holding\n"
+            "  this file open stops the pipeline writing to it. Almost always\n"
+            "  one of:\n"
+            "\n"
+            "    - a local `streamlit run` serving the dashboard\n"
+            "    - a notebook that imported data_prep and touched `dbset`\n"
+            "    - an earlier pipeline run that has not exited\n"
+            "\n"
+            "  Close it and run this step again. Nothing has been written, so\n"
+            "  the bundle is exactly as it was.\n"
+            f"\n  DuckDB said: {str(exc).splitlines()[0]}\n"
+        ) from exc
 
 
 def write_table(df: pd.DataFrame, name: str, con: duckdb.DuckDBPyConnection,

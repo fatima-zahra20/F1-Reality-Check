@@ -81,15 +81,16 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import sqlite3
 import sys
 import time
 from pathlib import Path
 
+import duckdb
 import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from config import DB_PATH, GOLD_DB_PATH  # noqa: E402
+from config import (DB_PATH, GOLD_DB_PATH, compact_database,  # noqa: E402
+                    read_sql)
 
 # Year-over-year renames collapsed into one label so a multi-year grouping does
 # not silently split a team in two. Lifted from data_prep.TEAM_NAME_MAP, which
@@ -142,7 +143,7 @@ def build_session(con) -> pd.DataFrame:
     recomputes: the green median lap, and how much of the session was
     neutralised.
     """
-    s = pd.read_sql("""
+    s = read_sql("""
         SELECT s.session_key, s.session_type, s.session_name,
                s.date_start AS session_date_start, s.date_end AS session_date_end,
                s.year, s.gmt_offset, s.is_cancelled,
@@ -154,7 +155,7 @@ def build_session(con) -> pd.DataFrame:
         LEFT JOIN silver_meetings m ON m.meeting_key = s.meeting_key
     """, con)
 
-    stats = pd.read_sql("""
+    stats = read_sql("""
         SELECT l.session_key,
                COUNT(*)                                  AS n_laps,
                COUNT(DISTINCT l.driver_number)           AS n_drivers,
@@ -171,7 +172,7 @@ def build_session(con) -> pd.DataFrame:
         GROUP BY l.session_key
     """, con)
 
-    green = pd.read_sql("""
+    green = read_sql("""
         SELECT l.session_key, l.lap_duration
         FROM silver_laps l
         JOIN silver_lap_flags f
@@ -184,7 +185,7 @@ def build_session(con) -> pd.DataFrame:
         green_median_lap_s="median", best_lap_s="min",
         n_representative_laps="size")
 
-    periods = pd.read_sql("""
+    periods = read_sql("""
         SELECT session_key, COUNT(*) AS n_caution_periods,
                SUM(duration_seconds) AS caution_seconds
         FROM silver_caution_periods GROUP BY session_key
@@ -192,7 +193,7 @@ def build_session(con) -> pd.DataFrame:
 
     # Race-level facts every consumer derives for itself. These are properties
     # of the session, not conclusions about it, so they belong here.
-    results = pd.read_sql("""
+    results = read_sql("""
         SELECT session_key,
                COUNT(*)                                        AS n_results,
                SUM(CASE WHEN dnf = 1 THEN 1 ELSE 0 END)        AS dnf_count,
@@ -201,7 +202,7 @@ def build_session(con) -> pd.DataFrame:
         FROM silver_session_result GROUP BY session_key
     """, con)
 
-    kinds = pd.read_sql("""
+    kinds = read_sql("""
         SELECT session_key,
                SUM(CASE WHEN kind = 'SC'  THEN 1 ELSE 0 END) AS sc_periods,
                SUM(CASE WHEN kind = 'VSC' THEN 1 ELSE 0 END) AS vsc_periods,
@@ -211,15 +212,31 @@ def build_session(con) -> pd.DataFrame:
 
     # rainfall is a 0/1 state per sample, never millimetres (NOTES_LOG #17), so
     # it is averaged into a share and never summed as an amount.
-    wx = pd.read_sql("""
+    # The two temperatures are averaged as DECIMAL, not as float, and that is
+    # not fussiness. Float addition is not associative, DuckDB sums in parallel,
+    # and the order it happens to use moves the result in its last bits. On
+    # three of 425 sessions that landed either side of a .x5 boundary and the
+    # rounded temperature changed by 0.1 depending on nothing.
+    #
+    # DECIMAL addition is exact and therefore order independent, so the answer
+    # stops depending on how the work was divided. Checked against the SQLite
+    # build: it agrees on 424 of 425 sessions, and on session 11338 it returns
+    # 46.5 where SQLite returned 46.4, because the exact mean is 46.45 and
+    # SQLite's float sum fell just short of it. The disagreement is SQLite's.
+    #
+    # pct_samples_wet needs no such treatment: rainfall is a 0/1 integer, so its
+    # SUM is exact whatever order it is added in.
+    wx = read_sql("""
         SELECT session_key,
-               ROUND(AVG(track_temperature), 1)              AS avg_track_temp,
-               ROUND(AVG(air_temperature), 1)                AS avg_air_temp,
+               ROUND(AVG(CAST(track_temperature AS DECIMAL(10,4))), 1)
+                   AS avg_track_temp,
+               ROUND(AVG(CAST(air_temperature   AS DECIMAL(10,4))), 1)
+                   AS avg_air_temp,
                ROUND(100.0 * SUM(rainfall) / COUNT(*), 1)    AS pct_samples_wet
         FROM silver_weather GROUP BY session_key
     """, con)
 
-    laps_max = pd.read_sql("""
+    laps_max = read_sql("""
         SELECT session_key, MAX(lap_number) AS total_laps
         FROM silver_laps GROUP BY session_key
     """, con)
@@ -291,7 +308,7 @@ def build_driver(con) -> pd.DataFrame:
     driver_full_name resolved per session, which is the only place the mapping
     is unambiguous. This table is for lookups and rosters.
     """
-    d = pd.read_sql("""
+    d = read_sql("""
         SELECT d.driver_number, d.full_name, d.broadcast_name, d.name_acronym,
                d.first_name, d.last_name, d.country_code, d.headshot_url,
                d.team_name, d.team_colour, s.year, s.date_start
@@ -334,7 +351,7 @@ def build_entry(con) -> pd.DataFrame:
     The join every team-level question needs. team_name_raw is kept beside the
     conformed label so an audit can always see what the API actually said.
     """
-    e = pd.read_sql("""
+    e = read_sql("""
         SELECT d.session_key, d.driver_number, d.meeting_key,
                d.team_name AS team_name_raw, d.team_colour,
                d.full_name AS driver_full_name, d.name_acronym AS driver_acronym,
@@ -382,11 +399,11 @@ def attach_state_at_lap_start(con, df: pd.DataFrame,
     the other side. Whether that moves a published verdict is verified, not
     assumed, when the consumer is migrated.
     """
-    pos = pd.read_sql("""
+    pos = read_sql("""
         SELECT session_key, driver_number, "date", "position"
         FROM silver_position WHERE "date" IS NOT NULL
     """, con)
-    iv = pd.read_sql("""
+    iv = read_sql("""
         SELECT session_key, driver_number, "date",
                gap_to_leader_seconds, gap_to_leader_laps,
                interval_seconds, interval_laps
@@ -440,7 +457,7 @@ def attach_stint(con, df: pd.DataFrame) -> pd.DataFrame:
     Phantom stints are excluded from the join. A stint with lap_end < lap_start
     covers no laps by definition, so it can only contribute a wrong match.
     """
-    stints = pd.read_sql("""
+    stints = read_sql("""
         SELECT session_key, driver_number, stint_number, compound,
                tyre_age_at_start, lap_start, lap_end
         FROM silver_stints
@@ -477,7 +494,7 @@ def build_lap(con) -> pd.DataFrame:
     is_valid_lap is the first conformed column in the layer and the evidence
     for it is in the module docstring and NOTES_LOG #49.
     """
-    laps = pd.read_sql("""
+    laps = read_sql("""
         SELECT
             l.session_key, l.driver_number, l.lap_number, l.meeting_key,
             l.date_start, l.lap_duration,
@@ -573,7 +590,7 @@ def build_stint(con) -> pd.DataFrame:
     Testing the boundary instead of assuming it is the difference between
     flagging 40% of the table and flagging 0.2% of it.
     """
-    st = pd.read_sql("""
+    st = read_sql("""
         SELECT st.session_key, st.driver_number, st.stint_number,
                st.meeting_key, st.lap_start, st.lap_end,
                st.compound, st.tyre_age_at_start,
@@ -637,7 +654,7 @@ def build_pit(con) -> pd.DataFrame:
     0%, 18.1%, 85.5%, 33.8% by year, so `STOP_DURATION_MIN_YEAR = 2024` badly
     overstates what is available in 2024.
     """
-    p = pd.read_sql("""
+    p = read_sql("""
         SELECT p.session_key, p.driver_number, p.lap_number, p.meeting_key,
                p.date, p.stop_duration, p.pit_duration,
                f.sc_flag, f.vsc_flag, f.red_flag, f.neutralised,
@@ -676,7 +693,7 @@ def build_session_result(con) -> pd.DataFrame:
     the meeting and back in to the qualifying session. Doing that here is the
     point: every consumer currently rediscovers it or silently goes without.
     """
-    r = pd.read_sql("""
+    r = read_sql("""
         SELECT r.session_key, r.driver_number, r.meeting_key,
                r.position, r.number_of_laps, r.dnf, r.dns, r.dsq,
                r.duration_race_seconds, r.gap_to_leader_seconds,
@@ -693,7 +710,7 @@ def build_session_result(con) -> pd.DataFrame:
     """, con)
     r["team_name"] = conform_team(r.team_name_raw)
 
-    grid = pd.read_sql("""
+    grid = read_sql("""
         SELECT g.driver_number, g.position AS grid_position,
                g.lap_duration AS grid_lap_duration,
                s.meeting_key, s.session_name AS grid_session_name
@@ -715,7 +732,7 @@ def build_session_result(con) -> pd.DataFrame:
 @builds("gold_weather")
 def build_weather(con) -> pd.DataFrame:
     """Weather readings with session context. Grain is (session_key, date)."""
-    return pd.read_sql("""
+    return read_sql("""
         SELECT w.session_key, w.date, w.meeting_key,
                w.air_temperature, w.track_temperature, w.humidity, w.pressure,
                w.rainfall, w.wind_speed, w.wind_direction,
@@ -732,13 +749,13 @@ def build_overtake(con) -> pd.DataFrame:
     Two joins to gold_entry rather than one, because "did a McLaren pass a
     Ferrari" needs both sides and every consumer currently joins only one.
     """
-    o = pd.read_sql("""
+    o = read_sql("""
         SELECT o.session_key, o.date, o.meeting_key, o.position,
                o.overtaking_driver_number, o.overtaken_driver_number,
                s.year, s.session_name, s.circuit_short_name
         FROM silver_overtakes o JOIN silver_sessions s USING (session_key)
     """, con)
-    ent = pd.read_sql("""
+    ent = read_sql("""
         SELECT session_key, driver_number, team_name FROM silver_drivers
     """, con)
     ent["team_name"] = conform_team(ent.team_name)
@@ -754,7 +771,7 @@ def build_overtake(con) -> pd.DataFrame:
 @builds("gold_position")
 def build_position(con) -> pd.DataFrame:
     """Position over time. Grain is (session_key, driver_number, date)."""
-    return pd.read_sql("""
+    return read_sql("""
         SELECT p.session_key, p.driver_number, p.meeting_key, p.date, p.position,
                s.year, s.session_name, s.circuit_short_name
         FROM silver_position p JOIN silver_sessions s USING (session_key)
@@ -771,8 +788,13 @@ def build_race_control(con) -> pd.DataFrame:
     27 'RED FLAG INFRINGEMENT' stewards' notes that a naive substring match
     would turn into invented suspensions.
     """
-    rc = pd.read_sql("""
-        SELECT rc.id, rc.session_key, rc.meeting_key, rc.date, rc.driver_number,
+    # No rc.id: silver_race_control lost its surrogate key when the store moved
+    # to DuckDB, which has no AUTOINCREMENT. Nothing read the column here or
+    # downstream, and this table's indexes are on session_key and
+    # is_red_flag_message, so its absence costs nothing. DATA_DICTIONARY still
+    # lists it and needs the correction.
+    rc = read_sql("""
+        SELECT rc.session_key, rc.meeting_key, rc.date, rc.driver_number,
                rc.lap_number, rc.category, rc.flag, rc.scope, rc.sector,
                rc.qualifying_phase, rc.message,
                s.year, s.session_name, s.circuit_short_name
@@ -796,7 +818,7 @@ def build_championship(con) -> pd.DataFrame:
     Kept together because every question about standings asks the same shape of
     it, and two near-identical tables would mean two near-identical queries.
     """
-    d = pd.read_sql("""
+    d = read_sql("""
         SELECT c.session_key, c.meeting_key, c.driver_number,
                NULL AS team_name_raw,
                c.position_start, c.position_current,
@@ -807,7 +829,7 @@ def build_championship(con) -> pd.DataFrame:
     """, con)
     d["entity_type"] = "driver"
 
-    t = pd.read_sql("""
+    t = read_sql("""
         SELECT c.session_key, c.meeting_key, NULL AS driver_number,
                c.team_name AS team_name_raw,
                c.position_start, c.position_current,
@@ -851,7 +873,7 @@ def build_agg_interval(con) -> pd.DataFrame:
     distance, a rule of the sport, recorded in NOTES_LOG #32. Kept as a named
     column rather than a filter so a different threshold stays possible.
     """
-    return pd.read_sql("""
+    return read_sql("""
         SELECT i.session_key, i.driver_number,
                s.year, s.session_name,
                COUNT(*)                                       AS interval_samples,
@@ -865,7 +887,10 @@ def build_agg_interval(con) -> pd.DataFrame:
         FROM silver_intervals i
         JOIN silver_sessions s ON s.session_key = i.session_key
         WHERE i.interval_seconds IS NOT NULL
-        GROUP BY i.session_key, i.driver_number
+        -- year and session_name are named rather than left bare. SQLite allowed
+        -- a selected column outside the GROUP BY and picked an arbitrary row;
+        -- DuckDB refuses. session_key determines both, so no result changes.
+        GROUP BY i.session_key, i.driver_number, s.year, s.session_name
     """, con)
 
 
@@ -1163,7 +1188,7 @@ FROM_GOLD = {"gold_agg_driver_session", "gold_agg_driver_race",
 def main() -> int:
     ap = argparse.ArgumentParser(description="Build the gold layer.")
     ap.add_argument("--execute", action="store_true",
-                    help="write gold_f1.db; without this nothing is written")
+                    help="write gold_f1.duckdb; without this nothing is written")
     ap.add_argument("--only", nargs="*", metavar="TABLE",
                     help="build a subset (dependencies are built too)")
     ap.add_argument("--list", action="store_true", help="list tables and exit")
@@ -1196,7 +1221,7 @@ def main() -> int:
 
     t0 = time.time()
     built: dict[str, pd.DataFrame] = {}
-    con = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
+    con = duckdb.connect(str(DB_PATH), read_only=True)
     try:
         for name in ORDER:
             if name not in wanted:
@@ -1211,12 +1236,12 @@ def main() -> int:
         con.close()
 
     if not args.execute:
-        print("\nPlan only. Re-run with --execute to write gold_f1.db.")
+        print("\nPlan only. Re-run with --execute to write gold_f1.duckdb.")
         return 0
 
     print(f"\nWriting {GOLD_DB_PATH.name}...")
     GOLD_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    out = sqlite3.connect(str(GOLD_DB_PATH))
+    out = duckdb.connect(str(GOLD_DB_PATH))
     try:
         out.execute("""
             CREATE TABLE IF NOT EXISTS _gold_build_state (
@@ -1226,19 +1251,36 @@ def main() -> int:
                 built_at    TEXT NOT NULL)
         """)
         for name, df in built.items():
-            out.execute(f"DROP TABLE IF EXISTS {name}")
-            df.to_sql(name, out, if_exists="replace", index=False,
-                      chunksize=20_000)
+            # to_sql does not work against a DuckDB connection. Registering the
+            # frame and selecting from it replaces both the DROP and the write,
+            # since CREATE OR REPLACE is atomic where drop-then-write was not.
+            out.register("_incoming", df)
+            try:
+                out.execute(
+                    f'CREATE OR REPLACE TABLE "{name}" AS SELECT * FROM _incoming')
+            finally:
+                out.unregister("_incoming")
             for i, cols in enumerate(INDEXES.get(name, []), start=1):
                 out.execute(f"CREATE INDEX ix_{name}_{i} ON {name}{cols}")
-            out.execute("""INSERT OR REPLACE INTO _gold_build_state
-                           VALUES (?, ?, ?, datetime('now'))""",
-                        (name, len(df), len(df.columns)))
-        out.commit()
+            # DELETE then INSERT rather than an upsert, matching the other two
+            # build-state tables. The timestamp keeps SQLite's exact shape so
+            # rows written either side of the migration stay comparable.
+            out.execute("DELETE FROM _gold_build_state WHERE table_name = ?",
+                        [name])
+            out.execute(
+                "INSERT INTO _gold_build_state VALUES "
+                "(?, ?, ?, strftime(now(), '%Y-%m-%d %H:%M:%S'))",
+                [name, len(df), len(df.columns)])
         out.execute("ANALYZE")
-        out.commit()
     finally:
         out.close()
+
+    # Reclaim what CREATE OR REPLACE left behind. Gold is rebuilt on every
+    # pipeline run and DuckDB appends rather than reusing blocks, so without
+    # this the file grows every week on identical data: measured 107.0 MB
+    # against 64.0 MB of actual content. Runs after the connection is closed
+    # because it opens the file for writing itself. See config.compact_database.
+    compact_database(GOLD_DB_PATH, GOLD_DB_PATH.name)
 
     size_mb = GOLD_DB_PATH.stat().st_size / 1e6
     total = sum(len(d) for d in built.values())

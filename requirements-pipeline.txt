@@ -15,6 +15,12 @@
 # few percent without raising, which reads as a data bug rather than an
 # environment one. See NOTES_LOG #42.
 
+# duckdb MUST match the pin in requirements.txt exactly. The pipeline writes the
+# bundle and Streamlit Cloud reads it, and DuckDB's storage format is tied to the
+# release that wrote it: a mismatched reader refuses to open the file rather than
+# coping with it. See the longer note in requirements.txt.
+duckdb==1.5.5
+
 numpy==2.3.5
 pandas==2.3.3
 scipy==1.16.3

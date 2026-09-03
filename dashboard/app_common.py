@@ -14,16 +14,21 @@ import gzip
 import hashlib
 import io
 import shutil
-import sqlite3
 import tempfile
 from pathlib import Path
 
+import duckdb
 import pandas as pd
 import requests
 import streamlit as st
 
 REPO = "fatima-zahra20/F1-Reality-Check"
-ASSET_URL = f"https://github.com/{REPO}/releases/download/data-latest/dashboard.db.gz"
+
+# Must name the asset pipeline/s06_publish.py uploads (its ASSET_NAME). Nothing
+# checks the two agree: a mismatch simply 404s and the app reports that the data
+# has not been published yet.
+ASSET_URL = (f"https://github.com/{REPO}/releases/download/data-latest/"
+             "dashboard.duckdb.gz")
 
 # How long the app may serve a bundle without re-checking the Release behind it.
 #
@@ -49,6 +54,34 @@ REQUIRED_TABLES = {"dim_race", "fact_lap", "diag_tests", "map_coverage"}
 class BundleUnavailable(RuntimeError):
     """Carries a message already fit to show a visitor."""
 
+
+def _open(path: Path) -> "duckdb.DuckDBPyConnection":
+    """
+    Open a bundle read-only, with timestamps pinned to UTC.
+
+    THE TIMEZONE LINE IS NOT OPTIONAL AND IS NOT COSMETIC. fact_lap.date_start
+    and fact_event.event_time are stored as TIMESTAMP WITH TIME ZONE, and DuckDB
+    renders those in whatever timezone the HOST is set to. On this laptop that
+    is Africa/Casablanca, so the column arrives as
+    datetime64[us, Africa/Casablanca]; on Streamlit Cloud it would arrive as UTC.
+    Same instants either way, but a page that formats one without converting
+    shows a clock time that is right in one place and an hour out in the other,
+    for half the year. That is the same shape of bug as the strftime("%B") one
+    data_vintage() was rewritten to avoid: correct locally, wrong deployed, and
+    invisible until someone notices the numbers.
+
+    SET GLOBAL rather than SET, because query() takes a cursor per call and a
+    cursor does NOT inherit a plain SET from the connection that made it.
+    Measured: with SET, the connection reported UTC and its cursor still
+    reported Africa/Casablanca.
+
+    read_only because DuckDB takes a write lock on a file opened for writing,
+    which would stop a second local process from opening the same bundle.
+    """
+    con = duckdb.connect(str(path), read_only=True)
+    con.execute("SET GLOBAL TimeZone = 'UTC'")
+    return con
+
 # Resolved from this file's own location, not the current working directory,
 # so it doesn't matter whether streamlit was launched from the repo root or
 # from inside dashboard/ - both land on the same paths.
@@ -61,7 +94,7 @@ ASSETS_DIR = APP_DIR / "assets"
 # writes it there (pipeline/serving.py owns that path); git ignores it. On
 # Streamlit Cloud it is absent, so the download below runs instead, which is the
 # normal deployed path rather than a fallback.
-LOCAL_DB = APP_DIR / "data" / "dashboard.db"
+LOCAL_DB = APP_DIR / "data" / "dashboard.duckdb"
 
 # Fallback for teams whose colour is missing in the source data.
 NEUTRAL = "#8A8A94"
@@ -105,11 +138,27 @@ def _asset_stamp() -> str:
 
 
 def _check_readable(path: Path) -> None:
-    """Open what was just written and confirm it is this project's bundle."""
-    con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    """
+    Open what was just written and confirm it is this project's bundle.
+
+    This check does more work than it used to. A DuckDB file written by a newer
+    release than the one installed here cannot be read at all, and the failure
+    arrives as a plain exception on connect rather than as a missing table. So
+    the connect is inside the try, and any failure to open is reported the same
+    way a damaged download is: with a message a visitor can act on.
+    """
+    try:
+        con = duckdb.connect(str(path), read_only=True)
+    except duckdb.Error as exc:
+        raise BundleUnavailable(
+            f"the downloaded file could not be opened ({exc.__class__.__name__}). "
+            "This usually means it was written by a different version of duckdb "
+            "than the one installed here."
+        ) from exc
     try:
         names = {r[0] for r in con.execute(
-            "SELECT name FROM sqlite_master WHERE type='table'")}
+            "SELECT table_name FROM information_schema.tables "
+            "WHERE table_schema = 'main'").fetchall()}
     finally:
         con.close()
     missing = REQUIRED_TABLES - names
@@ -164,7 +213,7 @@ def _download_to(path: Path) -> None:
 def _cached_bundles() -> list[Path]:
     """Previously downloaded bundles, newest first."""
     tmp = Path(tempfile.gettempdir())
-    return sorted(tmp.glob(f"{CACHE_PREFIX}*.db"),
+    return sorted(tmp.glob(f"{CACHE_PREFIX}*.duckdb"),
                   key=lambda p: p.stat().st_mtime, reverse=True)
 
 
@@ -186,19 +235,26 @@ def _prune(keep: Path) -> None:
 
 
 @st.cache_resource(ttl=BUNDLE_TTL, show_spinner="Loading race data…")
-def get_connection() -> sqlite3.Connection:
+def get_connection() -> "duckdb.DuckDBPyConnection":
     """
     One connection per server process, not per session - the download and the
-    67 MB file are shared by every visitor rather than repeated for each.
+    bundle are shared by every visitor rather than repeated for each.
 
     Re-checked every BUNDLE_TTL seconds. The bundle is stored under a name
     derived from the Release's own ETag, so a new publish lands in a NEW file
     and sessions still reading the old one are never pulled out from under.
+
+    Opened through _open, which pins the timezone as well as opening read-only.
+
+    There is no check_same_thread to pass. sqlite3 refused cross-thread use by
+    default and had to be told not to; DuckDB serialises access itself. query()
+    still takes a cursor per call, which is the documented way to hand work to
+    Streamlit's worker pool.
     """
     if LOCAL_DB.exists():
-        return sqlite3.connect(LOCAL_DB, check_same_thread=False)
+        return _open(LOCAL_DB)
 
-    target = Path(tempfile.gettempdir()) / f"{CACHE_PREFIX}{_asset_stamp()}.db"
+    target = Path(tempfile.gettempdir()) / f"{CACHE_PREFIX}{_asset_stamp()}.duckdb"
 
     if not target.exists():
         try:
@@ -226,13 +282,11 @@ def get_connection() -> sqlite3.Connection:
                 "**Showing the previously downloaded data.** The latest "
                 f"version could not be fetched, because {e}."
             )
-            return sqlite3.connect(fallback, check_same_thread=False)
+            return _open(fallback)
 
     _prune(keep=target)
 
-    # check_same_thread=False: Streamlit serves reruns from a worker pool, so
-    # the connection is touched by threads other than the one that opened it.
-    return sqlite3.connect(target, check_same_thread=False)
+    return _open(target)
 
 
 # Same TTL as the connection, deliberately. Without it these results would
@@ -241,7 +295,28 @@ def get_connection() -> sqlite3.Connection:
 # cached from the old one, which is the original bug wearing a different hat.
 @st.cache_data(ttl=BUNDLE_TTL, show_spinner=False)
 def query(sql: str, params: tuple = ()) -> pd.DataFrame:
-    return pd.read_sql(sql, get_connection(), params=params)
+    """
+    Run a query and get a DataFrame back. Same signature as before, same `?`
+    placeholders, so no page needed changing.
+
+    NOT pd.read_sql. It accepts a DuckDB connection and works, but it goes
+    through the DB-API and builds Python objects one row at a time; .df() goes
+    through Arrow. On the pipeline side the same swap took a scan from 264s to
+    20s, and here it is the difference between a page rendering and a page
+    someone waits on.
+
+    .cursor() per call rather than sharing the one connection: Streamlit serves
+    reruns from a worker pool, so this is touched by several threads at once,
+    and a cursor is DuckDB's documented way to give each its own handle on the
+    same open database. It costs nothing - no file is reopened.
+    """
+    cur = get_connection().cursor()
+    try:
+        if params:
+            return cur.execute(sql, list(params)).df()
+        return cur.execute(sql).df()
+    finally:
+        cur.close()
 
 
 @st.cache_data(ttl=BUNDLE_TTL, show_spinner=False)

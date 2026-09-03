@@ -35,7 +35,7 @@ from pathlib import Path
 import duckdb
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from config import DB_PATH, BRONZE_DB_PATH  # noqa: E402
+from config import DB_PATH, BRONZE_DB_PATH, compact_database  # noqa: E402
 
 # Each entry: bronze source table -> list of statements, executed in order.
 # Keys are the bare names; silver tables are silver_<key>.
@@ -746,6 +746,17 @@ def main() -> int:
         print("Silver tables left in their previous state (transaction rolled back).")
         print("=" * 74)
         return 1
+
+    # Only after a clean build, and only once the connection is closed. Each
+    # table here is dropped and rewritten, and DuckDB appends rather than
+    # reusing the blocks the old version held, so silver grows on every rebuild
+    # even when nothing about the data changed: measured 259.3 MB against
+    # 219.3 MB of actual content. VACUUM does not reclaim it.
+    #
+    # Skipped after a failure on purpose. A rolled-back build has left the file
+    # in its previous state and the useful next step is to look at it, not to
+    # rewrite its storage underneath whoever is looking.
+    compact_database(DB_PATH, DB_PATH.name)
 
     print(f"Rebuilt {len(targets)} table(s) successfully.")
     print("Next: python pipeline\\s03_verify.py")

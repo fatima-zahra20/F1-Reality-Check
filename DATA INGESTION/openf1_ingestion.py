@@ -1,8 +1,33 @@
 #!/usr/bin/env python3
 """
-OpenF1 API -> f1.db ingestion script.
-Fetches all 18 endpoints and stores them in a SQLite database.
-Resumable: already-fetched (session, endpoint) pairs are skipped on re-run.
+OpenF1 API -> f1.db ingestion script. SUPERSEDED, AND IT NO LONGER RUNS.
+
+This is the original ingestion script, the first thing the project had. It was
+replaced by pipeline/s01_ingest.py, which does the same job against bronze with
+resumable per-endpoint bookkeeping, and it has not been the way data enters this
+project for a long time.
+
+Why it is stopped rather than merely left alone
+-----------------------------------------------
+It still looked perfectly runnable, and running it would have done real damage
+of a quiet kind:
+
+  - it writes SQLite, to DATA INGESTION/f1.db. Since the DuckDB migration that
+    file is a frozen snapshot nothing reads any more. This script would have
+    appended fresh 2026 data to a dead end, and reported success doing it.
+  - it fetches all 18 endpoints for every session from scratch, including
+    car_data and location. That is tens of millions of rows and hours of
+    requests against somebody else's free API, to produce a file that is then
+    ignored.
+  - its _ingestion_progress table is not the one s01_ingest keeps, so the two
+    cannot see each other's work.
+
+None of that raises. It just runs, for hours, and achieves nothing.
+
+Kept rather than deleted because it is where the project started and the
+endpoint lists below are still the clearest statement of what OpenF1 offers.
+git history would hold it either way; this way it is readable in place. Delete
+it whenever it stops being interesting.
 """
 
 import sqlite3
@@ -11,6 +36,10 @@ import time
 import logging
 import sys
 from pathlib import Path
+
+# Printed by the guard in main(). Kept as a constant so the message and the
+# replacement cannot drift apart.
+REPLACEMENT = "pipeline/s01_ingest.py"
 
 BASE_URL = "https://api.openf1.org/v1"
 DB_PATH = Path(__file__).parent / "f1.db"
@@ -187,7 +216,28 @@ def ingest_per_session(conn, endpoint, session_key, label=""):
 # ---------------------------------------------------------------------------
 
 def main():
-    log.info("Database: %s", DB_PATH)
+    # THE STOP. See the module docstring for why this is here rather than a
+    # comment nobody reads. Everything below it still works and is left intact;
+    # it simply must not be reached by accident.
+    print(
+        "\n"
+        "  openf1_ingestion.py is superseded and will not run.\n"
+        "\n"
+        f"  Use {REPLACEMENT} instead. It ingests into bronze_f1.duckdb,\n"
+        "  keeps its own resumable per-endpoint progress, and is what\n"
+        "  run_pipeline.py calls.\n"
+        "\n"
+        "      python pipeline\\s01_ingest.py --execute\n"
+        "\n"
+        "  This script writes SQLite, to DATA INGESTION/f1.db, which the\n"
+        "  DuckDB migration turned into a frozen snapshot nothing reads. It\n"
+        "  would spend hours re-fetching every endpoint including car_data\n"
+        "  and location, write them somewhere no other step looks, and report\n"
+        "  success. Stopping here is cheaper than explaining that afterwards.\n"
+    )
+    return 1
+
+    log.info("Database: %s", DB_PATH)          # noqa: F841  (unreachable, kept)
     conn = init_db(DB_PATH)
 
     # 1. Global endpoints
@@ -250,4 +300,6 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    # Exit non-zero, so a scheduler or a shell chain treats this as the refusal
+    # it is rather than as a successful no-op.
+    sys.exit(main())

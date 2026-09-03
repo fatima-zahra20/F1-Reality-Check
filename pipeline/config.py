@@ -119,3 +119,171 @@ INCLUDE_TELEMETRY_IN_WEEKLY = False
 # creates it on demand with parents=True.
 for _d in (MODELS_DIR, LOGS_DIR):
     _d.mkdir(exist_ok=True)
+
+
+# --- database access -------------------------------------------------------------
+# Lives here rather than in a module of its own because every pipeline step
+# already imports config, and one shared definition beats the same five lines
+# copied into seven files where they can drift apart.
+
+# The pandas nullable dtypes. An integer column containing NULLs comes back from
+# DuckDB as one of these; under sqlite3 it came back as plain float64 with NaN.
+# See _match_sqlite_dtypes for why that difference has to be undone here.
+_MASKED_DTYPES = (
+    _pd.BooleanDtype,
+    _pd.Int8Dtype, _pd.Int16Dtype, _pd.Int32Dtype, _pd.Int64Dtype,
+    _pd.UInt8Dtype, _pd.UInt16Dtype, _pd.UInt32Dtype, _pd.UInt64Dtype,
+    _pd.Float32Dtype, _pd.Float64Dtype,
+)
+
+
+def _match_sqlite_dtypes(df: "_pd.DataFrame") -> "_pd.DataFrame":
+    """
+    Converts a DuckDB result to the dtypes this codebase was written against,
+    which are the ones sqlite3 produced. Two separate conversions, each with its
+    own failure behind it.
+
+    ONE: NULLABLE COLUMNS BACK TO NUMPY.
+
+    sqlite3 has no column types to report, so pandas inferred every integer
+    column that contained a NULL as float64 and wrote the nulls as NaN. DuckDB
+    reports a real type, so the same column arrives as the masked dtype Int32
+    with the nulls written as pd.NA. The values are identical - verified on
+    silver_lap_flags, 57 nulls either way - but the two null objects do not
+    behave alike:
+
+        nan == 1  -> False          pd.NA == 1  -> pd.NA
+        if nan == 1:  runs          if pd.NA == 1:  TypeError
+
+    s05's T19 raised exactly that, "boolean value of NA is ambiguous", from an
+    `if r["red_flag"] == 1` that had been correct for the life of the project.
+    Nothing was wrong with the analysis; the null had changed shape underneath
+    it. 51 columns across silver and gold arrive masked.
+
+    TWO: INTEGERS WIDENED TO int64.
+
+    sqlite3 returned int64 for every integer. DuckDB returns the declared width,
+    so session_key arrives as int32. That looks harmless, and merge() tolerates
+    it, but pd.merge_asof does NOT: it requires its `by` keys to match exactly
+    and raises "incompatible merge keys dtype('int64') and dtype('int32')". s05c
+    failed on precisely that, joining bronze position samples (int64, via
+    astype(int)) to silver laps (int32, via this function). s04, s05, s05b and
+    s05d all use merge_asof too.
+
+    Widening here rather than at the eight call sites also restores the bundle's
+    own column types: the pre-migration bundle was BIGINT throughout, and
+    passing int32 through had quietly narrowed 26 of its columns.
+
+    Only the masked and numeric numpy dtypes are touched. Anything else pandas
+    calls an extension dtype is left alone, so a timezone-aware timestamp column
+    is never mangled by this.
+
+    Normalising once at the boundary is the smaller and more honest change than
+    auditing every scalar comparison, .astype(int), truth test and merge_asof in
+    the codebase, and then again in the dashboard, which reads the same frames.
+    The engine swap is supposed to be invisible above this line.
+    """
+    for col in df.columns:
+        dtype = df[col].dtype
+
+        if isinstance(dtype, _MASKED_DTYPES):
+            # A masked column exists precisely because it can hold nulls.
+            # float64 is the only numpy dtype that can hold them, and it is what
+            # sqlite3 produced. With none actually present, fall through to the
+            # widening below by taking the plain numpy dtype first.
+            if df[col].isna().any():
+                df[col] = df[col].astype("float64")
+                continue
+            df[col] = df[col].to_numpy(dtype=dtype.numpy_dtype)
+            dtype = df[col].dtype
+
+        if isinstance(dtype, _pd.api.extensions.ExtensionDtype):
+            continue        # datetimes with a timezone, categoricals: not ours
+        if dtype.kind in "iu" and dtype.itemsize < 8:
+            df[col] = df[col].astype("int64")
+        elif dtype.kind == "f" and dtype.itemsize < 8:
+            df[col] = df[col].astype("float64")
+    return df
+
+
+def read_sql(sql: str, con, params=None) -> "_pd.DataFrame":
+    """
+    Run a query and get a DataFrame back.
+
+    Not pd.read_sql. That accepts a DuckDB connection and works, but it goes
+    through the DB-API and builds Python objects a row at a time, which throws
+    away most of the reason for using DuckDB: the s05c position scan measured
+    264.4s that way against 19.5s through this one.
+
+    Argument order matches pd.read_sql so the call sites it replaces read the
+    same as they did — including the dtypes they get back, which is what
+    _match_sqlite_dtypes is for.
+    """
+    if params is not None:
+        df = con.execute(sql, params).df()
+    else:
+        df = con.execute(sql).df()
+    return _match_sqlite_dtypes(df)
+
+
+def compact_database(path, label: str = "") -> tuple[int, int]:
+    """
+    Rewrite a DuckDB file into fresh storage, reclaiming what a rebuild left.
+
+    THIS EXISTS BECAUSE VACUUM DOES NOT DO IT. DuckDB accepts VACUUM and returns
+    success without reclaiming a byte, which is the worst way for a thing to not
+    work: it looks exactly like it is working.
+
+    Every build step here rewrites its tables whole, and DuckDB appends the new
+    version rather than reusing the blocks the old one held. So the layers grow
+    on every run even when the data is identical. Measured 2026-08-31, on files
+    holding exactly the data they hold now:
+
+        silver_f1.duckdb    259.3 MB -> 219.3 MB
+        gold_f1.duckdb      107.0 MB ->  64.0 MB
+        bronze_f1.duckdb    651.3 MB -> 550.5 MB
+
+    That is 184 MB of nothing, and it accumulates weekly. COPY FROM DATABASE is
+    the operation that actually rebuilds the storage.
+
+    The copy is written beside the original and swapped in only once it is
+    complete, so an interrupted compaction leaves the file it started from
+    rather than half of one. Verified across all three layers: every table
+    carried over with no row count differing.
+
+    Returns (bytes before, bytes after). The caller must hold NO open connection
+    to the file: DuckDB takes an exclusive lock to write, and this opens it for
+    writing.
+    """
+    import duckdb as _duckdb
+
+    path = Path(path)
+    if not path.exists():
+        return 0, 0
+
+    before = path.stat().st_size
+    fresh = path.with_suffix(".compact")
+    fresh.unlink(missing_ok=True)
+
+    con = _duckdb.connect(str(path))
+    try:
+        source = con.execute(
+            "SELECT database_name FROM duckdb_databases() WHERE NOT internal"
+        ).fetchone()[0]
+        con.execute(f"ATTACH '{fresh.as_posix()}' AS _compacted")
+        con.execute(f'COPY FROM DATABASE "{source}" TO _compacted')
+        con.execute("DETACH _compacted")
+    except _duckdb.Error:
+        # Never fail a build over housekeeping. A large file is a nuisance; a
+        # pipeline that stops because it could not tidy up is worse.
+        fresh.unlink(missing_ok=True)
+        con.close()
+        return before, before
+    con.close()
+
+    after = fresh.stat().st_size
+    fresh.replace(path)
+    if label and before > after:
+        print(f"  compacted {label}: {before / 1024**2:,.1f} MB -> "
+              f"{after / 1024**2:,.1f} MB")
+    return before, after

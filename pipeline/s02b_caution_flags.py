@@ -45,14 +45,14 @@ Usage
 from __future__ import annotations
 
 import argparse
-import sqlite3
 import sys
 from pathlib import Path
 
+import duckdb
 import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from config import DB_PATH  # noqa: E402
+from config import DB_PATH, read_sql  # noqa: E402
 
 # A GREEN track flag within this window after an "ending" message is treated as
 # the real restart. "SAFETY CAR IN THIS LAP" is announced during the lap BEFORE
@@ -111,7 +111,7 @@ def is_red_flag(row) -> bool:
     return str(row["message"] or "").strip().upper().startswith("RED FLAG")
 
 
-def safety_car_starts(con: sqlite3.Connection) -> list[dict]:
+def safety_car_starts(con: duckdb.DuckDBPyConnection) -> list[dict]:
     """
     Races that begin behind the safety car, which leave no deployment message.
 
@@ -147,7 +147,7 @@ def safety_car_starts(con: sqlite3.Connection) -> list[dict]:
     periods, and check [21] in s03_verify reports the residual rather than
     letting it hide.
     """
-    rc = pd.read_sql("""
+    rc = read_sql("""
         SELECT session_key, "date", UPPER(TRIM(message)) AS msg
         FROM silver_race_control
     """, con)
@@ -163,7 +163,7 @@ def safety_car_starts(con: sqlite3.Connection) -> list[dict]:
     if announced.empty:
         return []
 
-    starts = pd.read_sql("""
+    starts = read_sql("""
         SELECT session_key, MIN(date_start) AS session_start
         FROM silver_laps WHERE lap_number = 1 AND date_start IS NOT NULL
         GROUP BY session_key
@@ -200,7 +200,7 @@ def safety_car_starts(con: sqlite3.Connection) -> list[dict]:
     return periods
 
 
-def start_procedures(con: sqlite3.Connection) -> dict:
+def start_procedures(con: duckdb.DuckDBPyConnection) -> dict:
     """
     Per session, the timestamps of every restart-procedure message.
 
@@ -208,7 +208,7 @@ def start_procedures(con: sqlite3.Connection) -> dict:
     when the field is released from the grid or from behind the safety car.
     Race control logs that as 'STANDING START' or 'ROLLING START'.
     """
-    df = pd.read_sql("""
+    df = read_sql("""
         SELECT session_key, "date"
         FROM silver_race_control
         WHERE UPPER(message) LIKE '%ROLLING START%'
@@ -221,7 +221,7 @@ def start_procedures(con: sqlite3.Connection) -> dict:
             for k, g in df.groupby("session_key", sort=False)}
 
 
-def resumption_signals(con: sqlite3.Connection) -> dict:
+def resumption_signals(con: duckdb.DuckDBPyConnection) -> dict:
     """
     Per session, every timestamp that is evidence racing RESUMED: a green track
     flag, or a safety car / VSC closing message.
@@ -235,7 +235,7 @@ def resumption_signals(con: sqlite3.Connection) -> dict:
     text alone, because 'ENDING' as a bare substring also hits stewards' notes
     and would invent a resumption signal that suppresses the fix.
     """
-    df = pd.read_sql("""
+    df = read_sql("""
         SELECT session_key, "date"
         FROM silver_race_control
         WHERE (category = 'Flag' AND flag = 'GREEN' AND scope = 'Track')
@@ -252,7 +252,7 @@ def resumption_signals(con: sqlite3.Connection) -> dict:
             for k, g in df.groupby("session_key", sort=False)}
 
 
-def chequered_flags(con: sqlite3.Connection) -> dict:
+def chequered_flags(con: duckdb.DuckDBPyConnection) -> dict:
     """
     Per session, the first chequered flag: when the session actually finished.
 
@@ -264,7 +264,7 @@ def chequered_flags(con: sqlite3.Connection) -> dict:
     minutes. No lap is misflagged, since no lap exists after the finish, but
     duration_seconds is a published column and a 38-minute VSC is wrong.
     """
-    df = pd.read_sql("""
+    df = read_sql("""
         SELECT session_key, MIN("date") AS cheq
         FROM silver_race_control
         WHERE UPPER(message) LIKE '%CHEQUERED%'
@@ -278,7 +278,7 @@ def chequered_flags(con: sqlite3.Connection) -> dict:
     return dict(zip(df.session_key, df.cheq))
 
 
-def effective_session_end(con: sqlite3.Connection) -> dict:
+def effective_session_end(con: duckdb.DuckDBPyConnection) -> dict:
     """
     When did each session actually stop, as opposed to when it was scheduled to?
 
@@ -302,7 +302,7 @@ def effective_session_end(con: sqlite3.Connection) -> dict:
     the last race control message, the last lap started, or the scheduled end,
     whichever is furthest along.
     """
-    df = pd.read_sql("""
+    df = read_sql("""
         SELECT s.session_key,
                s.date_end AS scheduled_end,
                (SELECT MAX(rc."date") FROM silver_race_control rc
@@ -326,7 +326,7 @@ def effective_session_end(con: sqlite3.Connection) -> dict:
     return dict(zip(df.session_key, df.effective_end))
 
 
-def restart_finder(con: sqlite3.Connection):
+def restart_finder(con: duckdb.DuckDBPyConnection):
     """
     Returns f(session_key, after_ts) -> when racing demonstrably resumed.
 
@@ -369,7 +369,7 @@ def restart_finder(con: sqlite3.Connection):
     Precision is roughly one lap, which is the resolution the flag needs, since
     the result is only used to decide which laps overlap the period.
     """
-    laps = pd.read_sql("""
+    laps = read_sql("""
         SELECT session_key, driver_number, date_start, lap_duration
         FROM silver_laps
         WHERE date_start IS NOT NULL AND lap_duration IS NOT NULL
@@ -411,7 +411,7 @@ def restart_finder(con: sqlite3.Connection):
     return find
 
 
-def build_periods(con: sqlite3.Connection) -> pd.DataFrame:
+def build_periods(con: duckdb.DuckDBPyConnection) -> pd.DataFrame:
     """Pairs deployment messages with their closing messages, per session."""
     ends = effective_session_end(con)
     find_restart = restart_finder(con)
@@ -528,7 +528,7 @@ def build_periods(con: sqlite3.Connection) -> pd.DataFrame:
             return after_end[0], "start_procedure"
         return end, closed_by
 
-    rc = pd.read_sql("""
+    rc = read_sql("""
         SELECT rc.session_key, rc."date", rc.category, rc.flag, rc.scope, rc.message
         FROM silver_race_control rc
         WHERE rc.category = 'SafetyCar'
@@ -669,9 +669,9 @@ def build_periods(con: sqlite3.Connection) -> pd.DataFrame:
     return df
 
 
-def build_lap_flags(con: sqlite3.Connection, periods: pd.DataFrame) -> pd.DataFrame:
+def build_lap_flags(con: duckdb.DuckDBPyConnection, periods: pd.DataFrame) -> pd.DataFrame:
     """Flags each lap whose time window overlaps a caution period."""
-    laps = pd.read_sql("""
+    laps = read_sql("""
         SELECT session_key, driver_number, lap_number, date_start, lap_duration
         FROM silver_laps
         ORDER BY session_key, driver_number, lap_number
@@ -740,7 +740,7 @@ def build_lap_flags(con: sqlite3.Connection, periods: pd.DataFrame) -> pd.DataFr
     # an out lap. Scoped to periods that demonstrably resumed, so a race that
     # ended under red flag is untouched.
     if not periods.empty:
-        race_keys = set(pd.read_sql("""
+        race_keys = set(read_sql("""
             SELECT session_key FROM silver_sessions WHERE session_name = 'Race'
         """, con)["session_key"])
 
@@ -758,7 +758,7 @@ def build_lap_flags(con: sqlite3.Connection, periods: pd.DataFrame) -> pd.DataFr
             laps.loc[first.values, "red_flag"] = 1
 
     # --- sector yellows, kept separate ---------------------------------------
-    yellows = pd.read_sql("""
+    yellows = read_sql("""
         SELECT session_key, "date"
         FROM silver_race_control
         WHERE category = 'Flag' AND flag IN ('YELLOW', 'DOUBLE YELLOW')
@@ -789,7 +789,7 @@ def build_lap_flags(con: sqlite3.Connection, periods: pd.DataFrame) -> pd.DataFr
     ]]
 
 
-def write_tables(con: sqlite3.Connection, periods: pd.DataFrame, flags: pd.DataFrame) -> None:
+def write_tables(con: duckdb.DuckDBPyConnection, periods: pd.DataFrame, flags: pd.DataFrame) -> None:
     con.execute("DROP TABLE IF EXISTS silver_caution_periods")
     con.execute("""
         CREATE TABLE silver_caution_periods (
@@ -798,7 +798,7 @@ def write_tables(con: sqlite3.Connection, periods: pd.DataFrame, flags: pd.DataF
             kind             TEXT    NOT NULL CHECK (kind IN ('SC', 'VSC', 'RED')),
             date_start       TEXT    NOT NULL,
             date_end         TEXT    NOT NULL,
-            duration_seconds REAL,
+            duration_seconds DOUBLE,
             start_message    TEXT,
             closed_by        TEXT
         )
@@ -806,10 +806,25 @@ def write_tables(con: sqlite3.Connection, periods: pd.DataFrame, flags: pd.DataF
     out = periods.copy()
     out["date_start"] = out["date_start"].dt.strftime("%Y-%m-%dT%H:%M:%S%z")
     out["date_end"] = out["date_end"].dt.strftime("%Y-%m-%dT%H:%M:%S%z")
-    out[[
+    out = out[[
         "period_id", "session_key", "kind", "date_start", "date_end",
         "duration_seconds", "start_message", "closed_by",
-    ]].to_sql("silver_caution_periods", con, if_exists="append", index=False)
+    ]]
+    # to_sql does not work against a DuckDB connection. Registering the frame
+    # and naming every column keeps the insert independent of the order the
+    # DataFrame happens to be in.
+    con.register("_periods", out)
+    try:
+        con.execute("""
+            INSERT INTO silver_caution_periods
+                (period_id, session_key, kind, date_start, date_end,
+                 duration_seconds, start_message, closed_by)
+            SELECT period_id, session_key, kind, date_start, date_end,
+                   duration_seconds, start_message, closed_by
+            FROM _periods
+        """)
+    finally:
+        con.unregister("_periods")
 
     con.execute("DROP TABLE IF EXISTS silver_lap_flags")
     con.execute("""
@@ -825,14 +840,24 @@ def write_tables(con: sqlite3.Connection, periods: pd.DataFrame, flags: pd.DataF
             PRIMARY KEY (session_key, driver_number, lap_number)
         )
     """)
-    flags.to_sql("silver_lap_flags", con, if_exists="append", index=False)
+    con.register("_flags", flags)
+    try:
+        con.execute("""
+            INSERT INTO silver_lap_flags
+                (session_key, driver_number, lap_number, sc_flag, vsc_flag,
+                 red_flag, yellow_sector_flag, neutralised)
+            SELECT session_key, driver_number, lap_number, sc_flag, vsc_flag,
+                   red_flag, yellow_sector_flag, neutralised
+            FROM _flags
+        """)
+    finally:
+        con.unregister("_flags")
     con.execute("""
         CREATE INDEX idx_lap_flags_session ON silver_lap_flags (session_key)
     """)
-    con.commit()
 
 
-def validate(con: sqlite3.Connection) -> None:
+def validate(con: duckdb.DuckDBPyConnection) -> None:
     """Evidence that the flags separate genuinely different pace regimes."""
     print("\n" + "=" * 74)
     print("VALIDATION")
@@ -862,10 +887,10 @@ def validate(con: sqlite3.Connection) -> None:
         GROUP BY regime
         ORDER BY mean_seconds
     """
-    print(pd.read_sql(q, con).to_string(index=False))
+    print(read_sql(q, con).to_string(index=False))
 
     print("\nCaution periods by kind:")
-    print(pd.read_sql("""
+    print(read_sql("""
         SELECT kind, COUNT(*) AS periods,
                ROUND(AVG(duration_seconds), 1) AS mean_seconds,
                ROUND(MAX(duration_seconds), 1) AS max_seconds
@@ -873,13 +898,13 @@ def validate(con: sqlite3.Connection) -> None:
     """, con).to_string(index=False))
 
     print("\nHow periods were closed:")
-    print(pd.read_sql("""
+    print(read_sql("""
         SELECT closed_by, COUNT(*) AS n
         FROM silver_caution_periods GROUP BY closed_by ORDER BY n DESC
     """, con).to_string(index=False))
 
     print("\nSuspiciously long periods (>1800s — likely an unlogged closing message):")
-    long = pd.read_sql("""
+    long = read_sql("""
         SELECT p.session_key, m.meeting_name, s.session_name, p.kind,
                ROUND(p.duration_seconds) AS seconds, p.closed_by
         FROM silver_caution_periods p
@@ -900,7 +925,7 @@ def main() -> int:
         print(f"[FAIL] database not found at {DB_PATH}")
         return 1
 
-    con = sqlite3.connect(str(DB_PATH))
+    con = duckdb.connect(str(DB_PATH))
 
     print("=" * 74)
     print("CAUTION PERIODS AND LAP FLAGS")

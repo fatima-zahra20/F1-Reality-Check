@@ -63,12 +63,13 @@ from __future__ import annotations
 import argparse
 import json
 import re
-import sqlite3
 import subprocess
 import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+
+import duckdb
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from config import BRONZE_DB_PATH, DB_PATH, LOGS_DIR  # noqa: E402
@@ -151,29 +152,38 @@ def stale_tables() -> list[str]:
     if not (DB_PATH.exists() and BRONZE_DB_PATH.exists()):
         return []
 
-    con = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
+    con = duckdb.connect(str(DB_PATH), read_only=True)
     try:
         exists = con.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' "
-            "AND name='_silver_build_state'").fetchone()
+            "SELECT 1 FROM information_schema.tables "
+            "WHERE table_schema = 'main' "
+            "  AND table_name = '_silver_build_state'").fetchone()
         if not exists:
             # Never recorded, so nothing can be compared. The gate says so too.
             return []
 
-        con.execute("ATTACH DATABASE ? AS bronze",
-                    (f"file:{BRONZE_DB_PATH.as_posix()}?mode=ro",))
+        # ATTACH, not ATTACH DATABASE, and the path inlined rather than bound:
+        # DuckDB's ATTACH takes a literal, not a parameter. READ_ONLY is stated
+        # on the attachment for the same reason mode=ro was in the old URI.
+        con.execute(
+            f"ATTACH '{BRONZE_DB_PATH.as_posix()}' AS bronze (READ_ONLY)")
         behind = []
+        # .fetchall() is mandatory. DuckDB's execute returns the connection
+        # rather than an iterable cursor, so iterating it directly would loop
+        # over the connection instead of the rows, and the inner query below
+        # would invalidate the outer one mid-loop even if it did not.
         for name, at_build in con.execute(
-                "SELECT table_name, bronze_rows FROM _silver_build_state"):
+                "SELECT table_name, bronze_rows FROM _silver_build_state"
+        ).fetchall():
             try:
                 now = con.execute(
                     f'SELECT COUNT(*) FROM bronze."{name}"').fetchone()[0]
-            except sqlite3.Error:
+            except duckdb.Error:
                 continue
             if now > at_build:
                 behind.append(name)
         return sorted(behind)
-    except sqlite3.Error:
+    except duckdb.Error:
         # A rebuild decision is not worth crashing the run over. The gate checks
         # the same thing and will fail loudly if this returned the wrong answer.
         return []
@@ -283,7 +293,7 @@ def main() -> int:
         # removes the whole class of problem.
         #
         # It also runs before s04, which now writes its seven tables straight
-        # into dashboard.db rather than to CSV.
+        # into the dashboard bundle rather than to CSV.
         # s05b, s05c and s05d were missing from this list, and that was a real
         # defect rather than a deliberate omission. They produce ten of the
         # twenty-one bundled tables: the lap-factor and counterfactual models,
@@ -327,7 +337,7 @@ def main() -> int:
     # Opt-in. Requires the serving layers to have been built this run, since
     # publishing means replacing the live dashboard's data — doing that from a
     # stale bundle would push whatever happened to be lying around in
-    # dashboard/data/dashboard.db.
+    # dashboard/data/dashboard.duckdb.
     publish_status = "not requested"
 
     if args.publish:

@@ -235,6 +235,15 @@ cython_debug/
 *.duckdb
 *.duckdb.wal
 
+# DuckDB working files. The .wal above is the write-ahead log; .tmp is the
+# spill directory it uses when a query outgrows memory, and .compact is the
+# copy s06_publish writes while rebuilding the bundle into fresh storage.
+# All three are normally gone by the time a run ends, and all three are left
+# behind by one that is interrupted, which is exactly when somebody is most
+# likely to stage everything without looking.
+*.duckdb.tmp/
+*.compact
+
 # Local tool config
 .claude/
 

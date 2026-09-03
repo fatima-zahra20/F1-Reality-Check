@@ -3,7 +3,7 @@ s05d_telemetry.py - DRS and the tow, on the races that actually carry telemetry.
 
 Runs after s05c and before s06.
 
-Writes two tables into dashboard/data/dashboard.db (pipeline/serving.py owns
+Writes two tables into dashboard/data/dashboard.duckdb (pipeline/serving.py owns
 that path). Add --csv to also get a copy you can open and read by eye:
 
     telemetry_tow      top speed and DRS usage by gap to the car ahead
@@ -55,20 +55,20 @@ Requires the pinned Anaconda environment. See NOTES_LOG #42.
 from __future__ import annotations
 
 import argparse
-import sqlite3
 import sys
 import time
 import warnings
 from datetime import datetime, timezone
 from pathlib import Path
 
+import duckdb
 import numpy as np
 import pandas as pd
 import statsmodels.formula.api as smf
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from config import (BRONZE_DB_PATH, DB_PATH,  # noqa: E402
-                    LAP_OUTLIER_FACTOR)
+                    LAP_OUTLIER_FACTOR, read_sql)
 import serving  # noqa: E402
 
 
@@ -115,11 +115,11 @@ def _round(v, nd=4):
 
 def telemetry_races(silver, bronze) -> list[int]:
     """Race sessions that have car_data. Read every run, never hardcoded."""
-    races = pd.read_sql("""
+    races = read_sql("""
         SELECT session_key FROM silver_sessions
         WHERE session_name = 'Race' AND is_cancelled = 0
     """, silver).session_key.astype(int)
-    have = pd.read_sql("SELECT DISTINCT session_key FROM car_data", bronze)
+    have = read_sql("SELECT DISTINCT session_key FROM car_data", bronze)
     have = set(pd.to_numeric(have.session_key, errors="coerce")
                  .dropna().astype(int))
     return sorted(set(races) & have)
@@ -134,7 +134,7 @@ def load_laps(silver, keys: list[int]) -> pd.DataFrame:
     only reason for the duplication.
     """
     inlist = ",".join(str(k) for k in keys)
-    laps = pd.read_sql(f"""
+    laps = read_sql(f"""
         SELECT l.session_key, l.driver_number, l.lap_number, l.date_start,
                l.lap_duration, d.team_name, d.full_name, d.name_acronym,
                s.circuit_short_name, s.year,
@@ -186,7 +186,7 @@ def load_laps(silver, keys: list[int]) -> pd.DataFrame:
 def attach_traffic(silver, laps: pd.DataFrame, keys: list[int]) -> pd.DataFrame:
     """Gap to the car ahead, flagged the same way s05b flags it."""
     inlist = ",".join(str(k) for k in keys)
-    iv = pd.read_sql(f"""
+    iv = read_sql(f"""
         SELECT session_key, driver_number, "date", interval_seconds,
                interval_laps
         FROM silver_intervals
@@ -217,7 +217,7 @@ def fetch_car_data(bronze, keys: list[int]) -> pd.DataFrame:
     WHERE costs a full scan either way. One query is cheaper than six.
     """
     inlist = ",".join(str(k) for k in keys)
-    car = pd.read_sql(f"""
+    car = read_sql(f"""
         SELECT session_key, driver_number, "date", drs, speed, rpm
         FROM car_data
         WHERE CAST(session_key AS INTEGER) IN ({inlist})
@@ -408,8 +408,8 @@ def main() -> int:
     print(f"python: {sys.version.split()[0]}  pandas {pd.__version__}")
     print("=" * 74)
 
-    silver = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
-    bronze = sqlite3.connect(f"file:{BRONZE_DB_PATH}?mode=ro", uri=True)
+    silver = duckdb.connect(str(DB_PATH), read_only=True)
+    bronze = duckdb.connect(str(BRONZE_DB_PATH), read_only=True)
 
     keys = telemetry_races(silver, bronze)
     if not keys:

@@ -1,12 +1,25 @@
 # F1 Reality Check: Data Dictionary
 
-Reference document for the **silver layer** of `f1.db`, described in the order I'll typically join them in.
+Reference document for the **silver layer** of `silver_f1.duckdb`, described in the order I'll typically join them in.
 
-Silver is the cleaned, typed, PK-enforced view of the raw OpenF1 data. Bronze (the unprefixed source tables in `bronze_f1.db`) is preserved but not queried directly for analysis. For each table below: prose intro, note on what changed from bronze, column table, and any quirks worth knowing before i write queries against it.
+Silver is the cleaned, typed, PK-enforced view of the raw OpenF1 data. Bronze (the unprefixed source tables in `bronze_f1.duckdb`) is preserved but not queried directly for analysis. For each table below: prose intro, note on what changed from bronze, column table, and any quirks worth knowing before i write queries against it.
+
+> ## The engine changed in August 2026: this is DuckDB, not SQLite
+>
+> Every layer moved from SQLite to DuckDB. The files are now `bronze_f1.duckdb`, `silver_f1.duckdb`, `gold_f1.duckdb` and `dashboard/data/dashboard.duckdb`; the old `.db` files are frozen snapshots that nothing reads.
+>
+> The data did not change. Silver was verified table-for-table as **18 of 18 identical**, gold as 16 of 18 plus two known and documented differences. What changed is what the engine will accept, and four differences are worth knowing before writing a query against these tables:
+>
+> - **`REAL` is not the type it was.** SQLite's `REAL` is 8 bytes; DuckDB's is 4. Every float column here is declared `DOUBLE`, which is the 8-byte type. Writing `REAL` in new DDL would silently halve the precision.
+> - **Foreign keys are enforced.** SQLite ignored them unless `PRAGMA foreign_keys=ON`. DuckDB does not, which is why the one FK silver used to declare has been removed rather than left to block a rebuild.
+> - **There is no `AUTOINCREMENT`.** Three tables used to carry a synthetic `id`; all three have lost it. See `silver_position`, `silver_race_control` and `silver_team_radio` below.
+> - **A bare column beside `GROUP BY` is an error**, where SQLite picked an arbitrary row, and **`GROUP_CONCAT` has no defined order** unless given one.
+>
+> Also gone: `julianday()`, `datetime('now', ...)`, `PRAGMA table_info`, `sqlite_master` and `rowid`. Use `information_schema` and `CAST(substr(date_start, 1, 19) AS TIMESTAMP)` instead.
 
 > ## Read this first: analysis should query gold, not silver
 >
-> Since 2026-08-11 there is a **gold layer** at `DATA INGESTION/gold_f1.db`, built by `pipeline/s07_build_gold.py`. 18 tables, 741k rows, 158 MB. It is the layer every analytical, diagnostic and predictive question should read.
+> Since 2026-08-11 there is a **gold layer** at `DATA INGESTION/gold_f1.duckdb`, built by `pipeline/s07_build_gold.py`. 18 tables, 750k rows. It is the layer every analytical, diagnostic and predictive question should read.
 >
 > Silver remains the source of truth about *what the API said*. Gold is the source of truth about *what the data means*: the decisions that are properties of the data rather than of whoever is querying, made once and carried as columns.
 >
@@ -184,7 +197,7 @@ country_code availability: populated for 2023–2024 (with 14 systemic nulls in 
  
 **One row per driver per lap per session.** 217,692 rows — the largest analytical table. Contains sector times, speeds at the intermediates and speed trap, and pit-out flag. This is where the most granular pace analysis lives.
  
-**What changed from bronze:** keys cast to INTEGER; all durations and speeds cast to REAL; `is_pit_out_lap` normalized to 0/1/NULL; segment arrays kept as JSON strings.
+**What changed from bronze:** keys cast to INTEGER; all durations and speeds cast to DOUBLE; `is_pit_out_lap` normalized to 0/1/NULL; segment arrays kept as JSON strings.
  
 | Column | Type | Nullable | Notes |
 |---|---|---|---|
@@ -193,13 +206,13 @@ country_code availability: populated for 2023–2024 (with 14 systemic nulls in 
 | `lap_number` | INTEGER PK | No | Starts at 1 |
 | `meeting_key` | INTEGER | No | Denormalized |
 | `date_start` | TEXT | Yes | ISO 8601 UTC when the lap started; 448 nulls (session-start artifacts) |
-| `duration_sector_1` | REAL | Yes | Seconds. 19,751 nulls (out-laps, invalidated laps) |
-| `duration_sector_2` | REAL | Yes | Seconds. 2,088 nulls |
-| `duration_sector_3` | REAL | Yes | Seconds. 5,789 nulls (red-flagged laps) |
-| `i1_speed` | REAL | Yes | km/h at intermediate 1 speed trap |
-| `i2_speed` | REAL | Yes | km/h at intermediate 2 |
-| `st_speed` | REAL | Yes | km/h at start/finish speed trap. 14,354 nulls |
-| `lap_duration` | REAL | Yes | Seconds. 8,279 nulls (incomplete laps). Range observed: 60.35s to 3510.47s (the max is a red-flag/safety-car lap, real value) |
+| `duration_sector_1` | DOUBLE | Yes | Seconds. 19,751 nulls (out-laps, invalidated laps) |
+| `duration_sector_2` | DOUBLE | Yes | Seconds. 2,088 nulls |
+| `duration_sector_3` | DOUBLE | Yes | Seconds. 5,789 nulls (red-flagged laps) |
+| `i1_speed` | DOUBLE | Yes | km/h at intermediate 1 speed trap |
+| `i2_speed` | DOUBLE | Yes | km/h at intermediate 2 |
+| `st_speed` | DOUBLE | Yes | km/h at start/finish speed trap. 14,354 nulls |
+| `lap_duration` | DOUBLE | Yes | Seconds. 8,279 nulls (incomplete laps). Range observed: 60.35s to 3510.47s (the max is a red-flag/safety-car lap, real value) |
 | `is_pit_out_lap` | INTEGER | Yes | 0/1/NULL. 2,269 nulls. Being CHECK-constrained to `(0,1) OR NULL` |
 | `segments_sector_1` | TEXT | Yes | JSON array of mini-sector status codes (colored segments) |
 | `segments_sector_2` | TEXT | Yes | Same |
@@ -267,9 +280,9 @@ country_code availability: populated for 2023–2024 (with 14 systemic nulls in 
 | `lap_number` | INTEGER PK | No | Lap on which the pit occurred |
 | `meeting_key` | INTEGER | No | Denormalized |
 | `date` | TEXT | No | ISO 8601 UTC of the stop |
-| `stop_duration` | REAL | Yes | Stationary time in the pit box (tyre change proper). Only 1,038 of 29,573 rows populated. See the coverage warning below |
-| `lane_duration` | REAL | Yes | **A duplicate of `pit_duration`.** Byte-identical across all 22,898 populated rows, maximum absolute difference 0.0. Not carried into gold. Prefer `pit_duration` |
-| `pit_duration` | REAL | Yes | Total time in the pit lane, entry to exit. 6,675 nulls |
+| `stop_duration` | DOUBLE | Yes | Stationary time in the pit box (tyre change proper). Only 1,038 of 29,573 rows populated. See the coverage warning below |
+| `lane_duration` | DOUBLE | Yes | **A duplicate of `pit_duration`.** Byte-identical across all 22,898 populated rows, maximum absolute difference 0.0. Not carried into gold. Prefer `pit_duration` |
+| `pit_duration` | DOUBLE | Yes | Total time in the pit lane, entry to exit. 6,675 nulls |
 
 **`stop_duration` coverage is far thinner than `STOP_DURATION_MIN_YEAR = 2024` implies.** That constant reads as "usable from 2024". Actual race coverage by year:
 
@@ -294,13 +307,14 @@ The Tukey fence at `DESCRIPTIVE ANALYTICS/pit_stops_05.sql` was re-derived and i
 
 ### `silver_position`
  
-**A time-series of every position change.** 281,801 rows. Each row = a driver was in position X at timestamp Y.
+**A time-series of every position change.** 313,824 rows. Each row = a driver was in position X at timestamp Y.
  
-**What changed from bronze:** switched to a synthetic auto-increment PK because 68 timestamps have same-driver-same-second duplicates (data artifacts). Index on `(session_key, driver_number, "date")` for the natural access pattern.
+**What changed from bronze:** nothing is deduplicated, because 68 timestamps have same-driver-same-second duplicates (data artifacts) and both rows are real records of what the feed said. Index on `(session_key, driver_number, "date")` for the natural access pattern.
+ 
+> **The synthetic `id` column is gone (DuckDB migration, August 2026).** It existed only to give the table a primary key those duplicate timestamps could not, and DuckDB has no `AUTOINCREMENT` to generate it. Nothing selected it, joined on it or ordered by it, so it was dropped rather than reimplemented with a sequence. The table now has no primary key, which is honest: no combination of its columns is unique.
  
 | Column | Type | Nullable | Notes |
 |---|---|---|---|
-| `id` | INTEGER PK AUTOINCREMENT | No | Synthetic, no meaning |
 | `session_key` | INTEGER FK | No | Indexed |
 | `driver_number` | INTEGER | No | Indexed |
 | `meeting_key` | INTEGER | No | Denormalized |
@@ -311,7 +325,7 @@ The Tukey fence at `DESCRIPTIVE ANALYTICS/pit_stops_05.sql` was re-derived and i
  
 **Live gap data during a race**, sampled roughly every 4 seconds. 1,875,432 rows — the second-largest table after telemetry.
  
-**What changed from bronze:** the raw `interval` and `gap_to_leader` columns contained a mix of numeric strings ("1.234") and lap-deficit strings ("+1 LAP", "+2 LAPS"). Silver splits each into two columns: a REAL for seconds and an INTEGER for lap deficit. Exactly one of each pair is non-null per row.
+**What changed from bronze:** the raw `interval` and `gap_to_leader` columns contained a mix of numeric strings ("1.234") and lap-deficit strings ("+1 LAP", "+2 LAPS"). Silver splits each into two columns: a DOUBLE for seconds and an INTEGER for lap deficit. Exactly one of each pair is non-null per row.
  
 | Column | Type | Nullable | Notes |
 |---|---|---|---|
@@ -319,9 +333,9 @@ The Tukey fence at `DESCRIPTIVE ANALYTICS/pit_stops_05.sql` was re-derived and i
 | `driver_number` | INTEGER PK | No | |
 | `date` | TEXT PK | No | ISO 8601 UTC |
 | `meeting_key` | INTEGER | No | Denormalized |
-| `interval_seconds` | REAL | Yes | Gap in seconds to the car directly ahead. NULL if driver is lapped by that car |
+| `interval_seconds` | DOUBLE | Yes | Gap in seconds to the car directly ahead. NULL if driver is lapped by that car |
 | `interval_laps` | INTEGER | Yes | Lap deficit to the car ahead. NULL if not lapped |
-| `gap_to_leader_seconds` | REAL | Yes | Gap in seconds to the race leader. NULL if driver is lapped by leader |
+| `gap_to_leader_seconds` | DOUBLE | Yes | Gap in seconds to the race leader. NULL if driver is lapped by leader |
 | `gap_to_leader_laps` | INTEGER | Yes | Lap deficit to the race leader. NULL if not lapped |
  
 **Being lapped by the car directly ahead is rare** (only 65 rows). Being lapped by the leader is common (170,696 rows, ~9%). If you compute average gaps naively over the whole table, remember that "+1 LAP" cases become NULL and drop out — that could bias the averages if lapped drivers matter.
@@ -357,13 +371,13 @@ The Tukey fence at `DESCRIPTIVE ANALYTICS/pit_stops_05.sql` was re-derived and i
 | `driver_number` | INTEGER PK | No | |
 | `meeting_key` | INTEGER | No | Denormalized |
 | `position` | INTEGER | No | 1 = pole, up to 22 observed |
-| `lap_duration` | REAL | Yes | The qualifying lap time that earned this grid slot, in seconds. 70 nulls (drivers who didn't set a time) |
+| `lap_duration` | DOUBLE | Yes | The qualifying lap time that earned this grid slot, in seconds. 70 nulls (drivers who didn't set a time) |
 
 ### `silver_session_result`
  
 **Final classification of each driver per session.** 7,660 rows. This is the answer to "who finished where."
  
-**What changed from bronze:** DNF/DNS/DSQ normalized to 0/1; gap_to_leader split into seconds/laps like intervals; points cast to REAL.
+**What changed from bronze:** DNF/DNS/DSQ normalized to 0/1; gap_to_leader split into seconds/laps like intervals; points cast to DOUBLE.
  
 | Column | Type | Nullable | Notes |
 |---|---|---|---|
@@ -375,22 +389,23 @@ The Tukey fence at `DESCRIPTIVE ANALYTICS/pit_stops_05.sql` was re-derived and i
 | `dnf` | INTEGER | No | 0/1. 255 DNFs total |
 | `dns` | INTEGER | No | 0/1. 25 DNSs total |
 | `dsq` | INTEGER | No | 0/1. 9 DSQs total |
-| `duration` | REAL | Yes | Ambiguous: fastest lap time in quali/practice, total race time in races |
-| `gap_to_leader_seconds` | REAL | Yes | Seconds behind winner. NULL if lapped |
+| `duration` | DOUBLE | Yes | Ambiguous: fastest lap time in quali/practice, total race time in races |
+| `gap_to_leader_seconds` | DOUBLE | Yes | Seconds behind winner. NULL if lapped |
 | `gap_to_leader_laps` | INTEGER | Yes | Lap deficit. NULL if not lapped |
-| `points` | REAL | Yes | 5,801 nulls (practice/quali have no points). Race max observed: 26 |
+| `points` | DOUBLE | Yes | 5,801 nulls (practice/quali have no points). Race max observed: 26 |
  
 **Points column is the prediction target's raw material.** Aggregate over Race and Sprint sessions by team to get constructor standings.
 
 ### `silver_race_control`
  
-**Every message the race director sends** — flags, safety car deployments, penalty notifications, DRS enabled/disabled, session status changes. 19,807 rows.
+**Every message the race director sends** — flags, safety car deployments, penalty notifications, DRS enabled/disabled, session status changes. 23,069 rows.
  
-**What changed from bronze:** synthetic id PK (natural key wasn't unique — 42 timestamp collisions from simultaneous flag events); CHECK constraints on `category`, `scope`, `qualifying_phase` since those enum sets are stable and small.
+**What changed from bronze:** CHECK constraints on `category`, `scope`, `qualifying_phase` since those enum sets are stable and small. No primary key: the natural key is not unique, with 42 timestamp collisions from simultaneous flag events.
+ 
+> **The synthetic `id` column is gone (DuckDB migration, August 2026)**, and this is the one that had a consumer. `s07_build_gold.py` selected `rc.id` into `gold_race_control`, so both the silver column and the gold one were removed together. Nothing else referenced either. `gold_race_control` is otherwise identical to what it was.
  
 | Column | Type | Nullable | Notes |
 |---|---|---|---|
-| `id` | INTEGER PK AUTOINCREMENT | No | Synthetic |
 | `session_key` | INTEGER FK | No | Indexed |
 | `meeting_key` | INTEGER | No | Denormalized |
 | `date` | TEXT | No | Indexed |
@@ -407,13 +422,14 @@ The Tukey fence at `DESCRIPTIVE ANALYTICS/pit_stops_05.sql` was re-derived and i
 
 ### `silver_team_radio`
  
-**Team radio audio clips.** 15,575 rows. Contains URLs to the audio, not transcriptions.
+**Team radio audio clips.** 16,946 rows. Contains URLs to the audio, not transcriptions.
  
-**What changed from bronze:** synthetic id PK + UNIQUE constraint on `(session_key, driver_number, date)` — chose this pattern for scalability. `recording_url` is also unique in practice but making it the PK would be fragile (F1 could rename files).
+**What changed from bronze:** UNIQUE constraint on `(session_key, driver_number, date)`. `recording_url` is also unique in practice but making it the key would be fragile (F1 could rename files).
+ 
+> **The synthetic `id` column is gone (DuckDB migration, August 2026).** It sat beside a UNIQUE constraint that was already doing the real work of identifying a row, so nothing was lost by dropping it. Nothing selected it.
  
 | Column | Type | Nullable | Notes |
 |---|---|---|---|
-| `id` | INTEGER PK AUTOINCREMENT | No | |
 | `session_key` | INTEGER | No | Part of UNIQUE constraint |
 | `driver_number` | INTEGER | No | Part of UNIQUE constraint |
 | `date` | TEXT | No | Part of UNIQUE constraint |
@@ -424,19 +440,19 @@ The Tukey fence at `DESCRIPTIVE ANALYTICS/pit_stops_05.sql` was re-derived and i
  
 **Track and air conditions**, sampled roughly every minute per session. 42,915 rows.
  
-**What changed from bronze:** all measurements typed as REAL/INTEGER; `rainfall` confirmed as 0/1 boolean flag; CHECK on `wind_direction` (0-360°); 88 fully-identical duplicate rows collapsed with `SELECT DISTINCT` on insert (raw had 43,003).
+**What changed from bronze:** all measurements typed as DOUBLE/INTEGER; `rainfall` confirmed as 0/1 boolean flag; CHECK on `wind_direction` (0-360°); 88 fully-identical duplicate rows collapsed with `SELECT DISTINCT` on insert (raw had 43,003).
  
 | Column | Type | Nullable | Notes |
 |---|---|---|---|
 | `session_key` | INTEGER PK,FK | No | |
 | `date` | TEXT PK | No | ISO 8601 UTC |
 | `meeting_key` | INTEGER | No | Denormalized |
-| `humidity` | REAL | No | Percentage 9-96 observed |
-| `pressure` | REAL | No | hPa. 778-1031 observed (778 = high-altitude Mexico City) |
+| `humidity` | DOUBLE | No | Percentage 9-96 observed |
+| `pressure` | DOUBLE | No | hPa. 778-1031 observed (778 = high-altitude Mexico City) |
 | `rainfall` | INTEGER | No | 0/1 flag. ~4% of samples show rain |
-| `track_temperature` | REAL | No | °C. -16.5 to 60.6 observed |
-| `air_temperature` | REAL | No | °C. 10.7 to 35.8 observed |
-| `wind_speed` | REAL | No | m/s. 0 to 7.3 observed |
+| `track_temperature` | DOUBLE | No | °C. -16.5 to 60.6 observed |
+| `air_temperature` | DOUBLE | No | °C. 10.7 to 35.8 observed |
+| `wind_speed` | DOUBLE | No | m/s. 0 to 7.3 observed |
 | `wind_direction` | INTEGER | No | Degrees 0-360 (CHECK enforced) |
  
 **Rainfall is a state, not an amount.** You can't sum it. To measure "how wet was this session" use `SUM(rainfall) / COUNT(*)` for percentage of samples with rain.
@@ -456,8 +472,8 @@ The Tukey fence at `DESCRIPTIVE ANALYTICS/pit_stops_05.sql` was re-derived and i
 | `meeting_key` | INTEGER | No | Denormalized |
 | `position_start` | INTEGER | Yes | Standings before session; 63 nulls (first sessions of a season) |
 | `position_current` | INTEGER | No | Standings after session |
-| `points_start` | REAL | No | Points before session |
-| `points_current` | REAL | No | Points after session |
+| `points_start` | DOUBLE | No | Points before session |
+| `points_current` | DOUBLE | No | Points after session |
 
 ### `silver_championship_teams`
  
@@ -470,22 +486,24 @@ The Tukey fence at `DESCRIPTIVE ANALYTICS/pit_stops_05.sql` was re-derived and i
 | `meeting_key` | INTEGER | No | Denormalized |
 | `position_start` | INTEGER | Yes | 30 nulls (first sessions) |
 | `position_current` | INTEGER | No | |
-| `points_start` | REAL | No | |
-| `points_current` | REAL | No | Max observed: 860 |
+| `points_start` | DOUBLE | No | |
+| `points_current` | DOUBLE | No | Max observed: 860 |
 
 ## Telemetry
 
 > **These two live in BRONZE only. There are no `silver_car_data` or `silver_location` tables.**
 >
-> Their silver copies were **dropped in the 2026-07-28 split**, which took `f1.db` from 6.4 GB to 352 MB. They cover 32 of 490 sessions, so they cannot be model features or appear in season-wide aggregates, and carrying 35M rows of them through silver bought nothing.
+> Their silver copies were **dropped in the 2026-07-28 split**, which took the combined database from 6.4 GB to 352 MB. They cover a minority of sessions, so they cannot be model features or appear in season-wide aggregates, and carrying 43M rows of them through silver bought nothing.
 >
-> Query them from `bronze_f1.db` under their unprefixed names, `car_data` and `location`. `s05b_prescriptive`, `s05c_racemap` and `s05d_telemetry` do exactly that. The column documentation below still applies; only the location changed.
+> Query them from `bronze_f1.duckdb` under their unprefixed names, `car_data` and `location`. `s05b_prescriptive`, `s05c_racemap` and `s05d_telemetry` do exactly that. The column documentation below still applies; only the location changed.
 >
 > They are also **not in gold**, for the same coverage reason. `config.INCLUDE_TELEMETRY_IN_WEEKLY` is `False`, so the scheduled run skips them entirely.
+>
+> **EVERY COLUMN IN BOTH TABLES IS `VARCHAR`, INCLUDING THE NUMERIC ONES.** The tables below say INTEGER because that is what the silver copies were cast to, and those copies no longer exist. Bronze stores exactly what the API returned, as text, and the DuckDB migration preserved that faithfully. So `WHERE session_key = '9928'` and `WHERE x = '0'` are the correct forms, and any arithmetic needs an explicit cast. `s05c` and `s05d` both convert in pandas after loading rather than in SQL.
 
 ### `car_data` (bronze)
 
-**Per-tick car telemetry**, ~3.7Hz per driver per session. 9,365,942 rows. Only 32 of 490 sessions have this data; OpenF1's historical telemetry isn't comprehensive.
+**Per-tick car telemetry**, ~3.7Hz per driver per session. 13,866,366 rows across 38 sessions (as of 2026-08-31). Only a minority of the 495 sessions have this data; OpenF1's historical telemetry isn't comprehensive.
 
 **What changed from bronze:** nothing, this *is* bronze. When silver copies existed, everything was cast to INTEGER with no CHECK constraint on `n_gear`.
 
@@ -506,9 +524,9 @@ The Tukey fence at `DESCRIPTIVE ANALYTICS/pit_stops_05.sql` was re-derived and i
 
 ### `location` (bronze)
 
-**Per-tick x/y/z coordinates**, same sampling as `car_data`. 25,849,231 rows, the largest table in the project by far. Only some sessions have telemetry. Bronze only, see the note at the top of this section.
+**Per-tick x/y/z coordinates**, same sampling as `car_data`. 29,443,423 rows across 83 sessions (as of 2026-08-31), the largest table in the project by far. Only some sessions have telemetry. Bronze only, see the note at the top of this section.
 
-This is the source for `map_measured_xy` and `map_circuit_outline` in the dashboard bundle, built by `s05c_racemap.py`. Those two are the reason the bundle is 67 MB rather than 30.
+This is the source for `map_measured_xy` and `map_circuit_outline` in the dashboard bundle, built by `s05c_racemap.py`. Those two are the largest thing in the bundle, which the DuckDB migration took from 67 MB to 14 MB whole.
  
 **Coordinates are in millimeters relative to the circuit's local origin.** Observed ranges: x ±17m, y ±18m, z -0.25 to 22m. z includes elevation (kerbs, hills, banking).
  
@@ -524,9 +542,14 @@ This is the source for `map_measured_xy` and `map_circuit_outline` in the dashbo
 
 ## The gold layer
 
-`DATA INGESTION/gold_f1.db`, built by `pipeline/s07_build_gold.py --execute`. Rebuilt on every pipeline run, before the serving layers, because it is fully derived and a stale gold layer would be analysed as if current.
+`DATA INGESTION/gold_f1.duckdb`, built by `pipeline/s07_build_gold.py --execute`. Rebuilt on every pipeline run, before the serving layers, because it is fully derived and a stale gold layer would be analysed as if current.
 
-*As of 2026-08-12: 18 tables, 741,118 rows, 158.0 MB. Smaller than silver's 368 MB.*
+*As of 2026-08-31: 18 tables, 750,210 rows, 105 MB.*
+
+> **Two gold columns differ from the pre-migration SQLite build, and both are documented rather than accidental.**
+>
+> - `gold_race_control.id` no longer exists, because the silver column it copied no longer exists. See `silver_race_control` above.
+> - `gold_session.avg_track_temp` for session 11338 reads 46.5 where SQLite read 46.4. The exact mean over its 76 weather samples is 46.45, so 46.5 is correct and SQLite's float summation fell just short of the rounding boundary. The averages in `gold_session` are now computed in `DECIMAL` rather than floating point, because float addition is not associative and DuckDB splits a `SUM` across threads: identical data could otherwise round differently between two runs. Three sessions moved that way before the change.
 
 ### The three rules it obeys
 
@@ -557,7 +580,7 @@ This is the source for `map_measured_xy` and `map_circuit_outline` in the dashbo
 | `gold_weather` | `(session_key, date)` | |
 | `gold_overtake` | one row per pass | Both drivers' teams conformed, plus `same_team` |
 | `gold_position` | `(session_key, driver_number, date)` | |
-| `gold_race_control` | `id` | With the classification the caution builder uses: `is_red_flag_message`, `is_safety_car_message`, `is_sc_start_announcement` |
+| `gold_race_control` | none (see note above) | With the classification the caution builder uses: `is_red_flag_message`, `is_safety_car_message`, `is_sc_start_announcement` |
 | `gold_championship` | `(session_key, entity)` | Drivers and constructors in one table, split by `entity_type` |
 
 **Aggregates**, built from the facts above rather than from silver, so a defect fixed once is fixed everywhere.
@@ -634,7 +657,7 @@ before trying again.
 
 ## The Story of a Season
  
-Follow one row of data from creation to storage. This is how a single season lives inside `f1.db`.
+Follow one row of data from creation to storage. This is how a single season lives inside the medallion layers.
  
 **Late February — Pre-season testing in Bahrain.** F1 shows up at Sakhir for three days of running. The moment testing is confirmed, OpenF1 registers a new **meeting** — a row lands in `silver_meetings` with a new `meeting_key`, the country ("Bahrain"), the circuit ("Sakhir"), the dates, and `is_cancelled = 0`. Nothing else exists yet.
  

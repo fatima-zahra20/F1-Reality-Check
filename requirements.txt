@@ -20,3 +20,17 @@
 plotly==6.3.0
 pandas==2.3.3
 requests
+
+# PINNED TO AN EXACT VERSION, and this one has to stay exact.
+#
+# Everything else here could take a floor. duckdb cannot: its storage format is
+# tied to the release that wrote the file, and a reader too old for it refuses
+# to open the file at all rather than degrading. The bundle is written on the
+# machine that runs the pipeline and read by whatever Streamlit Cloud installs,
+# so an unpinned duckdb means the app breaks the day pip resolves a different
+# version to the one that wrote the data. SQLite never had this problem, which
+# is why nothing in this file used to look like this.
+#
+# Change it here and in environment-pipeline.yml together, republish, and only
+# then deploy.
+duckdb==1.5.5

@@ -3,7 +3,7 @@ s05c_racemap.py - track outlines and measured car positions for the race map.
 
 Runs between s05b and s06.
 
-Writes three tables into dashboard/data/dashboard.db (pipeline/serving.py owns
+Writes three tables into dashboard/data/dashboard.duckdb (pipeline/serving.py owns
 that path). Add --csv to also get a copy you can open and read by eye:
 
     map_circuit_outline   the traced shape of each circuit, as an ordered path
@@ -68,17 +68,17 @@ from __future__ import annotations
 
 import argparse
 import json
-import sqlite3
 import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+import duckdb
 import numpy as np
 import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from config import BRONZE_DB_PATH, DB_PATH  # noqa: E402
+from config import BRONZE_DB_PATH, DB_PATH, read_sql  # noqa: E402
 import serving  # noqa: E402
 
 # Position units are 0.1 m. See the module docstring.
@@ -125,11 +125,11 @@ def _to_num(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
 
 def load_location_sessions(bronze, silver) -> pd.DataFrame:
     """Every session that has position data, tagged with its circuit."""
-    keys = pd.read_sql("SELECT DISTINCT session_key FROM location", bronze)
+    keys = read_sql("SELECT DISTINCT session_key FROM location", bronze)
     keys["session_key"] = pd.to_numeric(keys["session_key"], errors="coerce")
     keys = keys.dropna().astype({"session_key": int})
 
-    ses = pd.read_sql("""
+    ses = read_sql("""
         SELECT session_key, year, session_type, session_name,
                circuit_key, circuit_short_name
         FROM silver_sessions
@@ -156,7 +156,7 @@ def pick_trace_candidates(silver, loc_sessions: pd.DataFrame,
     wanted = wanted.assign(pref=wanted.session_type.map(order).fillna(3))
 
     keys = ",".join(str(k) for k in wanted.session_key.unique())
-    laps = pd.read_sql(f"""
+    laps = read_sql(f"""
         SELECT session_key, driver_number, lap_number, date_start, lap_duration
         FROM silver_laps
         WHERE session_key IN ({keys})
@@ -216,7 +216,7 @@ def fetch_positions(bronze, pairs: list[tuple[int, int]],
     if not clauses:
         return pd.DataFrame()
 
-    df = pd.read_sql(f"""
+    df = read_sql(f"""
         SELECT session_key, driver_number, date, x, y, z
         FROM location
         WHERE ({' OR '.join(clauses)})
@@ -229,11 +229,13 @@ def fetch_positions(bronze, pairs: list[tuple[int, int]],
     df["driver_number"] = df["driver_number"].astype(int)
     df["date"] = pd.to_datetime(df["date"], format="ISO8601", utc=True)
 
-    # Sorted here, once, rather than trusted from SQLite. The query carries no
-    # ORDER BY, so its row order is whatever the plan happened to produce, and
-    # 4.5M rows is cheap to order in memory. mergesort because it is the stable
-    # one: samples sharing a timestamp keep a fixed relative order instead of
-    # an arbitrary one.
+    # Sorted here, once, rather than trusted from the engine. The query carries
+    # no ORDER BY, so its row order is whatever the plan happened to produce,
+    # and 4.5M rows is cheap to order in memory. This matters more under DuckDB
+    # than it did under SQLite, because DuckDB scans in parallel and its
+    # unordered output is not even stable between two runs of the same query.
+    # mergesort because it is the stable one: samples sharing a timestamp keep a
+    # fixed relative order instead of an arbitrary one.
     return df.sort_values(["session_key", "driver_number", "date"],
                           kind="mergesort").reset_index(drop=True)
 
@@ -503,7 +505,7 @@ def build_measured(pos: pd.DataFrame, silver,
     print(f"  measured positions thinned by {stride} "
           f"(1 sample every {stride / 3.7:.1f}s)")
 
-    laps = pd.read_sql(f"""
+    laps = read_sql(f"""
         SELECT session_key, driver_number, lap_number, date_start
         FROM silver_laps
         WHERE session_key IN ({','.join(str(k) for k in session_keys)})
@@ -538,13 +540,14 @@ def build_coverage(silver, outlines: pd.DataFrame, measured: pd.DataFrame,
     message it displays is read from here rather than inferred from an empty
     query result, which is the difference between a stated limit and a bug.
     """
-    races = pd.read_sql("""
+    races = read_sql("""
         SELECT s.session_key, s.year, m.meeting_name AS race_name,
                s.circuit_key, s.circuit_short_name, s.date_start
         FROM silver_sessions s
         JOIN silver_meetings m ON m.meeting_key = s.meeting_key
         WHERE s.session_name = 'Race' AND s.is_cancelled = 0
-          AND julianday(s.date_start) < julianday('now')
+          AND CAST(substr(s.date_start, 1, 19) AS TIMESTAMP)
+                < (now() AT TIME ZONE 'UTC')
         ORDER BY s.year, s.date_start
     """, silver)
 
@@ -663,10 +666,10 @@ def main() -> int:
     print(f"python: {sys.version.split()[0]}  pandas {pd.__version__}")
     print("=" * 74)
 
-    silver = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
-    bronze = sqlite3.connect(f"file:{BRONZE_DB_PATH}?mode=ro", uri=True)
+    silver = duckdb.connect(str(DB_PATH), read_only=True)
+    bronze = duckdb.connect(str(BRONZE_DB_PATH), read_only=True)
 
-    races = pd.read_sql("""
+    races = read_sql("""
         SELECT DISTINCT circuit_key, circuit_short_name
         FROM silver_sessions
         WHERE session_name = 'Race' AND is_cancelled = 0
@@ -688,12 +691,12 @@ def main() -> int:
     # Every Grand Prix that actually has position data gets its real x/y, and
     # every one that has car telemetry is flagged. Both are discovered from
     # bronze rather than listed, so a later backfill needs no code change.
-    gp = pd.read_sql("""
+    gp = read_sql("""
         SELECT session_key FROM silver_sessions
         WHERE session_name = 'Race' AND is_cancelled = 0
     """, silver).session_key
     measured_keys = sorted(set(gp) & set(loc_sessions.session_key))
-    car_keys = pd.read_sql("SELECT DISTINCT session_key FROM car_data", bronze)
+    car_keys = read_sql("SELECT DISTINCT session_key FROM car_data", bronze)
     car_keys = set(pd.to_numeric(car_keys.session_key,
                                  errors="coerce").dropna().astype(int))
     print(f"races with recorded positions: {len(measured_keys)}")

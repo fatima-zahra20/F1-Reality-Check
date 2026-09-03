@@ -167,7 +167,6 @@
       "nulls": {
         "date": 0.0,
         "driver_number": 0.0,
-        "id": 0.0,
         "meeting_key": 0.0,
         "position": 0.0,
         "session_key": 0.0
@@ -183,7 +182,6 @@
         "date": 0.0,
         "driver_number": 0.8762,
         "flag": 0.5103,
-        "id": 0.0,
         "lap_number": 0.5751,
         "meeting_key": 0.0,
         "message": 0.0,
@@ -272,7 +270,6 @@
       "nulls": {
         "date": 0.0,
         "driver_number": 0.0,
-        "id": 0.0,
         "meeting_key": 0.0,
         "recording_url": 0.0,
         "session_key": 0.0
@@ -299,5 +296,5 @@
       "scope": "any"
     }
   },
-  "written_at": "2026-08-27T08:01:02+00:00"
+  "written_at": "2026-09-03T08:27:12+00:00"
 }

@@ -72,7 +72,13 @@ Verified still clean as of 2026-07-26.
 
 `silver_position` has 68 same-driver-same-second duplicate timestamps.
 `silver_race_control` has 42 timestamp collisions from simultaneous flag events. Both
-use `INTEGER PRIMARY KEY AUTOINCREMENT` with indexes on the natural access pattern.
+used `INTEGER PRIMARY KEY AUTOINCREMENT` with indexes on the natural access pattern.
+
+**Superseded by #64.** DuckDB has no `AUTOINCREMENT`, so both synthetic keys are gone, as is
+`silver_team_radio`'s. The duplicate timestamps are still there and are still real; the
+tables simply have no primary key now, which is the honest description of data where no
+combination of columns is unique. `s07_build_gold` was selecting `silver_race_control.id`
+into `gold_race_control`, so that gold column went with it.
 
 ### 6. One session has NULL `team_name` despite a NOT NULL intent
 *Phase: IDA*
@@ -1599,6 +1605,107 @@ skewing any pit-duration figure on those 14 races since 2023, and it surfaced no
 because someone knew the right answer for one driver and checked. Recorded as open question
 H rather than fixed in the same breath, because deciding what counts as a pit stop is a
 modelling decision and not a bug fix.
+
+
+### 64. Everything moved to DuckDB, and what the engine changed underneath it
+
+*2026-08-25 to 08-31. Eighteen files. The point of the exercise was that nothing should
+change except the speed, so the interesting part is the list of things that did.*
+
+**Why at all.** Not speed for its own sake. The project needs to keep showing circuit maps
+and telemetry as the data grows, and `location` alone is 29.4M rows. Measured before
+committing to anything: Parquet compressed telemetry 26-35x, DuckDB compressed the whole
+database 4.7-6.5x, and the `s05c` position scan went **264.4s to 19.5s with byte-identical
+output**. The deciding constraint was not the numbers but *"I won't leave the project in two
+different shapes"* — a Parquet side-car for the big tables only would have done exactly
+that.
+
+**The method that made it checkable.** Every layer was rebuilt and compared against its
+SQLite predecessor on values rather than on containers: nulls normalised to one sentinel,
+numerics to rounded float64, rows sorted by a real key. Without that normalisation the first
+comparison reported 11 of 18 silver tables differing; all seven were `None` printing
+differently from `<NA>`, or int64 from int32. **The harness had to be debugged before it
+could be trusted, and it is what caught the genuine bug below.**
+
+Final state: silver **18 of 18 identical**, gold **16 of 18** plus two documented
+differences, the bundle **19 of 21** plus four rounded display strings and two negative
+zeros.
+
+**The genuine bug: `REAL` is not `REAL`.** SQLite's `REAL` is 8 bytes. DuckDB's is 4.
+Fifty column declarations carried straight across would have silently truncated every
+duration, speed and temperature in silver: `91.057` became `91.05699920654297`. Nothing
+would have raised. Found only because the comparison harness was comparing values rather
+than trusting a rebuild that reported success.
+
+**What else the engine refused, each of which had been correct for years.** No
+`AUTOINCREMENT`, so three synthetic `id` columns went, one of which `s07` was selecting. No
+`julianday`. Foreign keys actually enforced, so the one FK silver declared blocked its own
+rebuild. A bare column beside `GROUP BY` is an error. `execute()` returns the connection,
+not an iterable cursor. `df.to_sql()` does nothing useful. `GROUP_CONCAT` has no order
+unless given one, and DuckDB scans in parallel so it genuinely comes back shuffled.
+
+**The two that would have shipped rather than crashed.** `COALESCE(ROUND(x, 1), '?')` typed
+the whole column DOUBLE and failed on the first null pit duration. And this, which is the
+one to remember:
+
+**A null changed shape and an analysis raised.** sqlite3 reports no column types, so pandas
+inferred every nullable integer as float64 with `NaN`. DuckDB reports the real type, so the
+same column arrives as `Int32` holding `pd.NA`. `nan == 1` is `False`; `pd.NA == 1` is
+`pd.NA`, and `if` on it raises. T19 died on an `if r["red_flag"] == 1` that had been right
+for the life of the project. **51 columns across silver and gold arrive that way.**
+
+Then the same difference in its other form: DuckDB returns the declared integer width, so
+`session_key` came back int32. `merge()` tolerates that. **`pd.merge_asof` does not** —
+"incompatible merge keys dtype('int64') and dtype('int32')" — and five files use it. I had
+looked at exactly this and judged it harmless. It was not.
+
+Both are fixed in one place, `config.read_sql`, which normalises DuckDB's dtypes back to
+what sqlite3 produced. **The alternative was auditing every scalar comparison, `.astype`,
+truth test and `merge_asof` in eighteen files and the dashboard, and getting all of them
+right.** An engine swap should be invisible above the boundary; the way to make it invisible
+is to have a boundary.
+
+**`VACUUM` is accepted and does nothing.** This is the worst failure mode in the whole
+migration, because it looks like it works. Every step rewrites its tables whole and DuckDB
+appends rather than reusing blocks, so files grow on rebuild: the bundle 24.0 to 30.8 MB
+over three rewrites of *identical data*, gold 84.2 to 121.1 MB, silver 61 MB to 253 MB.
+`VACUUM` moved none of it. `COPY FROM DATABASE` into a fresh file is the real operation and
+took the bundle back to 14.0 MB.
+
+**And a thing that was true and stopped being true.** The bundle carried eleven indexes,
+which under SQLite were the difference between a filtered read and a 90k-row scan. DuckDB is
+columnar with zone maps, and its ART index is for point lookups: handing it a multi-row
+predicate replaces a vectorised scan with row-by-row probing. Timed, twenty runs each, one
+race's laps went **18.16 ms unindexed to 141.00 ms indexed**, and the indexes added 4.2 MB
+to a 14.0 MB file every visitor downloads. Removed. *A correct optimisation is correct for a
+reason, and the reason can leave.*
+
+**One rounding difference each way, which is the honest summary of the whole thing.**
+`gold_session.avg_track_temp` for session 11338: exact mean 46.45, DuckDB 46.5, SQLite 46.4
+— DuckDB right, and the averages now use `DECIMAL` because float `SUM` is order-dependent
+and DuckDB parallelises it. Four `fact_event` pit strings the other way: the stored double is
+`21.1499999...`, so SQLite's 21.1 is faithful to the bits and DuckDB's 21.2 to the number a
+human meant.
+
+**What the migration made newly fragile, which SQLite never was.** DuckDB's storage format
+belongs to the release that wrote it, and a reader from a different release **refuses to open
+the file** rather than coping. The pipeline writes the bundle and Streamlit Cloud reads it,
+so `duckdb==1.5.5` is pinned exactly in `requirements.txt`, `requirements-pipeline.txt` and
+`environment-pipeline.yml`. That pin is now load-bearing infrastructure.
+
+And one host-dependence: `TIMESTAMP WITH TIME ZONE` renders in the *host's* zone, so the
+bundle's timestamps arrived as `datetime64[us, Africa/Casablanca]` locally and would arrive
+as UTC on Streamlit Cloud. Same instants, different labels, and an hour's difference in
+anything formatted without converting — the same shape as #61. `app_common` now issues
+`SET GLOBAL TimeZone = 'UTC'`; **`GLOBAL` because a plain `SET` does not survive into the
+cursor** each query takes.
+
+**Two files were left pointing at the old world and both were found by looking rather than
+by failing.** `data_prep.py` declared its own `DB_PATH` instead of importing config, so the
+notebooks would have gone on reading a frozen SQLite snapshot indefinitely, succeeding every
+time. `openf1_ingestion.py`, the original ingestion script, would have spent hours
+re-fetching every endpoint into a database nothing reads and reported success. The first now
+imports config; the second refuses to run. *Neither would ever have raised.*
 
 
 ## Open questions

@@ -53,12 +53,12 @@ from __future__ import annotations
 
 import argparse
 import json
-import sqlite3
 import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+import duckdb
 import requests
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -89,7 +89,7 @@ def main() -> int:
         print(f"[FAIL] silver database not found at {DB_PATH}")
         return 1
 
-    con = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
+    con = duckdb.connect(str(DB_PATH), read_only=True)
     rows = wanted(con)
     con.close()
     print(f"{len(rows)} circuit-year URLs to check\n")

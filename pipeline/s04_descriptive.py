@@ -1,9 +1,9 @@
 """
 s04_descriptive.py — builds the descriptive serving layer for the dashboard.
 
-Writes a star schema straight into the dashboard bundle, dashboard/data/dashboard.db
-(pipeline/serving.py owns that path). Add --csv to also get a copy you can open
-and read by eye:
+Writes a star schema straight into the dashboard bundle,
+dashboard/data/dashboard.duckdb (pipeline/serving.py owns that path). Add --csv
+to also get a copy you can open and read by eye:
 
     dim_race           one row per race          (~81)
     dim_driver         driver x season           (~90)
@@ -59,16 +59,16 @@ designed then, not resurrected from dead comments.
 from __future__ import annotations
 
 import argparse
-import sqlite3
 import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+import duckdb
 import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from config import DB_PATH, LAP_OUTLIER_FACTOR  # noqa: E402
+from config import DB_PATH, LAP_OUTLIER_FACTOR, read_sql  # noqa: E402
 import serving  # noqa: E402
 
 # LAP_OUTLIER_FACTOR now comes from config, which is the single definition.
@@ -89,18 +89,26 @@ TEAM_NAME_MAP = {
 # Every completed Grand Prix with both laps and results. The EXISTS clauses are
 # what make this dynamic — no year list to maintain.
 #
-# julianday on both sides, not a bare `date_start < datetime('now')`. That form
-# compares two strings: date_start is ISO ("2026-08-23T13:00:00+00:00") and
-# datetime('now') is space-separated ("2026-08-23 16:10:40"), so at character 10
-# it weighs 'T' against ' ' and 'T' wins. Every race held on the current date is
-# excluded no matter how long ago it finished, and only on that date, so the
-# defect disappears by itself overnight. It cost the Dutch GP a publish.
+# BOTH SIDES ARE COMPARED AS TIMESTAMPS, never as strings. A bare
+# `date_start < datetime('now')` compares two pieces of text: date_start is ISO
+# ("2026-08-23T13:00:00+00:00") and datetime('now') was space-separated
+# ("2026-08-23 16:10:40"), so at character 10 it weighed 'T' against ' ' and 'T'
+# won. Every race held on the current date was excluded no matter how long ago
+# it finished, and only on that date, so the defect disappeared by itself
+# overnight. It cost the Dutch GP a publish.
+#
+# DuckDB has no julianday(), which is what the fix used under SQLite. substr to
+# 19 characters drops the "+00:00" offset, because the whole feed is already UTC
+# and CAST would otherwise return a TIMESTAMP WITH TIME ZONE that cannot be
+# compared against a plain one. now() AT TIME ZONE 'UTC' is the matching plain
+# UTC timestamp.
 RACE_SCOPE = """
     SELECT s.session_key, s.meeting_key
     FROM silver_sessions s
     WHERE s.session_name = 'Race'
       AND s.is_cancelled = 0
-      AND julianday(s.date_start) < julianday('now')
+      AND CAST(substr(s.date_start, 1, 19) AS TIMESTAMP)
+            < (now() AT TIME ZONE 'UTC')
       AND EXISTS (SELECT 1 FROM silver_laps l WHERE l.session_key = s.session_key)
       AND EXISTS (SELECT 1 FROM silver_session_result r WHERE r.session_key = s.session_key)
 """
@@ -116,7 +124,7 @@ def normalize_teams(df: pd.DataFrame, col: str = "team_name") -> pd.DataFrame:
 
 def build_dim_race(con) -> pd.DataFrame:
     """One row per race: the dashboard's picker, plus race-level context."""
-    df = pd.read_sql(f"""
+    df = read_sql(f"""
         WITH scope AS ({RACE_SCOPE})
         SELECT
             s.session_key,
@@ -140,11 +148,22 @@ def build_dim_race(con) -> pd.DataFrame:
               WHERE p.session_key = s.session_key AND p.kind = 'VSC') AS vsc_periods,
             (SELECT COUNT(*) FROM silver_caution_periods p
               WHERE p.session_key = s.session_key AND p.kind = 'RED') AS red_flag_periods,
-            (SELECT ROUND(AVG(w.track_temperature), 1) FROM silver_weather w
+            -- Averaged in DECIMAL, not in floating point, and for the same
+            -- reason gold_session is. Float addition is not associative and
+            -- DuckDB splits a SUM across threads, so the order the samples are
+            -- added in can move the total by one unit in the last place. That is
+            -- invisible until a mean lands exactly on a .x5 boundary, where it
+            -- decides which way ROUND goes: three sessions moved by 0.1 between
+            -- runs of identical data. DECIMAL addition is exact and therefore
+            -- order-independent, so the answer is the same every time.
+            (SELECT ROUND(AVG(CAST(w.track_temperature AS DECIMAL(10,4))), 1)
+               FROM silver_weather w
               WHERE w.session_key = s.session_key)          AS avg_track_temp,
-            (SELECT ROUND(AVG(w.air_temperature), 1) FROM silver_weather w
+            (SELECT ROUND(AVG(CAST(w.air_temperature AS DECIMAL(10,4))), 1)
+               FROM silver_weather w
               WHERE w.session_key = s.session_key)          AS avg_air_temp,
-            (SELECT ROUND(100.0 * SUM(w.rainfall) / COUNT(*), 1) FROM silver_weather w
+            (SELECT ROUND(100.0 * SUM(w.rainfall) / COUNT(*), 1)
+               FROM silver_weather w
               WHERE w.session_key = s.session_key)          AS pct_samples_wet
         FROM scope
         JOIN silver_sessions s ON s.session_key = scope.session_key
@@ -181,7 +200,7 @@ def build_dim_driver(con) -> pd.DataFrame:
     the season — and OpenF1 drops country_code for whole seasons at a time, so
     a within-season lookup would return null for drivers it has known since 2023.
     """
-    df = pd.read_sql(f"""
+    df = read_sql(f"""
         WITH scope AS ({RACE_SCOPE})
         SELECT
             d.driver_number,
@@ -248,7 +267,7 @@ def build_dim_driver(con) -> pd.DataFrame:
 
 def build_dim_team(con) -> pd.DataFrame:
     """One row per constructor, after collapsing renames."""
-    df = pd.read_sql(f"""
+    df = read_sql(f"""
         WITH scope AS ({RACE_SCOPE})
         SELECT d.team_name, d.team_colour, m.year, scope.session_key
         FROM scope
@@ -269,7 +288,7 @@ def build_dim_team(con) -> pd.DataFrame:
 
     # Record which raw names collapsed into each constructor — makes the
     # normalisation visible in the dashboard rather than hidden.
-    raw = pd.read_sql(f"""
+    raw = read_sql(f"""
         WITH scope AS ({RACE_SCOPE})
         SELECT DISTINCT d.team_name AS raw_name
         FROM scope JOIN silver_drivers d ON d.session_key = scope.session_key
@@ -287,7 +306,7 @@ def build_dim_team(con) -> pd.DataFrame:
 
 def build_fact_driver_race(con) -> pd.DataFrame:
     """One row per driver per race — the dashboard's header panel."""
-    df = pd.read_sql(f"""
+    df = read_sql(f"""
         WITH scope AS ({RACE_SCOPE})
         SELECT
             r.session_key,
@@ -320,7 +339,7 @@ def build_fact_driver_race(con) -> pd.DataFrame:
     df["was_lapped"] = df["gap_to_leader_laps"].notna().astype(int)
 
     # --- pit stops ---
-    pits = pd.read_sql(f"""
+    pits = read_sql(f"""
         WITH scope AS ({RACE_SCOPE})
         SELECT p.session_key, p.driver_number,
                COUNT(*)                        AS pit_stops,
@@ -333,11 +352,19 @@ def build_fact_driver_race(con) -> pd.DataFrame:
     df["pit_stops"] = df["pit_stops"].fillna(0).astype(int)
 
     # --- stints ---
-    stints = pd.read_sql(f"""
+    # ORDER BY inside the aggregate, which SQLite's GROUP_CONCAT could not take.
+    # The sequence is the point of this column — "SOFT > MEDIUM > HARD" is a
+    # strategy, the same three compounds in scan order are not — and neither
+    # engine promises an order without being told. SQLite happened to emit stint
+    # order because that is how it read the rows; DuckDB reads them in parallel
+    # and does not. Measured: DuckDB returns 'B > A' for rows inserted 1='A',
+    # 2='B' when the order is left unstated.
+    stints = read_sql(f"""
         WITH scope AS ({RACE_SCOPE})
         SELECT st.session_key, st.driver_number,
                COUNT(*) AS stint_count,
-               GROUP_CONCAT(st.compound, ' > ') AS compound_sequence
+               string_agg(st.compound, ' > ' ORDER BY st.stint_number)
+                                                AS compound_sequence
         FROM scope JOIN silver_stints st ON st.session_key = scope.session_key
         WHERE st.lap_end >= st.lap_start
         GROUP BY st.session_key, st.driver_number
@@ -345,14 +372,14 @@ def build_fact_driver_race(con) -> pd.DataFrame:
     df = df.merge(stints, on=["session_key", "driver_number"], how="left")
 
     # --- overtakes, both directions ---
-    made = pd.read_sql(f"""
+    made = read_sql(f"""
         WITH scope AS ({RACE_SCOPE})
         SELECT o.session_key, o.overtaking_driver_number AS driver_number,
                COUNT(*) AS overtakes_made
         FROM scope JOIN silver_overtakes o ON o.session_key = scope.session_key
         GROUP BY o.session_key, o.overtaking_driver_number
     """, con)
-    suffered = pd.read_sql(f"""
+    suffered = read_sql(f"""
         WITH scope AS ({RACE_SCOPE})
         SELECT o.session_key, o.overtaken_driver_number AS driver_number,
                COUNT(*) AS overtakes_suffered
@@ -369,8 +396,9 @@ def build_fact_driver_race(con) -> pd.DataFrame:
     # unknown status is not assumed clean.
     #
     # The aggregation happens in pandas rather than SQL because it needs the
-    # derived lap-duration bound below, and SQLite has no MEDIAN.
-    raw = pd.read_sql(f"""
+    # derived lap-duration bound below, which is computed from the result of
+    # this query and so cannot be expressed inside it.
+    raw = read_sql(f"""
         WITH scope AS ({RACE_SCOPE})
         SELECT l.session_key, l.driver_number, l.lap_duration
         FROM scope
@@ -451,7 +479,7 @@ def build_fact_lap(con) -> pd.DataFrame:
     lap start), not the full ~4-second series. The fine-grained data stays in
     silver_intervals for the gold layer.
     """
-    laps = pd.read_sql(f"""
+    laps = read_sql(f"""
         WITH scope AS ({RACE_SCOPE})
         SELECT
             l.session_key, l.driver_number, l.lap_number,
@@ -473,7 +501,7 @@ def build_fact_lap(con) -> pd.DataFrame:
     laps["date_start"] = pd.to_datetime(laps["date_start"], format="ISO8601", utc=True)
 
     # --- tyre compound and age, from stints ---
-    stints = pd.read_sql(f"""
+    stints = read_sql(f"""
         WITH scope AS ({RACE_SCOPE})
         SELECT st.session_key, st.driver_number, st.stint_number,
                st.compound, st.tyre_age_at_start, st.lap_start, st.lap_end
@@ -513,7 +541,7 @@ def build_fact_lap(con) -> pd.DataFrame:
     laps["tyre_age"] = laps["tyre_age_at_start"] + (laps["lap_number"] - laps["lap_start"])
 
     # --- position at the end of each lap ---
-    pos = pd.read_sql(f"""
+    pos = read_sql(f"""
         WITH scope AS ({RACE_SCOPE})
         SELECT p.session_key, p.driver_number, p."date", p."position"
         FROM scope JOIN silver_position p ON p.session_key = scope.session_key
@@ -538,7 +566,7 @@ def build_fact_lap(con) -> pd.DataFrame:
     # gap to P1. Both are needed to answer whether a driver was fighting,
     # isolated, or lapped: the leader gap alone cannot distinguish a driver
     # locked in a battle from one circulating alone at the same deficit.
-    intervals = pd.read_sql(f"""
+    intervals = read_sql(f"""
         WITH scope AS ({RACE_SCOPE})
         SELECT i.session_key, i.driver_number, i."date",
                i.interval_seconds, i.interval_laps,
@@ -563,7 +591,7 @@ def build_fact_lap(con) -> pd.DataFrame:
     # match to find. Carried per lap rather than per race because a race
     # average hides exactly the thing worth seeing, a track drying out or a
     # temperature falling across a stint.
-    weather = pd.read_sql(f"""
+    weather = read_sql(f"""
         WITH scope AS ({RACE_SCOPE})
         SELECT w.session_key, w."date",
                w.air_temperature, w.track_temperature, w.humidity,
@@ -614,17 +642,26 @@ def build_fact_event(con) -> pd.DataFrame:
     """One row per notable moment — the timeline and annotation layer."""
     frames = []
 
-    pits = pd.read_sql(f"""
+    # CAST TO TEXT BEFORE COALESCE, not after. SQLite has no fixed column types,
+    # so COALESCE(<a number>, '?') simply returned whichever it found. DuckDB
+    # types the expression once for the whole column: the first branch is DOUBLE,
+    # so '?' has to be a DOUBLE too, and the moment a row with a null
+    # lane_duration reaches the fallback it fails with "Could not convert string
+    # '?' to DOUBLE". Casting first makes both branches text, which is what the
+    # string being built wanted anyway. Verified to produce SQLite's exact output
+    # on both a populated and a null row.
+    pits = read_sql(f"""
         WITH scope AS ({RACE_SCOPE})
         SELECT p.session_key, p.driver_number, p.lap_number, p."date" AS event_time,
                'pit_stop' AS event_type,
-               'Pit stop, ' || COALESCE(ROUND(p.lane_duration, 1), '?') || 's in lane' AS detail,
+               'Pit stop, ' || COALESCE(CAST(ROUND(p.lane_duration, 1) AS VARCHAR), '?')
+                            || 's in lane' AS detail,
                p.lane_duration AS value
         FROM scope JOIN silver_pit p ON p.session_key = scope.session_key
     """, con)
     frames.append(pits)
 
-    ot_made = pd.read_sql(f"""
+    ot_made = read_sql(f"""
         WITH scope AS ({RACE_SCOPE})
         SELECT o.session_key, o.overtaking_driver_number AS driver_number,
                NULL AS lap_number, o."date" AS event_time,
@@ -636,7 +673,7 @@ def build_fact_event(con) -> pd.DataFrame:
     """, con)
     frames.append(ot_made)
 
-    ot_lost = pd.read_sql(f"""
+    ot_lost = read_sql(f"""
         WITH scope AS ({RACE_SCOPE})
         SELECT o.session_key, o.overtaken_driver_number AS driver_number,
                NULL AS lap_number, o."date" AS event_time,
@@ -648,7 +685,7 @@ def build_fact_event(con) -> pd.DataFrame:
     frames.append(ot_lost)
 
     # Race control messages naming a specific driver.
-    rc_driver = pd.read_sql(f"""
+    rc_driver = read_sql(f"""
         WITH scope AS ({RACE_SCOPE})
         SELECT rc.session_key, rc.driver_number, rc.lap_number,
                rc."date" AS event_time,
@@ -660,7 +697,7 @@ def build_fact_event(con) -> pd.DataFrame:
     frames.append(rc_driver)
 
     # Race-wide messages: no driver_number, so they annotate the whole race.
-    rc_race = pd.read_sql(f"""
+    rc_race = read_sql(f"""
         WITH scope AS ({RACE_SCOPE})
         SELECT rc.session_key, NULL AS driver_number, rc.lap_number,
                rc."date" AS event_time,
@@ -673,7 +710,7 @@ def build_fact_event(con) -> pd.DataFrame:
     """, con)
     frames.append(rc_race)
 
-    radio = pd.read_sql(f"""
+    radio = read_sql(f"""
         WITH scope AS ({RACE_SCOPE})
         SELECT tr.session_key, tr.driver_number, NULL AS lap_number,
                tr."date" AS event_time,
@@ -703,7 +740,7 @@ def build_fact_championship(con) -> pd.DataFrame:
     current mapping, since no two mapped names competed in the same season,
     but summing is the behaviour that stays correct if one ever does.
     """
-    df = pd.read_sql(f"""
+    df = read_sql(f"""
         WITH scope AS ({RACE_SCOPE})
         SELECT c.session_key, c.team_name,
                c.position_start, c.position_current,
@@ -769,15 +806,15 @@ def main() -> int:
     print(f"target: {serving.BUNDLE_DB}")
     print("=" * 74)
 
-    con = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
+    con = duckdb.connect(str(DB_PATH), read_only=True)
 
-    n_races = pd.read_sql(f"SELECT COUNT(*) AS n FROM ({RACE_SCOPE})", con)["n"].iloc[0]
+    n_races = read_sql(f"SELECT COUNT(*) AS n FROM ({RACE_SCOPE})", con)["n"].iloc[0]
     print(f"\nscope: {n_races} completed races\n")
 
     # WRITTEN STRAIGHT INTO THE BUNDLE, NOT TO CSV.
     #
     # These seven tables used to be written as CSV and then read back by
-    # s06_publish to build dashboard.db, which meant every value existed twice
+    # s06_publish to build the bundle, which meant every value existed twice
     # with nothing checking the copies agreed. The CSV was never the product; it
     # was an intermediate. s04 moved first and s05, s05b, s05c and s05d have now
     # followed, so s06 reads no CSV at all and only verifies what it finds.

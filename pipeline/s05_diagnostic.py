@@ -6,7 +6,7 @@ rather than prose. Every statistical claim the project makes gets recomputed
 here from current silver and written to the dashboard bundle, so the dashboard
 can show the finding, the evidence behind it, and the caveat attached to it.
 
-Writes four tables into dashboard/data/dashboard.db (pipeline/serving.py owns
+Writes four tables into dashboard/data/dashboard.duckdb (pipeline/serving.py owns
 that path). Add --csv to also get a copy you can open and read by eye:
 
     diag_tests          one row per statistical test
@@ -23,8 +23,9 @@ one lap in nine. The notebooks are the source of the model SPECIFICATIONS only.
 
 DROP AND REWRITE, same as s04. These are derived views, not a log.
 
-READ-ONLY ON SILVER. Opens f1.db with mode=ro. gold_f1.db is a separate later
-layer and is deliberately untouched.
+READ-ONLY ON BOTH INPUTS. silver_f1.duckdb and gold_f1.duckdb are both opened
+with read_only=True, so nothing this step does can write back into a layer it is
+only supposed to read. Neither is ever written here.
 
 CLEAN LAPS mean silver_lap_flags.neutralised = 0, never the old caution_flag,
 and never NULL — 480 laps have no flag row, and unknown status is not clean.
@@ -59,20 +60,20 @@ install produces different numbers that look like data problems.
 from __future__ import annotations
 
 import argparse
-import sqlite3
 import sys
 import time
 import warnings
 from datetime import datetime, timezone
 from pathlib import Path
 
+import duckdb
 import numpy as np
 import pandas as pd
 from scipy import stats
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from config import (DB_PATH, EXCLUDED_TEAMS, GOLD_DB_PATH,  # noqa: E402
-                    LAP_OUTLIER_FACTOR)
+                    LAP_OUTLIER_FACTOR, read_sql)
 import serving  # noqa: E402
 
 import statsmodels.api as sm  # noqa: E402
@@ -100,7 +101,7 @@ ALPHA = 0.05
 MIN_PAIR_SESSIONS = 8
 
 # Same dynamic scope as s04 — no year list to maintain. See s04 for why the date
-# test uses julianday rather than comparing the strings.
+# test casts both sides to a timestamp rather than comparing the strings.
 #
 # Kept for the query sites still reading silver directly. The gold form below is
 # the same races and is what the shared loaders use. The two were verified
@@ -113,7 +114,8 @@ RACE_SCOPE = """
     FROM silver_sessions s
     WHERE s.session_name = 'Race'
       AND s.is_cancelled = 0
-      AND julianday(s.date_start) < julianday('now')
+      AND CAST(substr(s.date_start, 1, 19) AS TIMESTAMP)
+            < (now() AT TIME ZONE 'UTC')
       AND EXISTS (SELECT 1 FROM silver_laps l WHERE l.session_key = s.session_key)
       AND EXISTS (SELECT 1 FROM silver_session_result r WHERE r.session_key = s.session_key)
 """
@@ -353,7 +355,7 @@ def load_clean_laps(gold) -> pd.DataFrame:
     Sensitivity, for when that is picked up: 1.5x drops 118 laps, 1.8x drops 28,
     2.0x drops 12, 2.5x drops 1.
     """
-    laps = pd.read_sql(f"""
+    laps = read_sql(f"""
         WITH scope AS ({GOLD_RACE_SCOPE})
         SELECT l.session_key, l.driver_number, l.lap_number,
                l.date_start, l.lap_duration, l.team_name, l.pace_ratio,
@@ -385,7 +387,7 @@ def load_driver_race(gold, laps: pd.DataFrame) -> pd.DataFrame:
     and fan the join out (NOTES_LOG #26). gold_session_result did that once, so
     grid_position is a column here rather than two more LEFT JOINs.
     """
-    df = pd.read_sql(f"""
+    df = read_sql(f"""
         WITH scope AS ({GOLD_RACE_SCOPE})
         SELECT r.session_key, r.driver_number, r.team_name,
                r.driver_full_name AS full_name,
@@ -430,7 +432,7 @@ def load_driver_race(gold, laps: pd.DataFrame) -> pd.DataFrame:
     # lane_duration is not carried in gold: it was byte-identical to
     # pit_duration across all 22,898 populated rows, maximum absolute difference
     # 0.0, so the column name changes and the numbers cannot.
-    pits = pd.read_sql(f"""
+    pits = read_sql(f"""
         WITH scope AS ({GOLD_RACE_SCOPE})
         SELECT p.session_key, p.driver_number,
                COUNT(*) AS pit_count,
@@ -455,7 +457,7 @@ def load_race_weather(gold) -> pd.DataFrame:
     rainfall is a 0/1 state per sample, not millimetres (NOTES_LOG #17), so it
     can be averaged but never summed as an amount.
     """
-    return pd.read_sql(f"""
+    return read_sql(f"""
         WITH scope AS ({GOLD_RACE_SCOPE})
         SELECT w.session_key,
                MAX(w.rainfall)                          AS race_had_rain,
@@ -720,7 +722,7 @@ def a06_overtake_conversion(d: Diagnostics, ctx) -> None:
     lap_times = laps[["session_key", "driver_number", "lap_number", "date_start"]].dropna().copy()
     lap_times["date_start"] = pd.to_datetime(lap_times["date_start"], format="ISO8601", utc=True)
 
-    pos = pd.read_sql(f"""
+    pos = read_sql(f"""
         WITH scope AS ({RACE_SCOPE})
         SELECT p.session_key, p.driver_number, p."date", p."position"
         FROM scope JOIN silver_position p ON p.session_key = scope.session_key
@@ -742,7 +744,7 @@ def a06_overtake_conversion(d: Diagnostics, ctx) -> None:
     opp = opp.merge(ahead_key, on=["session_key", "lap_number", "ahead_position"], how="inner")
 
     # Gap to the car ahead at that moment.
-    intervals = pd.read_sql(f"""
+    intervals = read_sql(f"""
         WITH scope AS ({RACE_SCOPE})
         SELECT i.session_key, i.driver_number, i."date", i.interval_seconds
         FROM scope JOIN silver_intervals i ON i.session_key = scope.session_key
@@ -762,7 +764,7 @@ def a06_overtake_conversion(d: Diagnostics, ctx) -> None:
     opp = opp[opp["gap_to_ahead"] < 2.0].copy()
 
     # Tyre age for both cars, from the stint range join.
-    stints = pd.read_sql(f"""
+    stints = read_sql(f"""
         WITH scope AS ({RACE_SCOPE})
         SELECT st.session_key, st.driver_number, st.lap_start, st.lap_end,
                st.tyre_age_at_start
@@ -786,7 +788,7 @@ def a06_overtake_conversion(d: Diagnostics, ctx) -> None:
     opp = opp.dropna(subset=["tyre_delta"])
 
     # Outcome: did this driver pass that specific car within the next 2 laps?
-    overtakes = pd.read_sql(f"""
+    overtakes = read_sql(f"""
         WITH scope AS ({RACE_SCOPE})
         SELECT o.session_key, o.overtaking_driver_number AS driver_number,
                o.overtaken_driver_number AS driver_ahead, o."date"
@@ -839,7 +841,7 @@ def a07_pit_lane_by_team(d: Diagnostics, ctx) -> None:
     almost no data.
     """
     con = ctx["con"]
-    pits = pd.read_sql(f"""
+    pits = read_sql(f"""
         WITH scope AS ({RACE_SCOPE})
         SELECT p.session_key, p.driver_number, p.lap_number, p.lane_duration,
                d.team_name, m.circuit_short_name
@@ -1054,7 +1056,7 @@ def a11_tyre_degradation(d: Diagnostics, ctx) -> None:
     con = ctx["con"]
     laps = ctx["clean_laps"]
 
-    stints = pd.read_sql(f"""
+    stints = read_sql(f"""
         WITH scope AS ({RACE_SCOPE})
         SELECT st.session_key, st.driver_number, st.stint_number,
                st.lap_start, st.lap_end, st.compound, st.tyre_age_at_start
@@ -1315,7 +1317,7 @@ def a15_position_swings(d: Diagnostics, ctx) -> None:
     original conflated them, which is the error s02b was written to fix.
     """
     con = ctx["con"]
-    laps = pd.read_sql(f"""
+    laps = read_sql(f"""
         WITH scope AS ({RACE_SCOPE})
         SELECT l.session_key, l.driver_number, l.lap_number, l.date_start,
                f.sc_flag, f.vsc_flag
@@ -1329,7 +1331,7 @@ def a15_position_swings(d: Diagnostics, ctx) -> None:
     """, con)
     laps["date_start"] = pd.to_datetime(laps["date_start"], format="ISO8601", utc=True)
 
-    pos = pd.read_sql(f"""
+    pos = read_sql(f"""
         WITH scope AS ({RACE_SCOPE})
         SELECT p.session_key, p.driver_number, p."date", p."position"
         FROM scope JOIN silver_position p ON p.session_key = scope.session_key
@@ -1348,7 +1350,7 @@ def a15_position_swings(d: Diagnostics, ctx) -> None:
     snap["position_swing"] = snap["next_position"] - snap["position"]
     snap = snap.dropna(subset=["position_swing"])
 
-    pit_laps = pd.read_sql(f"""
+    pit_laps = read_sql(f"""
         WITH scope AS ({RACE_SCOPE})
         SELECT DISTINCT p.session_key, p.driver_number, p.lap_number, 1 AS pit_flag
         FROM scope JOIN silver_pit p ON p.session_key = scope.session_key
@@ -1389,7 +1391,7 @@ def a16_lap1_swing(d: Diagnostics, ctx) -> None:
     con = ctx["con"]
     dr = ctx["driver_race"]
 
-    lap2 = pd.read_sql(f"""
+    lap2 = read_sql(f"""
         WITH scope AS ({RACE_SCOPE})
         SELECT l.session_key, l.driver_number, l.date_start AS lap2_date
         FROM scope JOIN silver_laps l ON l.session_key = scope.session_key
@@ -1397,7 +1399,7 @@ def a16_lap1_swing(d: Diagnostics, ctx) -> None:
     """, con)
     lap2["lap2_date"] = pd.to_datetime(lap2["lap2_date"], format="ISO8601", utc=True)
 
-    pos = pd.read_sql(f"""
+    pos = read_sql(f"""
         WITH scope AS ({RACE_SCOPE})
         SELECT p.session_key, p.driver_number, p."date", p."position"
         FROM scope JOIN silver_position p ON p.session_key = scope.session_key
@@ -1443,7 +1445,7 @@ def a17_lap1_chaos_by_circuit(d: Diagnostics, ctx) -> None:
     """
     con = ctx["con"]
 
-    races = pd.read_sql(f"""
+    races = read_sql(f"""
         WITH scope AS ({RACE_SCOPE})
         SELECT scope.session_key, m.circuit_type
         FROM scope
@@ -1455,7 +1457,7 @@ def a17_lap1_chaos_by_circuit(d: Diagnostics, ctx) -> None:
     # traffic such as GREEN LIGHT - PIT EXIT OPEN, so the rate is 100% for every
     # circuit type and the test has no variance to work with. Restrict to
     # categories that mean something actually happened.
-    chaos = pd.read_sql(f"""
+    chaos = read_sql(f"""
         WITH scope AS ({RACE_SCOPE})
         SELECT DISTINCT rc.session_key
         FROM scope JOIN silver_race_control rc ON rc.session_key = scope.session_key
@@ -1518,7 +1520,7 @@ def a18_within_stint_pace(d: Diagnostics, ctx) -> None:
     con = ctx["con"]
     laps = ctx["clean_laps"]
 
-    stints = pd.read_sql(f"""
+    stints = read_sql(f"""
         WITH scope AS ({RACE_SCOPE})
         SELECT st.session_key, st.driver_number, st.stint_number, st.compound,
                st.tyre_age_at_start, st.lap_start, st.lap_end
@@ -1530,7 +1532,7 @@ def a18_within_stint_pace(d: Diagnostics, ctx) -> None:
     m = m[(m["lap_number"] >= m["lap_start"]) & (m["lap_number"] <= m["lap_end"])].copy()
     m["tyre_age"] = m["tyre_age_at_start"] + (m["lap_number"] - m["lap_start"])
 
-    temp = pd.read_sql(f"""
+    temp = read_sql(f"""
         WITH scope AS ({RACE_SCOPE})
         SELECT w.session_key, AVG(w.track_temperature) AS track_temperature
         FROM scope JOIN silver_weather w ON w.session_key = scope.session_key
@@ -1604,7 +1606,7 @@ def a19_anomalous_lap_causes(d: Diagnostics, ctx) -> None:
     """
     con = ctx["con"]
 
-    laps = pd.read_sql(f"""
+    laps = read_sql(f"""
         WITH scope AS ({RACE_SCOPE})
         SELECT l.session_key, l.driver_number, l.lap_number, l.lap_duration,
                f.sc_flag, f.vsc_flag, f.red_flag, f.yellow_sector_flag,
@@ -1686,7 +1688,7 @@ def a20_sector_consistency(d: Diagnostics, ctx) -> None:
     """
     con = ctx["con"]
 
-    sec = pd.read_sql(f"""
+    sec = read_sql(f"""
         WITH scope AS ({RACE_SCOPE})
         SELECT l.session_key, l.driver_number, l.lap_number,
                l.duration_sector_1, l.duration_sector_2, l.duration_sector_3,
@@ -1811,7 +1813,7 @@ def a22_disaster_stop_concentration(d: Diagnostics, ctx) -> None:
     """
     con = ctx["con"]
 
-    pits = pd.read_sql(f"""
+    pits = read_sql(f"""
         WITH scope AS ({RACE_SCOPE})
         SELECT p.session_key, p.driver_number, p.lap_number, p.lane_duration,
                d.team_name
@@ -1876,7 +1878,7 @@ def a23_fighting_and_overtakes(d: Diagnostics, ctx) -> None:
     con = ctx["con"]
     dr = ctx["driver_race"]
 
-    fight = pd.read_sql(f"""
+    fight = read_sql(f"""
         WITH scope AS ({RACE_SCOPE})
         SELECT i.session_key, i.driver_number,
                SUM(CASE WHEN i.interval_seconds < 1.0 THEN 1 ELSE 0 END) AS drs_samples,
@@ -1886,7 +1888,7 @@ def a23_fighting_and_overtakes(d: Diagnostics, ctx) -> None:
         GROUP BY i.session_key, i.driver_number
     """, con)
 
-    made = pd.read_sql(f"""
+    made = read_sql(f"""
         WITH scope AS ({RACE_SCOPE})
         SELECT o.session_key, o.overtaking_driver_number AS driver_number,
                COUNT(*) AS overtakes_made
@@ -1944,7 +1946,7 @@ def a24_radio_and_outcome(d: Diagnostics, ctx) -> None:
     con = ctx["con"]
     dr = drop_excluded_teams(ctx["driver_race"])
 
-    radio = pd.read_sql(f"""
+    radio = read_sql(f"""
         WITH scope AS ({RACE_SCOPE})
         SELECT tr.session_key, tr.driver_number, COUNT(*) AS messages
         FROM scope JOIN silver_team_radio tr ON tr.session_key = scope.session_key
@@ -2125,15 +2127,15 @@ def main() -> int:
     print(f"python: {sys.version.split()[0]}  pandas {pd.__version__}")
     print("=" * 74)
 
-    con = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
-    gold = sqlite3.connect(f"file:{GOLD_DB_PATH}?mode=ro", uri=True)
+    con = duckdb.connect(str(DB_PATH), read_only=True)
+    gold = duckdb.connect(str(GOLD_DB_PATH), read_only=True)
 
     # Both connections stay open during the migration onto gold. The three
     # shared loaders below read gold; the per-test query sites still read
     # silver through ctx["con"] and are moved over one at a time so each move
     # can be checked against the 29 verdicts on its own.
-    n_races = pd.read_sql(f"SELECT COUNT(*) AS n FROM ({GOLD_RACE_SCOPE})",
-                          gold)["n"].iloc[0]
+    n_races = read_sql(f"SELECT COUNT(*) AS n FROM ({GOLD_RACE_SCOPE})",
+                       gold)["n"].iloc[0]
     print(f"\nscope: {n_races} completed races")
 
     started = time.time()
