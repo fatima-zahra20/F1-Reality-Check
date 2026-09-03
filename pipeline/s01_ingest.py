@@ -29,8 +29,10 @@ Two jobs, in order:
    session can be "previously seen" because a calendar entry was registered
    months before it was raced, and a zero recorded then describes nothing.
 
-Telemetry (car_data, location) is never fetched here — ~35M rows covering only
-32 of 490 sessions, unusable as model features. Fetch it manually on demand.
+Telemetry (car_data, location) is never fetched here. It is 43M rows covering a
+minority of the 495 sessions (car_data 38, location 83, as of 2026-08-31), so it
+cannot be a model feature or appear in a season-wide aggregate. Fetch it on
+demand with s01_backfill.py --telemetry.
 
 Usage
 -----
