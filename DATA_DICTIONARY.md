@@ -303,6 +303,16 @@ Comparing 2024 with 2025 on this column compares an 18% sample against an 85% on
 
 `gold_pit` therefore has no duration threshold anywhere. It carries `under_caution`, `is_race_stop` and `is_green_race_stop`, the last being the conformed population for "how long does a pit stop take".
 
+**`is_red_flag_stop`: a record that is kept but never counted.** A race suspension parks the whole field in the pit lane, and `silver_pit` records that, correctly, as time in the lane. It is not a pit stop: nobody chose it and it costs nobody anything relative to anybody else. The column is taken from the `red_flag` that `silver_lap_flags` already derives, so it needs no new join.
+
+This is a **different question from the duration fence above**, and the two are easy to confuse. The fence asks which stops were too slow. This asks which records are stops at all.
+
+- **Anything counting stops excludes it**: `gold_agg_driver_session.n_pit_stops`, `fact_driver_race.pit_stops`, `fact_driver_race.mean_lane_duration`, and tests T07a, T07b and T22.
+- **Nothing deletes it.** The row stays in `silver_pit` and `gold_pit` with its duration, and reaches the dashboard as `fact_event.event_type = 'red_flag_stop'` carrying the compound: *"Red flag, 39 min in the pit lane, MEDIUM to HARD"*.
+- **Expect zeroes.** 16 driver-races read zero pit stops, ten of them at the 2024 Monaco GP where the field changed tyres under the red flag and never stopped again. Zero is the right answer here, and the tyre change is on the timeline rather than lost.
+
+Before this existed, `mean_lane_duration` was computed off unfiltered `silver_pit` and 143 driver-races carried an average above 120 seconds, ten of them reading roughly 2,389s. See NOTES_LOG #65 and question H.
+
 The Tukey fence at `DESCRIPTIVE ANALYTICS/pit_stops_05.sql` was re-derived and is population dependent: **36.76s** over all race stops, **29.65s** over green ones only. A number that moves with the query is a local choice, so it stays at that call site rather than becoming a property of the data.
 
 ### `silver_position`
@@ -575,7 +585,7 @@ This is the source for `map_measured_xy` and `map_circuit_outline` in the dashbo
 |---|---|---|
 | `gold_lap` | `(session_key, driver_number, lap_number)` | The wide lap fact. Session, meeting, team and driver context on the row, so the laps-to-sessions-to-meetings join disappears. Carries `is_valid_lap`, `is_representative_lap`, `pace_ratio`, the caution flags, tyre `compound` and `tyre_age`, and lap-start state (`position`, both gaps) |
 | `gold_stint` | `(session_key, driver_number, stint_number)` | `is_phantom_stint`, `overlaps_previous`, `gap_from_previous`, `has_known_compound`, `is_valid_stint` |
-| `gold_pit` | one row per stop | `under_caution`, `is_race_stop`, `is_green_race_stop`, `has_stop_duration`. No duration threshold anywhere |
+| `gold_pit` | one row per stop | `under_caution`, `is_race_stop`, `is_green_race_stop`, `is_red_flag_stop`, `has_stop_duration`. No duration threshold anywhere |
 | `gold_session_result` | `(session_key, driver_number)` | Result plus the grid it started from, which needs a hop out to the meeting and back into Qualifying. `positions_gained`, `classified`, `has_grid` |
 | `gold_weather` | `(session_key, date)` | |
 | `gold_overtake` | one row per pass | Both drivers' teams conformed, plus `same_team` |

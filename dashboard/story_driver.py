@@ -336,10 +336,28 @@ def _pits(session_key: int, me: pd.Series) -> None:
                   else None, delta_color="inverse")
 
     if stops.empty:
-        st.caption(
-            "No individual pit records for this driver. Pit coverage is "
-            f"incomplete: {coverage_gaps('pit_stop')} have none."
-        )
+        # Two very different reasons for an empty chart, and saying the wrong one
+        # is worse than saying nothing. A driver held in the pit lane by a red
+        # flag has a record; it is simply not a pit stop, so it is not counted
+        # and not plotted. Blaming that on missing coverage would send someone
+        # looking for a data gap that is not there.
+        held = query("""
+            SELECT detail FROM fact_event
+            WHERE session_key = ? AND driver_number = ?
+              AND event_type = 'red_flag_stop'
+            ORDER BY lap_number
+        """, (session_key, int(me.driver_number)))
+        if len(held):
+            st.caption(
+                "This driver made no pit stop in this race. The race was "
+                "red-flagged and the car was held in the pit lane: "
+                + "; ".join(held.detail) + "."
+            )
+        else:
+            st.caption(
+                "No individual pit records for this driver. Pit coverage is "
+                f"incomplete: {coverage_gaps('pit_stop')} have none."
+            )
         return
 
     # Judge a bad stop against the field on the day, not a fixed number: pit

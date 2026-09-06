@@ -633,6 +633,12 @@ def build_pit(con) -> pd.DataFrame:
     """
     Pit stops, with each stop joined to the caution state of its own lap.
 
+    WHY A RED-FLAG RECORD IS KEPT BUT NOT COUNTED. See is_red_flag_stop below.
+    Every row survives; what changes is that anything counting stops filters it
+    out. That is deliberate and not the same as a duration fence: the fence
+    question below is about which stops are too slow, this one is about which
+    records are stops at all.
+
     WHY THERE IS NO DURATION FENCE. The inventory listed "pit duration outliers
     up to 16,921s" as something gold should filter. Measuring them showed they
     are not errors. 96.4% of race stops over 60 seconds happened under a
@@ -675,6 +681,13 @@ def build_pit(con) -> pd.DataFrame:
     p["under_caution"] = p.neutralised.fillna(0).astype(int)
     p["has_stop_duration"] = p.stop_duration.notna().astype(int)
     p["is_race_stop"] = (p.session_name == "Race").astype(int)
+    # A race suspension parks the whole field in the pit lane and silver_pit
+    # records it, correctly, as time in the lane. It is not a pit stop: nobody
+    # chose it and it costs nobody anything relative to anybody else. Carried as
+    # a label rather than a deletion, because the car really was in the lane and
+    # a red-flag tyre change is a genuine strategic event. Consumers that count
+    # stops exclude it; consumers that describe what happened keep it.
+    p["is_red_flag_stop"] = p.red_flag.fillna(0).astype(int)
     # The conformed population for "how long does a pit stop take".
     p["is_green_race_stop"] = ((p.is_race_stop == 1)
                                & (p.under_caution == 0)
@@ -941,7 +954,10 @@ def build_agg_driver_session(gold: dict) -> pd.DataFrame:
     out = out.merge(st_agg, on=["session_key", "driver_number"], how="left")
 
     pit = gold["gold_pit"]
-    pit_all = pit.groupby(["session_key", "driver_number"]).agg(
+    # is_red_flag_stop excluded: see build_pit. Without this the count is one too
+    # high for every driver in each of the 14 red-flagged races since 2023.
+    pit_all = pit[pit.is_red_flag_stop == 0].groupby(
+        ["session_key", "driver_number"]).agg(
         n_pit_stops=("lap_number", "size"))
     pit_green = pit[pit.is_green_race_stop == 1].groupby(
         ["session_key", "driver_number"]).agg(

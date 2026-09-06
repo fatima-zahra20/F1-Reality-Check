@@ -1708,6 +1708,66 @@ re-fetching every endpoint into a database nothing reads and reported success. T
 imports config; the second refuses to run. *Neither would ever have raised.*
 
 
+### 65. A red flag is not a pit stop, and the average that proved it
+
+*2026-09-06. Question H, closed. Five files. The count was the reported bug; the average
+was the one nobody had looked at.*
+
+The known problem was that `fact_driver_race.pit_stops` read one too high for every driver
+in a red-flagged race, because a suspension parks the field in the pit lane and `silver_pit`
+records that as time in the lane. 14 races since 2023, so not a rounding error.
+
+**The unreported half was worse.** `s04` also computed `mean_lane_duration` from unfiltered
+`silver_pit`, and the driver page renders it as "Average time in lane". Ten drivers at the
+2024 Monaco GP were showing **2,389 seconds**, a forty minute average over one record, and
+143 driver-races across 11 races were above 120s. It had been live since the page was
+built. Nobody reported it because nobody scrolls to a number that is obviously absurd and
+then doubts it; you assume you misread the units.
+
+**The fix was cheaper than the note that described it.** That note proposed building a
+range overlap against `silver_caution_periods`. But `gold_pit` already joined
+`silver_lap_flags` and already carried `red_flag`. Measured against the 162 long records:
+the existing column catches 156, a fresh overlap catches 155, both together 157, and the 5
+neither catches are single cars in sessions with no red flag at all, which are garage
+repairs and correctly excluded. **The overlap was not built.** It buys one record for the
+price of a join, against a column already sitting on the table.
+
+**A separate event type did the dashboard's work for it.** Red-flag records emit as
+`event_type = 'red_flag_stop'` rather than `'pit_stop'`. Five queries across
+`story_driver`, `story_race` and `story_team` already filtered on `'pit_stop'`, so the
+records dropped out of every stop chart and every field median with nothing changing there.
+Renaming only the `detail` string would have left all five wrong.
+
+**Nothing was deleted, which was the explicit requirement.** Every row survives in
+`silver_pit` and `gold_pit` with its duration, and the timeline still carries it: *"Red
+flag, 39 min in the pit lane, MEDIUM to HARD"*. For 2024 Monaco that is the whole story of
+the race, and a count alone would have destroyed it.
+
+**Two bugs found in my own work before shipping, both by checking rather than by failing.**
+The tyre lookup was wrong twice. `lap_number BETWEEN lap_start AND lap_end` returns the new
+tyre as the old one, because a stop on lap N opens the new stint at lap N. Switching to
+`lap_start >= lap_number` then breaks on a lap-1 suspension: at Monaco 2024 car 4 the
+stints are MEDIUM (1-1) and HARD (1-78), *both starting at lap 1*, so it reported the grid
+tyre as the new one and the page would have read "took MEDIUM" for a car that went onto
+HARDs. `lap_end` splits them correctly and all 163 records were then checked against
+`silver_stints`, 0 disagreements.
+
+**And one thing deliberately not done.** `audit_consumer_rules` looked like the right home
+for "red flag is not a pit stop", but its matchers run line by line and the filter spans
+several lines, so the entry would have been dead code that made the report look greener
+than the code was. Removed again rather than contrived into matching.
+
+T07a, T07b and T22 also stopped counting suspensions. T22's own caption had documented
+this as a known limitation, that red-flag holds "are counted as disasters here, which
+slightly inflates rates" — a stewards' decision charged to a pit crew. The caveat is gone
+because the cause is.
+
+Left open as questions I and J: three garage repairs that are still counted as green-flag
+stops, and `pit_flag` in the Safety Car model. Both are written up with what was measured
+and, for I, with the structural rule that was tried and failed, so neither restarts from
+scratch.
+
+
 ## Open questions
 
 ### A. `caution_flag` under-detects Safety Car periods
@@ -1858,7 +1918,53 @@ anything.
 
 ### H. A red flag is recorded as a pit stop
 *Raised 2026-08-23, see #63. Present since 2023, found only when a known answer was
-checked against the page.*
+checked against the page. **RESOLVED 2026-09-06, see #65.** The original entry is kept
+below the resolution for the trail.*
+
+**Resolved: a red-flag record is labelled, kept, and not counted.** `gold_pit` carries
+`is_red_flag_stop`, taken from the `red_flag` that `silver_lap_flags` already derived, and
+everything that counts stops filters it out. No row is deleted at any layer.
+
+The damage was larger than this entry estimated, because it assumed only the count was
+wrong. `s04` also computed `mean_lane_duration` off unfiltered `silver_pit`, and the
+driver page renders that as "Average time in lane". **143 driver-races across 11 races
+carried a figure above 120 seconds**, and ten drivers at the 2024 Monaco GP read 2,389s,
+a forty minute average over a single record. 143 timeline entries read "Pit stop, 2485.9s
+in lane". Both are now 5, and those 5 are the separate garage-repair problem in question I.
+
+**What the fix touches.** `s07` gains the column and filters `n_pit_stops`; `s04` filters
+`pit_stops` and `mean_lane_duration`, and emits red-flag records under a new
+`event_type = 'red_flag_stop'`; `s05` excludes them from T07a, T07b and T22, where the
+Tukey fence had been swallowing them and reporting a stewards' decision as a pit crew
+disaster. The separate event type is what fixed the dashboard without touching it: five
+queries already filtered `event_type = 'pit_stop'`, so the records left those charts on
+their own.
+
+**Which method was chosen and why.** The entry below proposed a range overlap against
+`silver_caution_periods`. Both were measured against the 162 long records: the lap
+`red_flag` column catches 156, the overlap catches 155, together 157. The 5 neither
+catches are single cars in sessions with no red flag at all. The overlap was therefore
+**not** used: it buys one record for the price of a join, and the column already existed.
+
+**The visible consequence to expect.** 16 driver-races now read zero pit stops, ten of
+them at the 2024 Monaco GP, where the race was red-flagged and most of the field changed
+tyres during the suspension and never stopped again. Zero is the correct answer under this
+rule and the tyre change is not lost: it is on the timeline as "Red flag, 39 min in the
+pit lane, MEDIUM to HARD". The driver and team pages say so explicitly rather than falling
+through to the "coverage is incomplete" message, which would have blamed a data gap that
+does not exist.
+
+**One trap for anyone touching the tyre lookup.** It splits stints on `lap_end`, not
+`lap_start`. A stop on lap N opens the new stint at lap N, so `lap_number BETWEEN
+lap_start AND lap_end` returns the new tyre as the old one. Switching to `lap_start >=
+lap_number` then fails on a lap-1 suspension: at Monaco 2024 car 4 the stints are MEDIUM
+(1-1) and HARD (1-78), both starting at lap 1, so it reported the grid tyre as the new
+one. `lap_end` is correct in every case and all 163 records were checked against
+`silver_stints` after the change.
+
+---
+
+*Original entry, 2026-08-23:*
 
 `silver_pit` records time in the pit lane, and a race suspension puts the whole field in
 the pit lane. Nothing in the data distinguishes the two, so a red flag arrives as a pit
@@ -1886,3 +1992,45 @@ questions A and B.
 **Do not simply drop these rows.** The car really was in the pit lane, and for tyre
 strategy a red-flag tyre change is a real event with real consequences. The requirement is
 to tell the two apart, not to delete one.
+
+### I. A long garage repair is still recorded as a green-flag pit stop
+*Raised 2026-09-06 while resolving question H, which fixed the red-flag case and left
+this one visible.*
+
+Three race records show a car in the pit lane for 13 to 18 minutes with **no caution
+flying at all**, so nothing excludes them and they sit in the green-flag stop population:
+
+| Race | Car | In lane | Lap | |
+|---|---|---|---|---|
+| 2026 Australia | 14 | 972s | 13 | retired later |
+| 2026 Australia | 18 | 1,082s | 34 | |
+| 2026 Barcelona | 23 | 778s | 34 | |
+
+**Effect, measured.** Mean green race stop 25.60s with them, 24.22s without. Median does
+not move at all. 99th percentile 41.15s against 40.11s. The one genuinely bad number is
+the maximum, 1,081.5s, so the dashboard can report an 18 minute green-flag pit stop.
+
+**What was tried and rejected.** A structural rule, "a car that entered the pit lane and
+never completed another lap did not make a pit stop, it retired into the garage." It is
+wrong: all three came back out and drove 8, 9 and 21 more laps. They are repairs, not
+retirements. Applied to the data the rule catches exactly one record, an ordinary 22.5s
+stop, and misses all three.
+
+**Why no threshold was written.** A duration ceiling is the only tool left, and the
+tempting justification is that nothing lives between 74.7s and 778s so any value in that
+gap removes the same three rows. That is true of today's sample and not of next week's,
+on a pipeline that runs unattended twice a week. T22's Tukey fence is quartile-based and
+already robust to these, so the practical damage is confined to a maximum nobody
+currently displays. Deliberately left open rather than fixed with a constant that has no
+principled value.
+
+### J. `pit_flag` still counts a red-flag lap as a lap the driver pitted
+*Raised 2026-09-06, deliberately not changed while resolving question H.*
+
+The position-swing analysis in `s05` builds `pit_flag` from `silver_pit` with no red-flag
+filter, unlike T07a and T22 which now exclude them. It was left alone because the variable
+means "the car was in the pit lane on this lap", which stays true under a suspension, and
+it is a control in a model about Safety Car position swings rather than a statement about
+pit strategy. Worth revisiting if that model is ever reworked: under a red flag the field
+is reordered administratively, so attributing those position changes to pitting is the
+kind of thing that would quietly bias the coefficient.

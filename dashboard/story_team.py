@@ -264,10 +264,26 @@ def _pits(session_key: int, cars: pd.DataFrame) -> None:
         (session_key,))
 
     if stops.empty:
-        st.caption(
-            "No individual pit records for either car. Pit coverage is "
-            f"incomplete: {coverage_gaps('pit_stop')} have none."
-        )
+        # Same distinction as the driver page: a red-flag hold is a record that
+        # is deliberately not counted as a stop, not a hole in the data.
+        held = query("""
+            SELECT detail FROM fact_event
+            WHERE session_key = ? AND event_type = 'red_flag_stop'
+              AND driver_number IN ({})
+            ORDER BY driver_number, lap_number
+        """.format(",".join(str(int(n)) for n in cars.driver_number)),
+            (session_key,))
+        if len(held):
+            st.caption(
+                "Neither car made a pit stop in this race. It was red-flagged "
+                "and both were held in the pit lane: "
+                + "; ".join(held.detail) + "."
+            )
+        else:
+            st.caption(
+                "No individual pit records for either car. Pit coverage is "
+                f"incomplete: {coverage_gaps('pit_stop')} have none."
+            )
         return
 
     st.dataframe(
