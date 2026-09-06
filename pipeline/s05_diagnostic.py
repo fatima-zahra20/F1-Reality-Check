@@ -841,6 +841,10 @@ def a07_pit_lane_by_team(d: Diagnostics, ctx) -> None:
     almost no data.
     """
     con = ctx["con"]
+    # red_flag = 0: a car held in the lane by a race suspension is not a pit
+    # stop, so it is not part of "how long does a team's pit stop take". The
+    # Tukey fence used to swallow these anyway and report them as disasters,
+    # which attributed a stewards' decision to a pit crew.
     pits = read_sql(f"""
         WITH scope AS ({RACE_SCOPE})
         SELECT p.session_key, p.driver_number, p.lap_number, p.lane_duration,
@@ -851,7 +855,12 @@ def a07_pit_lane_by_team(d: Diagnostics, ctx) -> None:
         JOIN silver_meetings m ON m.meeting_key = s.meeting_key
         JOIN silver_drivers d
           ON d.session_key = p.session_key AND d.driver_number = p.driver_number
+        LEFT JOIN silver_lap_flags lf
+          ON  lf.session_key   = p.session_key
+          AND lf.driver_number = p.driver_number
+          AND lf.lap_number    = p.lap_number
         WHERE p.lane_duration IS NOT NULL
+          AND COALESCE(lf.red_flag, 0) = 0
     """, con)
     pits = drop_excluded_teams(normalize_teams(pits))
 
@@ -1813,6 +1822,9 @@ def a22_disaster_stop_concentration(d: Diagnostics, ctx) -> None:
     """
     con = ctx["con"]
 
+    # red_flag = 0, for two reasons. A suspension is not a disaster stop, and
+    # leaving it in also shifted stop_number: a red-flag row consumed an ordinal,
+    # so a driver's genuine second stop was counted as their third.
     pits = read_sql(f"""
         WITH scope AS ({RACE_SCOPE})
         SELECT p.session_key, p.driver_number, p.lap_number, p.lane_duration,
@@ -1821,7 +1833,12 @@ def a22_disaster_stop_concentration(d: Diagnostics, ctx) -> None:
         JOIN silver_pit p ON p.session_key = scope.session_key
         JOIN silver_drivers d
           ON d.session_key = p.session_key AND d.driver_number = p.driver_number
+        LEFT JOIN silver_lap_flags lf
+          ON  lf.session_key   = p.session_key
+          AND lf.driver_number = p.driver_number
+          AND lf.lap_number    = p.lap_number
         WHERE p.lane_duration IS NOT NULL
+          AND COALESCE(lf.red_flag, 0) = 0
     """, con)
     pits = drop_excluded_teams(normalize_teams(pits))
 
@@ -1860,10 +1877,10 @@ def a22_disaster_stop_concentration(d: Diagnostics, ctx) -> None:
            "The differences are not statistically distinguishable from chance."),
         f"A disaster is defined by this dataset's own upper Tukey fence "
         f"({fence:.2f}s), not a fixed number of seconds. lane_duration is used "
-        "because stop_duration covers only 3.5% of stops. Multi-minute values are "
-        "cars held in the lane under a red flag (NOTES_LOG #18), and they are "
-        "counted as disasters here, which slightly inflates rates for teams that "
-        "happened to be in the pits when a race was stopped.",
+        "because stop_duration covers only 3.5% of stops. Cars held in the lane "
+        "under a red flag are excluded before the fence is derived, so a race "
+        "suspension is no longer charged to the pit crew of whoever happened to "
+        "be in the pits when it happened.",
     )
 
 

@@ -339,12 +339,35 @@ def build_fact_driver_race(con) -> pd.DataFrame:
     df["was_lapped"] = df["gap_to_leader_laps"].notna().astype(int)
 
     # --- pit stops ---
+    # RED FLAGS ARE NOT PIT STOPS. A race suspension puts the whole field in the
+    # pit lane and silver_pit records that, correctly, as time in the lane. It is
+    # not a stop: nobody chose it, it costs nobody anything relative to anybody
+    # else, and counting it inflates every driver's total by one in the 14 races
+    # since 2023 that were red-flagged.
+    #
+    # Left unfiltered it also destroyed mean_lane_duration, which the driver page
+    # renders as "Average time in lane". Ten drivers at the 2024 Monaco GP read
+    # 2,389s, a forty minute average over a single recorded stop. 143 driver-races
+    # across 11 races carried a figure above 120s.
+    #
+    # The exclusion is silver_lap_flags.red_flag, which s02b already derives from
+    # range-based caution periods. Measured: it identifies 156 of the 162 long
+    # records; the 6 it does not are single cars in sessions with no red flag at
+    # all, which are garage repairs and genuinely not suspensions. The rows are
+    # NOT dropped anywhere. They stay in silver_pit and in gold_pit, they keep
+    # their duration, and build_fact_event still puts them on the timeline under
+    # their own event type. Only the counter and the average stop seeing them.
     pits = read_sql(f"""
         WITH scope AS ({RACE_SCOPE})
         SELECT p.session_key, p.driver_number,
                COUNT(*)                        AS pit_stops,
                ROUND(MEDIAN_PLACEHOLDER, 3)    AS median_lane_duration
         FROM scope JOIN silver_pit p ON p.session_key = scope.session_key
+        LEFT JOIN silver_lap_flags f
+          ON  f.session_key   = p.session_key
+          AND f.driver_number = p.driver_number
+          AND f.lap_number    = p.lap_number
+        WHERE COALESCE(f.red_flag, 0) = 0
         GROUP BY p.session_key, p.driver_number
     """.replace("ROUND(MEDIAN_PLACEHOLDER, 3)", "AVG(p.lane_duration)"), con)
     pits = pits.rename(columns={"median_lane_duration": "mean_lane_duration"})
@@ -650,16 +673,77 @@ def build_fact_event(con) -> pd.DataFrame:
     # '?' to DOUBLE". Casting first makes both branches text, which is what the
     # string being built wanted anyway. Verified to produce SQLite's exact output
     # on both a populated and a null row.
+    # A red-flag record gets its own event_type rather than being dropped or
+    # relabelled in place. The car really was in the pit lane and for tyre
+    # strategy a red-flag change is a real event, so the row stays on the
+    # timeline with its duration and the compound it produced.
+    #
+    # The separate type is also what fixes the dashboard for free: five queries
+    # across story_driver, story_race and story_team already filter
+    # `event_type = 'pit_stop'`, so a record that is no longer that type drops
+    # out of every stop chart and every field median without a line changing
+    # there. Renaming only the `detail` text would have left all of them wrong.
     pits = read_sql(f"""
         WITH scope AS ({RACE_SCOPE})
-        SELECT p.session_key, p.driver_number, p.lap_number, p."date" AS event_time,
-               'pit_stop' AS event_type,
-               'Pit stop, ' || COALESCE(CAST(ROUND(p.lane_duration, 1) AS VARCHAR), '?')
-                            || 's in lane' AS detail,
-               p.lane_duration AS value
+        SELECT p.session_key, p.driver_number, p.lap_number,
+               p."date" AS event_time,
+               p.lane_duration,
+               COALESCE(f.red_flag, 0) AS red_flag,
+               -- Split on lap_end, not lap_start. Two rules were wrong before
+               -- this one. "p.lap_number BETWEEN lap_start AND lap_end" fails
+               -- because a stop on lap N opens the new stint at lap N, so the
+               -- pit lap belongs to the stint being started. "lap_start >=
+               -- p.lap_number" then fails on a lap-1 suspension: at Monaco 2024
+               -- car 4 the stints are MEDIUM (1-1) and HARD (1-78), both with
+               -- lap_start = 1, so it returned the grid tyre as the new one and
+               -- the timeline would have read "took MEDIUM" for a car that went
+               -- onto HARDs. lap_end separates them cleanly in every case,
+               -- because the old stint is the one that ends on or before the
+               -- pit lap and the new stint is the one still running after it.
+               (SELECT b.compound FROM silver_stints b
+                 WHERE b.session_key   = p.session_key
+                   AND b.driver_number = p.driver_number
+                   AND b.lap_end <= p.lap_number
+                 ORDER BY b.stint_number DESC LIMIT 1) AS tyre_before,
+               (SELECT a.compound FROM silver_stints a
+                 WHERE a.session_key   = p.session_key
+                   AND a.driver_number = p.driver_number
+                   AND a.lap_end > p.lap_number
+                 ORDER BY a.stint_number LIMIT 1) AS tyre_after
         FROM scope JOIN silver_pit p ON p.session_key = scope.session_key
+        LEFT JOIN silver_lap_flags f
+          ON  f.session_key   = p.session_key
+          AND f.driver_number = p.driver_number
+          AND f.lap_number    = p.lap_number
     """, con)
-    frames.append(pits)
+
+    def _pit_detail(row) -> str:
+        secs = row.lane_duration
+        if row.red_flag == 1:
+            held = "?" if pd.isna(secs) else f"{secs / 60:.0f} min"
+            # tyre_after comes from a stint that starts at or after this lap, so
+            # its presence already means a new stint began. Same compound is
+            # therefore a fresh set of the same tyre, not "no change" — which is
+            # exactly what happened at Zandvoort 2023, where the whole field took
+            # new intermediates in the rain.
+            before, after = row.tyre_before, row.tyre_after
+            if pd.isna(after):
+                tyres = ""
+            elif pd.isna(before):
+                tyres = f", took {after}"
+            elif before == after:
+                tyres = f", fresh {after}"
+            else:
+                tyres = f", {before} to {after}"
+            return f"Red flag, {held} in the pit lane{tyres}"
+        return f"Pit stop, {'?' if pd.isna(secs) else round(secs, 1)}s in lane"
+
+    pits["event_type"] = pits.red_flag.eq(1).map(
+        {True: "red_flag_stop", False: "pit_stop"})
+    pits["detail"] = pits.apply(_pit_detail, axis=1)
+    pits["value"] = pits.lane_duration
+    frames.append(pits.drop(columns=["lane_duration", "red_flag",
+                                     "tyre_before", "tyre_after"]))
 
     ot_made = read_sql(f"""
         WITH scope AS ({RACE_SCOPE})
