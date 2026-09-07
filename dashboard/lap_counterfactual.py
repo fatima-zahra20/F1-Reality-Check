@@ -66,12 +66,13 @@ GAP_CAP_SECONDS = 10.0
 
 # --- data --------------------------------------------------------------------------
 
-@st.cache_data(show_spinner=False)
+# No @st.cache_data: query() caches these already, keyed on the bundle. The
+# decorator that used to be here carried no ttl and so never released the first
+# bundle the app read. See race_map.coverage.
 def model() -> pd.DataFrame:
     return query("SELECT * FROM lap_counterfactual_model")
 
 
-@st.cache_data(show_spinner=False)
 def bounds(session_key: int) -> pd.DataFrame:
     return query("""
         SELECT * FROM lap_counterfactual_bounds

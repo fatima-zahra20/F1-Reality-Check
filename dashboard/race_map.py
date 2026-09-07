@@ -27,7 +27,8 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-from app_common import NEUTRAL, fmt_gap, fmt_lap, query, team_colours
+from app_common import (BUNDLE_TTL, NEUTRAL, bundle_token, fmt_gap, fmt_lap,
+                        query, team_colours)
 from theme import ACCENT, ink
 
 SECTOR_CHOICES = ["All of the lap", "Sector 1", "Sector 2", "Sector 3"]
@@ -62,13 +63,21 @@ ANCHOR_FALLBACK = "the leader starting the lap"
 
 # --- data ------------------------------------------------------------------------
 
-@st.cache_data(show_spinner=False)
+# NO SECOND CACHE ON THE THIN WRAPPERS. query() already caches, keyed on the
+# bundle. An extra @st.cache_data here with no ttl was the Italian GP bug: the
+# outer cache never expired, so the query() inside it was never called again and
+# this table stayed on whatever bundle the app first loaded, for the life of the
+# process. The page then showed a race that only the new bundle knew about and
+# simultaneously reported it missing from the coverage table.
 def coverage() -> pd.DataFrame:
     return query("SELECT * FROM map_coverage ORDER BY year, session_key")
 
 
-@st.cache_data(show_spinner=False)
-def outline(circuit_key: int) -> pd.DataFrame:
+# These three DO keep a cache, because they do real work on top of the read that
+# is worth not repeating. They take the bundle token so the cache dies with the
+# bundle rather than living forever.
+@st.cache_data(ttl=BUNDLE_TTL, show_spinner=False)
+def _outline(circuit_key: int, bundle: str) -> pd.DataFrame:
     df = query("""
         SELECT seq, x, y, z, path_fraction, time_fraction,
                source_session, source_lap_duration
@@ -80,9 +89,12 @@ def outline(circuit_key: int) -> pd.DataFrame:
     return df
 
 
-@st.cache_data(show_spinner=False)
-def measured_positions(session_key: int) -> pd.DataFrame:
-    """Recorded x/y/z for the races that have it. Empty for the rest."""
+def outline(circuit_key: int) -> pd.DataFrame:
+    return _outline(circuit_key, bundle_token())
+
+
+@st.cache_data(ttl=BUNDLE_TTL, show_spinner=False)
+def _measured_positions(session_key: int, bundle: str) -> pd.DataFrame:
     df = query("""
         SELECT driver_number, date, lap_number, x, y, z
         FROM map_measured_xy WHERE session_key = ? ORDER BY date
@@ -90,6 +102,11 @@ def measured_positions(session_key: int) -> pd.DataFrame:
     if len(df):
         df["date"] = pd.to_datetime(df["date"], format="ISO8601", utc=True)
     return df
+
+
+def measured_positions(session_key: int) -> pd.DataFrame:
+    """Recorded x/y/z for the races that have it. Empty for the rest."""
+    return _measured_positions(session_key, bundle_token())
 
 
 # Recorded samples are thinned to roughly one every 2.4s, so anything inside
@@ -138,9 +155,8 @@ def has_elevation(path: pd.DataFrame) -> bool:
     return path.z.notna().any() and float(path.z.max() - path.z.min()) > 0.5
 
 
-@st.cache_data(show_spinner=False)
-def race_laps(session_key: int) -> pd.DataFrame:
-    """Every lap of one race, with the driver and team resolved."""
+@st.cache_data(ttl=BUNDLE_TTL, show_spinner=False)
+def _race_laps(session_key: int, bundle: str) -> pd.DataFrame:
     df = query("""
         SELECT l.*, d.full_name, d.name_acronym, r.team_name
         FROM fact_lap l
@@ -158,6 +174,11 @@ def race_laps(session_key: int) -> pd.DataFrame:
     df["driver"] = df.full_name.fillna(
         df.name_acronym.fillna("Car " + df.driver_number.astype(str)))
     return df
+
+
+def race_laps(session_key: int) -> pd.DataFrame:
+    """Every lap of one race, with the driver and team resolved."""
+    return _race_laps(session_key, bundle_token())
 
 
 # --- placement -------------------------------------------------------------------

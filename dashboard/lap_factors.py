@@ -109,29 +109,29 @@ def derive(lap) -> dict:
 
 # --- data ------------------------------------------------------------------------
 
-@st.cache_data(show_spinner=False)
+# No @st.cache_data on any of these. They are one query() call each, and query()
+# already caches keyed on the bundle. A second cache here bought nothing and,
+# because none of them carried a ttl, it never expired: the table stayed on
+# whatever bundle the app first loaded until the process restarted. See the note
+# in race_map.coverage, where that failure was actually visible on the page.
 def anova() -> pd.DataFrame:
     return query("SELECT * FROM lap_factor_anova ORDER BY rank")
 
 
-@st.cache_data(show_spinner=False)
 def coefficients() -> pd.DataFrame:
     return query("SELECT * FROM lap_factor_model")
 
 
-@st.cache_data(show_spinner=False)
 def reference(session_key: int) -> pd.DataFrame:
     return query("SELECT * FROM lap_factor_reference WHERE session_key = ?",
                  (int(session_key),))
 
 
-@st.cache_data(show_spinner=False)
 def tow() -> pd.DataFrame:
     """Top speed and DRS usage by gap to the car ahead. Six races only."""
     return query("SELECT * FROM telemetry_tow")
 
 
-@st.cache_data(show_spinner=False)
 def telemetry() -> pd.DataFrame:
     """DRS coefficients and the diagnostics that qualify them."""
     return query("SELECT * FROM telemetry_effect")

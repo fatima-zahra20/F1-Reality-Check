@@ -289,15 +289,46 @@ def get_connection() -> "duckdb.DuckDBPyConnection":
     return _open(target)
 
 
-# Same TTL as the connection, deliberately. Without it these results would
-# outlive the bundle they were read from: the connection would quietly move to
-# newly published data while every chart on the page went on showing values
-# cached from the old one, which is the original bug wearing a different hat.
-@st.cache_data(ttl=BUNDLE_TTL, show_spinner=False)
+def bundle_token() -> str:
+    """
+    A string that changes exactly when the bundle being served changes.
+
+    Every cached read is keyed on this, which is what makes a publish arrive as
+    one coherent dataset rather than a mixture.
+
+    A matching TTL was tried first and is not enough. Two entries with the same
+    ttl expire 900 seconds after their OWN fill, not at a shared moment, so a
+    page could refresh `dim_race` while still holding `map_coverage` from the
+    bundle before it. That is exactly what shipped: the Italian GP appeared in
+    the race picker while the same page reported the race missing from the map
+    coverage table, because the two answers came from two different files.
+
+    Mirrors the branch in get_connection so the token cannot disagree with the
+    file actually opened. Locally the bundle is a real file and its mtime moves
+    when the pipeline rewrites it; deployed there is no local file and the
+    Release's own ETag identifies it.
+    """
+    if LOCAL_DB.exists():
+        return f"local:{LOCAL_DB.stat().st_mtime_ns}"
+    return _asset_stamp()
+
+
 def query(sql: str, params: tuple = ()) -> pd.DataFrame:
     """
-    Run a query and get a DataFrame back. Same signature as before, same `?`
-    placeholders, so no page needed changing.
+    Run a query and get a DataFrame back.
+
+    A thin wrapper so callers never have to pass the bundle token themselves.
+    The caching happens in _query, keyed on the token as well as the SQL.
+    """
+    return _query(sql, params, bundle_token())
+
+
+@st.cache_data(ttl=BUNDLE_TTL, show_spinner=False)
+def _query(sql: str, params: tuple, bundle: str) -> pd.DataFrame:
+    """
+    The cached read. `bundle` is never used in the body: it is here purely to
+    be part of the cache key, so that a new bundle invalidates every stored
+    result at once instead of each expiring on its own schedule.
 
     NOT pd.read_sql. It accepts a DuckDB connection and works, but it goes
     through the DB-API and builds Python objects one row at a time; .df() goes

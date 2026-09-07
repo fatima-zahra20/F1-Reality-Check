@@ -1768,6 +1768,66 @@ and, for I, with the structural rule that was tried and failed, so neither resta
 scratch.
 
 
+### 66. The dashboard served two bundles at once, and had been for months
+
+*2026-09-07. Found by looking at the Italian GP page an hour after publishing it.
+Four files.*
+
+**The symptom.** The race map page showed the Italian Grand Prix in its picker, named
+Monza, dated 6 September, 53 laps, and directly underneath said *"No track map for this
+circuit. This race is not in the map coverage table."* Both statements came from the same
+page render.
+
+**The data was never wrong.** Checked against the published file itself, not the local
+copy: `dim_race` 83 rows, `map_coverage` 83 rows, the Italian GP present in both with
+`has_outline = 1`, `circuit_short_name = Monza`, `north_rotation = 95`, and a 400 point
+outline. No race in `dim_race` was missing from `map_coverage`. So the page was reporting
+a state the bundle did not contain, which is only possible if two bundles were in play.
+
+**The cause.** `race_map.coverage()` was decorated `@st.cache_data(show_spinner=False)`
+with **no ttl**. `query()` underneath it is correctly ttl'd, but that never mattered: the
+outer cache never expired, so `query()` was never called a second time and the table
+stayed on whatever bundle the app first loaded for the life of the process. `dim_race`
+goes through `query()` directly and did refresh. One page, two bundles.
+
+**It was eleven functions, not one.** `coverage`, `outline`, `measured_positions`,
+`race_laps`, `anova`, `coefficients`, `reference`, `tow`, `telemetry`, `model`, `bounds`.
+Everything the "Prescribe a lap" page reads was frozen at first load. Only `app_common`
+had it right.
+
+**My first diagnosis was wrong and worth recording.** I said matching ttls had drifted
+apart, because two entries with the same ttl expire 900s after their own fill rather than
+at a shared moment. That is true, and it is a real weakness, but it was not this bug: the
+user waited past 15 minutes and nothing changed, which is what pointed at a cache with no
+expiry at all. The waiting disproved it, not the reading.
+
+**The fix is a token, not a timer.** `app_common.bundle_token()` returns a string that
+changes exactly when the served bundle changes, mirroring the branch in `get_connection`
+so the two cannot disagree: the local file's mtime when there is one, the Release's ETag
+when there is not. `query()` passes it to a cached `_query(sql, params, bundle)`, where
+`bundle` is unused in the body and exists only to be part of the key. A new bundle
+therefore invalidates every stored result at once, and a mixed render becomes impossible
+rather than merely unlikely.
+
+The eight thin wrappers lost their decorators outright: one `query()` call each, already
+cached, and the second cache bought nothing but staleness. The three that do real work on
+top of the read (`outline`, `measured_positions`, `race_laps`) kept a cache and take the
+token.
+
+**Verified by measurement, after a first attempt that measured nothing.** Counting calls
+by replacing `_query` with a wrapper proved only that an undecorated function runs every
+time. Counting `get_connection` instead, which the cached body calls and a cache hit
+skips, gives the real answer: same token 1 call then 1, changed token 2, repeat 2, and
+back to the first token still 2. Cache intact, invalidation correct.
+
+**What this had been costing.** Every publish since the app was built reached visitors
+only for the tables `app_common` read directly. The map, the lap factors and the
+counterfactual all held the first bundle their container ever downloaded until Streamlit
+happened to restart it. The August "site is frozen" incident was diagnosed as an asset
+name mismatch and it was, but this would have produced the same appearance on those pages
+regardless.
+
+
 ## Open questions
 
 ### A. `caution_flag` under-detects Safety Car periods
