@@ -1843,13 +1843,19 @@ showed nothing at all, and the mention only appeared in the one-fifth minority. 
 request was to put it directly under the stop count, which is exactly where the missing
 four fifths belong.
 
-Now on all three pit sections, directly beneath the count:
+**A caption was not enough, and the second look was right.** The first version put one
+line under the count. Looking at Antonelli's Monza page it was still easy to miss: the
+count says 1, the table shows one row, and a grey sentence between them does not read as
+"there is another half to this". The section is now **split in two on all three pages**,
+each with a heading and its own table:
 
-- **Driver:** `Not counted as a pit stop: Red flag, 31 min in the pit lane, SOFT to MEDIUM.`
-- **Team:** the same, per car, because that section exists to compare two cars and "one of
-  them changed tyres under the red flag" is not a difference to pool away.
-- **Race:** a summary, `21 cars were held in the pit lane under a red flag`, pointing at
-  the driver pages for the detail rather than printing 21 lines.
+- a `Red-flag stops` metric beside `Stops`, present only when the number is not zero
+- **Stops made**, the existing table, now with a `Tyre` column
+- **Red-flag stops**, its own table: lap, time held in minutes, tyre
+
+Minutes rather than seconds in the second table on purpose. These run 20 to 41 minutes and
+printing `2,486.0 s` next to a 24 second stop invites exactly the comparison the split
+exists to prevent.
 
 Plurals are real, not defensive: 22 driver-races have two records and one has three, from
 Zandvoort 2023 where the field was held, then serviced again before the restart.
@@ -1867,9 +1873,24 @@ reworded to say what it now actually matches.
 was standing in for it becomes a statement about whatever is left. It does not fail. It
 keeps printing, about different data.
 
-The detail strings are rendered verbatim from `fact_event.detail` rather than reworded in
-the dashboard. They are built once in `s04` alongside the tyre lookup, and restating that
-logic here is how the two drift apart.
+**One pipeline change was needed, and it was the right one.** The compound was reachable
+only by reading it back out of the `detail` sentence, so any table wanting a tyre column
+would have had to re-parse prose written in `s04`. `fact_event` now carries `tyre_before`
+and `tyre_after` as columns; they were already computed there and were being dropped one
+line before the frame was appended. Null for every other event type, which is correct: an
+overtake has no tyre. Populated for ordinary pit stops too, not only red-flag ones,
+because "what did they put on" is the same question either way, and the **Stops made**
+table shows it now as well.
+
+**Two more pieces of stale copy, same cause as the one above.** `story_driver` labelled
+anything over 120s in its verdict column "red-flag suspension", and its guide text said
+"times running to minutes are a car held in the lane under a red flag". Both were true
+until #65 moved those records out of that table, after which the only thing left above two
+minutes was a garage repair. Now "garage repair", pointing at open question I. That is
+three separate places where a duration heuristic quietly changed meaning: `story_race`,
+`story_driver`'s verdict, and `story_driver`'s guide. Anywhere a threshold stood in for a
+filter, moving the filter upstream turned the threshold into a confident statement about
+whatever was left behind.
 
 
 ## Open questions

@@ -742,8 +742,17 @@ def build_fact_event(con) -> pd.DataFrame:
         {True: "red_flag_stop", False: "pit_stop"})
     pits["detail"] = pits.apply(_pit_detail, axis=1)
     pits["value"] = pits.lane_duration
-    frames.append(pits.drop(columns=["lane_duration", "red_flag",
-                                     "tyre_before", "tyre_after"]))
+    # tyre_before and tyre_after are KEPT, not dropped as they were at first.
+    # The compound was reachable only by reading it back out of the `detail`
+    # sentence, which meant any table wanting a tyre column had to re-parse
+    # prose written here. That is the coupling that goes stale the first time
+    # this wording changes. Carrying the two columns costs 53k mostly-null
+    # cells and makes the fact queryable instead of merely printable.
+    #
+    # Null for every other event type, which is correct: an overtake has no
+    # tyre. Also populated for ordinary pit stops, not just red-flag ones,
+    # because "what did they put on" is the same question either way.
+    frames.append(pits.drop(columns=["lane_duration", "red_flag"]))
 
     ot_made = read_sql(f"""
         WITH scope AS ({RACE_SCOPE})

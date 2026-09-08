@@ -30,7 +30,7 @@ import streamlit as st
 from app_common import coverage_gaps, fmt_gap, fmt_lap, query, team_colours
 from story_common import (
     ACCENT, AXIS_BASE, CLEAN_LAP, MUTED, PLOT_BASE, ink,
-    field, guide, held_note, line_layout, red_flag_holds,
+    field, guide, held_table, line_layout, red_flag_holds, with_tyres,
 )
 
 # The two cars need to be told apart on a shared chart. The team's own colour
@@ -243,23 +243,25 @@ def _pits(session_key: int, cars: pd.DataFrame) -> None:
         WHERE session_key = ? AND event_type = 'pit_stop' AND value IS NOT NULL
     """, (session_key,))
 
+    held = red_flag_holds(session_key, cars.driver_number)
+
     _pair_metrics(cars, "mean_lane_duration", "{:.1f}s", "average in lane")
     if len(field_stops):
         st.caption(
             f"Field median time in lane this race: "
             f"{field_stops.lane_seconds.median():.1f}s."
         )
-
-    # Directly under the numbers, and per car rather than pooled: this section
-    # exists to compare the two, and "one of them changed tyres under the red
-    # flag" is exactly the kind of difference it should not hide.
-    held = red_flag_holds(session_key, cars.driver_number)
-    for num, grp in held.groupby("driver_number"):
-        st.caption(f"**Car {int(num)}.** " + held_note(grp))
+    if len(held):
+        per_car = held.groupby("driver_number").size()
+        st.caption(
+            "**Red-flag stops:** "
+            + ", ".join(f"car {int(n)}: {c}" for n, c in per_car.items())
+            + ". Listed separately below, not counted as pit stops."
+        )
 
     stops = query("""
         SELECT e.driver_number, e.lap_number, e.value AS lane_seconds,
-               d.full_name
+               e.tyre_before, e.tyre_after, d.full_name
         FROM fact_event e
         JOIN dim_race r ON r.session_key = e.session_key
         LEFT JOIN dim_driver d
@@ -271,20 +273,31 @@ def _pits(session_key: int, cars: pd.DataFrame) -> None:
         (session_key,))
 
     if stops.empty:
-        # The red-flag case is already stated above, per car. Only the genuine
-        # coverage gap is left to explain here, and saying the wrong one of the
-        # two would send someone hunting a hole in the data that is not there.
+        # Two different reasons for an empty table. Saying the wrong one sends
+        # someone hunting a hole in the data that is not there, so the red-flag
+        # case is named explicitly rather than left implied by the block below.
         if held.empty:
             st.caption(
                 "No individual pit records for either car. Pit coverage is "
                 f"incomplete: {coverage_gaps('pit_stop')} have none."
             )
+        else:
+            st.caption(
+                "Neither car made a pit stop in this race. Both were held in "
+                "the pit lane when it was red-flagged, and neither stopped "
+                "again after the restart."
+            )
+        _held_block(held)
         return
 
+    if len(held):
+        st.markdown("**Stops made**")
+
     st.dataframe(
-        stops.rename(columns={"full_name": "Driver", "lap_number": "Lap",
-                              "lane_seconds": "Time in lane"})
-             [["Driver", "Lap", "Time in lane"]],
+        with_tyres(stops).rename(
+            columns={"full_name": "Driver", "lap_number": "Lap",
+                     "lane_seconds": "Time in lane"})
+             [["Driver", "Lap", "Time in lane", "Tyre"]],
         hide_index=True, width="stretch",
         column_config={
             "Lap": st.column_config.NumberColumn(format="%d", width="small"),
@@ -294,9 +307,23 @@ def _pits(session_key: int, cars: pd.DataFrame) -> None:
     guide(
         "Time in lane is the full pit lane transit, including the speed limit, "
         "not just the stationary time. Two cars stopping on the same lap means "
-        "a double stack, which necessarily costs the second car time. Values "
-        "running to minutes are a red-flag suspension, not slow pit work."
+        "a double stack, which necessarily costs the second car time. Stops "
+        "made under a red flag are listed separately below."
     )
+    _held_block(held)
+
+
+def _held_block(held: pd.DataFrame) -> None:
+    """The red-flag half of the pit section, per car so the two can be compared."""
+    if held.empty:
+        return
+    st.markdown("**Red-flag stops**")
+    st.caption(
+        "The race was suspended and both cars were held in the pit lane. Not "
+        "pit stops, so not counted above, but the tyre each came out on was a "
+        "real strategic choice and the two are not always the same."
+    )
+    held_table(held, show_car=True)
 
 
 # --- 6. Position dynamics ------------------------------------------------------

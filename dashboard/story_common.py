@@ -35,6 +35,37 @@ def guide(text: str) -> None:
     st.caption(f"**How to read this.** {text}")
 
 
+HELD_COLUMNS = ["driver_number", "lap_number", "value",
+                "tyre_before", "tyre_after", "detail"]
+
+
+def tyre_label(before, after) -> str:
+    """
+    "HARD to MEDIUM", "fresh MEDIUM", "MEDIUM", or nothing.
+
+    "fresh" rather than "no change": tyre_after is read from a stint that begins
+    at or after the stop, so its presence already means a new stint started. The
+    same compound is therefore a new set of it, which is exactly what the whole
+    field did at Zandvoort 2023 in the rain.
+    """
+    if pd.isna(after):
+        return ""
+    if pd.isna(before):
+        return str(after)
+    if before == after:
+        return f"fresh {after}"
+    return f"{before} to {after}"
+
+
+def with_tyres(df: pd.DataFrame) -> pd.DataFrame:
+    """Add a formatted `Tyre` column from the tyre_before/tyre_after pair."""
+    df = df.copy()
+    df["Tyre"] = [tyre_label(b, a)
+                  for b, a in zip(df.get("tyre_before", []),
+                                  df.get("tyre_after", []))]
+    return df
+
+
 def red_flag_holds(session_key: int, driver_numbers=None) -> pd.DataFrame:
     """
     Spells in the pit lane under a race suspension, which are recorded but are
@@ -42,34 +73,37 @@ def red_flag_holds(session_key: int, driver_numbers=None) -> pd.DataFrame:
 
     Optionally narrowed to specific cars, for the driver and team pages.
     """
-    sql = ("SELECT driver_number, lap_number, detail FROM fact_event "
+    cols = ", ".join(HELD_COLUMNS)
+    sql = (f"SELECT {cols} FROM fact_event "
            "WHERE session_key = ? AND event_type = 'red_flag_stop'")
     if driver_numbers is not None:
         nums = ",".join(str(int(n)) for n in driver_numbers)
         if not nums:
-            return pd.DataFrame(columns=["driver_number", "lap_number", "detail"])
+            return pd.DataFrame(columns=HELD_COLUMNS)
         sql += f" AND driver_number IN ({nums})"
     return query(sql + " ORDER BY driver_number, lap_number", (session_key,))
 
 
-def held_note(held: pd.DataFrame) -> str:
+def held_table(held: pd.DataFrame, show_car: bool = False) -> None:
     """
-    The line that goes directly under a pit stop count.
+    The red-flag half of a pit stop section: one row per spell held.
 
-    Phrased around "not counted", because that is the question it exists to
-    answer: someone looking at a red-flagged race sees a stop total lower than
-    they remember and needs to know the difference was deliberate, not missing.
-
-    The detail strings are used verbatim rather than reworded here. They are
-    built once in s04 alongside the tyre lookup, and restating that logic in the
-    dashboard is how the two drift apart.
+    Held time is shown in minutes because that is the scale it lives on. These
+    run 20 to 41 minutes and printing 2,486.0 s invites the reader to compare it
+    with a 24 second stop, which is the confusion the split exists to end.
     """
-    n = len(held)
-    if not n:
-        return ""
-    lead = ("Not counted as a pit stop" if n == 1
-            else f"Not counted as pit stops ({n} records)")
-    return f"{lead}: " + "; ".join(held.detail) + "."
+    t = with_tyres(held)
+    t["Held"] = t.value / 60.0
+    cols = (["driver_number"] if show_car else []) + ["lap_number", "Held", "Tyre"]
+    st.dataframe(
+        t[cols].rename(columns={"driver_number": "Car", "lap_number": "Lap"}),
+        hide_index=True, width="stretch",
+        column_config={
+            "Car": st.column_config.NumberColumn(format="%d", width="small"),
+            "Lap": st.column_config.NumberColumn(format="%d", width="small"),
+            "Held": st.column_config.NumberColumn(format="%.0f min"),
+        },
+    )
 
 
 def hbar(df, x, y, colours, hover, xtitle=None, zeroline=False, height=None):

@@ -30,7 +30,7 @@ from app_common import NEUTRAL, coverage_gaps, fmt_lap, query, team_colours
 from story_common import (
     AXIS_BASE, CLEAN_LAP, FIGHTING_SECONDS, PLOT_BASE, ink,
     field as _field, guide as _guide, hbar as _bar, labels as _labels,
-    red_flag_holds,
+    held_table, red_flag_holds,
 )
 
 
@@ -416,23 +416,18 @@ def _pit_stops(session_key: int) -> None:
 
     held = red_flag_holds(session_key)
 
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Stops made", f"{len(stops)}")
-    c2.metric("Median time in lane", f"{valid.median():.1f}s",
-              f"slowest {racing_stops.max():.1f}s" if len(racing_stops) else None)
-    c3.metric("Unusually long", f"{len(disasters)}", f"over {fence:.1f}s")
-
-    # Directly under the count, because that is the number it explains: a
-    # red-flagged race shows a stop total lower than anyone watching remembers,
-    # and the difference is deliberate rather than missing.
+    # A fourth metric only when there is something to put in it. On the 74 races
+    # with no red flag a permanent "Red-flag stops: 0" would imply the number is
+    # interesting, and it is not.
+    cols = st.columns(4 if len(held) else 3)
+    cols[0].metric("Stops made", f"{len(stops)}")
     if len(held):
-        cars_held = held.driver_number.nunique()
-        st.caption(
-            f"**{cars_held} car{'s were' if cars_held > 1 else ' was'} held in "
-            "the pit lane under a red flag.** That is recorded but is not a pit "
-            "stop, so it is not in the count above. Open a driver to see how "
-            "long they were held and which tyre they came out on."
-        )
+        cols[1].metric("Red-flag stops", f"{len(held)}",
+                       f"{held.driver_number.nunique()} cars held")
+    cols[-2].metric("Median time in lane", f"{valid.median():.1f}s",
+                    f"slowest {racing_stops.max():.1f}s"
+                    if len(racing_stops) else None)
+    cols[-1].metric("Unusually long", f"{len(disasters)}", f"over {fence:.1f}s")
 
     if repairs:
         st.caption(
@@ -481,9 +476,24 @@ def _pit_stops(session_key: int) -> None:
                 f"These stops exceeded {fence:.1f}s, the point at which this "
                 "race's own stop times stop looking routine. The threshold is "
                 "recalculated per race, since pit lanes differ in length. "
-                "Times running to several minutes are cars held in the lane "
-                "under a red flag, not slow pit work."
+                "Cars held in the lane under a red flag are not here; they are "
+                "listed on their own below."
             )
+
+    # --- the other half of the section ----------------------------------------
+    if len(held):
+        st.markdown("**Red-flag stops**")
+        st.caption(
+            "The race was suspended and the field was held in the pit lane. "
+            "These are not pit stops and are not counted above, but a car that "
+            "changed compound while it sat there made a real strategic choice."
+        )
+        held_table(held, show_car=True)
+        _guide(
+            "Held is the time the car spent in the pit lane, which is the "
+            "length of the suspension rather than anything the crew did. "
+            "\"Fresh\" means a new set of the compound the car was already on."
+        )
 
 
 # --- 6. Position dynamics ------------------------------------------------------

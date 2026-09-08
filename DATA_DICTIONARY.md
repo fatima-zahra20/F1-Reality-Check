@@ -308,7 +308,8 @@ Comparing 2024 with 2025 on this column compares an 18% sample against an 85% on
 This is a **different question from the duration fence above**, and the two are easy to confuse. The fence asks which stops were too slow. This asks which records are stops at all.
 
 - **Anything counting stops excludes it**: `gold_agg_driver_session.n_pit_stops`, `fact_driver_race.pit_stops`, `fact_driver_race.mean_lane_duration`, and tests T07a, T07b and T22.
-- **Nothing deletes it.** The row stays in `silver_pit` and `gold_pit` with its duration, and reaches the dashboard as `fact_event.event_type = 'red_flag_stop'` carrying the compound: *"Red flag, 39 min in the pit lane, MEDIUM to HARD"*.
+- **Nothing deletes it.** The row stays in `silver_pit` and `gold_pit` with its duration, and reaches the dashboard as `fact_event.event_type = 'red_flag_stop'` carrying the compound: *"Red flag, 39 min in the pit lane, MEDIUM to HARD"*. Every pit section is split in two, `Stops made` and `Red-flag stops`, each with its own table.
+- **`fact_event.tyre_before` / `tyre_after`** carry the compound as columns rather than only inside the `detail` sentence, so a table can show a `Tyre` column without re-parsing prose. Populated for `pit_stop` and `red_flag_stop`, null for every other event type. `tyre_after` is read from the stint that begins at or after the stop, so its presence already means a new stint started: the same compound in both columns is a **fresh set**, not "no change".
 - **Expect zeroes.** 16 driver-races read zero pit stops, ten of them at the 2024 Monaco GP where the field changed tyres under the red flag and never stopped again. Zero is the right answer here, and the tyre change is on the timeline rather than lost.
 
 Before this existed, `mean_lane_duration` was computed off unfiltered `silver_pit` and 143 driver-races carried an average above 120 seconds, ten of them reading roughly 2,389s. See NOTES_LOG #65 and question H.

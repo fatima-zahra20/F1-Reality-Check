@@ -32,7 +32,7 @@ from app_common import (NEUTRAL, coverage_gaps, fmt_gap, fmt_lap, query,
                         team_colours)
 from story_common import (
     ACCENT, AXIS_BASE, CLEAN_LAP, FIGHTING_SECONDS, MUTED, PLOT_BASE, ink,
-    field, guide, held_note, line_layout, red_flag_holds,
+    field, guide, held_table, line_layout, red_flag_holds, with_tyres,
 )
 
 # Below this many clean laps a trend line describes noise rather than a race.
@@ -314,7 +314,7 @@ def _pits(session_key: int, me: pd.Series) -> None:
     st.caption("When this driver stopped, and how those stops compared.")
 
     stops = query("""
-        SELECT lap_number, value AS lane_seconds
+        SELECT lap_number, value AS lane_seconds, tyre_before, tyre_after
         FROM fact_event
         WHERE session_key = ? AND driver_number = ? AND event_type = 'pit_stop'
         ORDER BY lap_number
@@ -325,69 +325,90 @@ def _pits(session_key: int, me: pd.Series) -> None:
         WHERE session_key = ? AND event_type = 'pit_stop' AND value IS NOT NULL
     """, (session_key,))
 
-    # Fetched before the metrics, because the mention belongs directly under the
-    # count regardless of whether the driver also made real stops. Gating it on
-    # an empty chart, as this did at first, hid it in the common case: 132 of the
-    # 160 driver-races with a red-flag record also have real stops.
+    # Fetched before the metrics, because the count belongs beside the stop
+    # count regardless of whether the driver also made real stops. Gating this
+    # on an empty chart, as an earlier version did, hid it in the common case:
+    # 132 of the 160 driver-races with a red-flag record also have real stops.
     held = red_flag_holds(session_key, [int(me.driver_number)])
 
-    c1, c2 = st.columns(2)
-    c1.metric("Stops", int(me.pit_stops) if pd.notna(me.pit_stops) else 0)
+    # Third column only when there is something to put in it. A permanent
+    # "Red-flag stops: 0" on all 74 clean races would be noise implying the
+    # number is interesting, when for almost every race it is not.
+    cols = st.columns(3 if len(held) else 2)
+    cols[0].metric("Stops", int(me.pit_stops) if pd.notna(me.pit_stops) else 0)
+    slot = 1
+    if len(held):
+        cols[1].metric("Red-flag stops", len(held))
+        slot = 2
     if pd.notna(me.mean_lane_duration):
         delta = None
         if len(field_stops):
             delta = me.mean_lane_duration - field_stops.lane_seconds.median()
-        c2.metric("Average time in lane", f"{me.mean_lane_duration:.1f}s",
-                  f"{delta:+.1f}s vs the field median" if delta is not None
-                  else None, delta_color="inverse")
+        cols[slot].metric(
+            "Average time in lane", f"{me.mean_lane_duration:.1f}s",
+            f"{delta:+.1f}s vs the field median" if delta is not None else None,
+            delta_color="inverse")
 
-    if len(held):
-        st.caption(held_note(held))
-
+    # --- the stops the driver chose to make -----------------------------------
     if stops.empty:
-        # Two very different reasons for an empty chart, and saying the wrong one
-        # is worse than saying nothing. A driver held in the pit lane by a red
-        # flag has a record; it is simply not a pit stop, so it is not counted
-        # and not plotted. That case is already explained by the line above, so
-        # only the genuine coverage gap needs saying here. Blaming a red flag on
-        # missing coverage would send someone looking for a hole that is not there.
+        # Two very different reasons for an empty table, and saying the wrong
+        # one is worse than saying nothing. A car held by a red flag has a
+        # record; it is simply not a pit stop. That case is covered by the
+        # section below, so only the genuine coverage gap needs saying here.
         if held.empty:
             st.caption(
                 "No individual pit records for this driver. Pit coverage is "
                 f"incomplete: {coverage_gaps('pit_stop')} have none."
             )
-        return
+    else:
+        if len(held):
+            st.markdown("**Stops made**")
 
-    # Judge a bad stop against the field on the day, not a fixed number: pit
-    # lanes differ enormously between circuits.
-    fence = None
-    if len(field_stops) >= 4:
-        q1, q3 = field_stops.lane_seconds.quantile([0.25, 0.75])
-        fence = q3 + 1.5 * (q3 - q1)
+        # Judge a bad stop against the field on the day, not a fixed number: pit
+        # lanes differ enormously between circuits.
+        fence = None
+        if len(field_stops) >= 4:
+            q1, q3 = field_stops.lane_seconds.quantile([0.25, 0.75])
+            fence = q3 + 1.5 * (q3 - q1)
 
-    show = stops.copy()
-    show["Verdict"] = "routine"
-    if fence is not None:
-        show.loc[show.lane_seconds > fence, "Verdict"] = "unusually long"
-    show.loc[show.lane_seconds > 120, "Verdict"] = "red-flag suspension"
+        show = with_tyres(stops)
+        show["Verdict"] = "routine"
+        if fence is not None:
+            show.loc[show.lane_seconds > fence, "Verdict"] = "unusually long"
+        # NOT "red-flag suspension" any more. Red-flag records left this table
+        # when they got their own event_type, so the only thing still above two
+        # minutes here is a car worked on in the garage under green flags: open
+        # question I. The old label was correct until it silently began
+        # describing different rows.
+        show.loc[show.lane_seconds > 120, "Verdict"] = "garage repair"
 
-    st.dataframe(
-        show.rename(columns={"lap_number": "Lap",
-                             "lane_seconds": "Time in lane"}),
-        hide_index=True, width="stretch",
-        column_config={
-            "Lap": st.column_config.NumberColumn(format="%d", width="small"),
-            "Time in lane": st.column_config.NumberColumn(format="%.1f s"),
-        },
-    )
-    guide(
-        "Time in lane is the full pit lane transit, not just the stationary "
-        "time, so it includes the pit lane speed limit. "
-        + (f"Anything over {fence:.1f}s was unusual for this race. "
-           if fence is not None else "")
-        + "Times running to minutes are a car held in the lane under a red "
-          "flag, not slow pit work."
-    )
+        st.dataframe(
+            show[["lap_number", "lane_seconds", "Tyre", "Verdict"]].rename(
+                columns={"lap_number": "Lap", "lane_seconds": "Time in lane"}),
+            hide_index=True, width="stretch",
+            column_config={
+                "Lap": st.column_config.NumberColumn(format="%d", width="small"),
+                "Time in lane": st.column_config.NumberColumn(format="%.1f s"),
+            },
+        )
+        guide(
+            "Time in lane is the full pit lane transit, not just the stationary "
+            "time, so it includes the pit lane speed limit. "
+            + (f"Anything over {fence:.1f}s was unusual for this race. "
+               if fence is not None else "")
+            + "Stops made under a red flag are listed separately below and are "
+              "not counted here."
+        )
+
+    # --- the time the race took away ------------------------------------------
+    if len(held):
+        st.markdown("**Red-flag stops**")
+        st.caption(
+            "The race was suspended and the car was held in the pit lane. Not a "
+            "pit stop, so not in the count above, but the tyre it came out on "
+            "was a real strategic choice."
+        )
+        held_table(held)
 
 
 # --- 6. Position dynamics ------------------------------------------------------
