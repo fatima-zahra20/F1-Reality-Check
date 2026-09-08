@@ -1828,6 +1828,50 @@ name mismatch and it was, but this would have produced the same appearance on th
 regardless.
 
 
+### 67. Showing the red-flag holds, and the count that had been hiding them
+
+*2026-09-08. Four files, no pipeline change: the records were already in the bundle,
+nothing displayed them.*
+
+Question H stopped counting red-flag holds as pit stops and kept every row. 184 records
+across nine races, 21 of them from Monza. Until now the only place any of them appeared
+was a caption that fired **when a driver had made no real stops at all**.
+
+**That gate hid the common case.** Measured before writing anything: of the 160
+driver-races with a red-flag record, **132 also made real stops**. So four fifths of them
+showed nothing at all, and the mention only appeared in the one-fifth minority. The
+request was to put it directly under the stop count, which is exactly where the missing
+four fifths belong.
+
+Now on all three pit sections, directly beneath the count:
+
+- **Driver:** `Not counted as a pit stop: Red flag, 31 min in the pit lane, SOFT to MEDIUM.`
+- **Team:** the same, per car, because that section exists to compare two cars and "one of
+  them changed tyres under the red flag" is not a difference to pool away.
+- **Race:** a summary, `21 cars were held in the pit lane under a red flag`, pointing at
+  the driver pages for the detail rather than printing 21 lines.
+
+Plurals are real, not defensive: 22 driver-races have two records and one has three, from
+Zandvoort 2023 where the field was held, then serviced again before the restart.
+
+**One piece of copy went wrong yesterday and was caught today.** `story_race` carried
+`RED_FLAG_SECONDS = 120` and printed "*N cars spent over 120s in the lane, which is a
+red-flag suspension*". The moment #65 gave those records their own `event_type`, that
+branch stopped seeing red flags entirely and started seeing only the three long garage
+repairs of question I, which it then described as suspensions. A heuristic that was
+correct became a confident lie about different rows. Renamed to `LONG_VISIT_SECONDS`, kept
+for its real job of keeping an 18 minute repair out of the "slowest stop" headline, and
+reworded to say what it now actually matches.
+
+**The lesson worth keeping:** when a filter moves upstream, every downstream heuristic that
+was standing in for it becomes a statement about whatever is left. It does not fail. It
+keeps printing, about different data.
+
+The detail strings are rendered verbatim from `fact_event.detail` rather than reworded in
+the dashboard. They are built once in `s04` alongside the tyre lookup, and restating that
+logic here is how the two drift apart.
+
+
 ## Open questions
 
 ### A. `caution_flag` under-detects Safety Car periods

@@ -32,7 +32,7 @@ from app_common import (NEUTRAL, coverage_gaps, fmt_gap, fmt_lap, query,
                         team_colours)
 from story_common import (
     ACCENT, AXIS_BASE, CLEAN_LAP, FIGHTING_SECONDS, MUTED, PLOT_BASE, ink,
-    field, guide, line_layout,
+    field, guide, held_note, line_layout, red_flag_holds,
 )
 
 # Below this many clean laps a trend line describes noise rather than a race.
@@ -325,6 +325,12 @@ def _pits(session_key: int, me: pd.Series) -> None:
         WHERE session_key = ? AND event_type = 'pit_stop' AND value IS NOT NULL
     """, (session_key,))
 
+    # Fetched before the metrics, because the mention belongs directly under the
+    # count regardless of whether the driver also made real stops. Gating it on
+    # an empty chart, as this did at first, hid it in the common case: 132 of the
+    # 160 driver-races with a red-flag record also have real stops.
+    held = red_flag_holds(session_key, [int(me.driver_number)])
+
     c1, c2 = st.columns(2)
     c1.metric("Stops", int(me.pit_stops) if pd.notna(me.pit_stops) else 0)
     if pd.notna(me.mean_lane_duration):
@@ -335,25 +341,17 @@ def _pits(session_key: int, me: pd.Series) -> None:
                   f"{delta:+.1f}s vs the field median" if delta is not None
                   else None, delta_color="inverse")
 
+    if len(held):
+        st.caption(held_note(held))
+
     if stops.empty:
         # Two very different reasons for an empty chart, and saying the wrong one
         # is worse than saying nothing. A driver held in the pit lane by a red
         # flag has a record; it is simply not a pit stop, so it is not counted
-        # and not plotted. Blaming that on missing coverage would send someone
-        # looking for a data gap that is not there.
-        held = query("""
-            SELECT detail FROM fact_event
-            WHERE session_key = ? AND driver_number = ?
-              AND event_type = 'red_flag_stop'
-            ORDER BY lap_number
-        """, (session_key, int(me.driver_number)))
-        if len(held):
-            st.caption(
-                "This driver made no pit stop in this race. The race was "
-                "red-flagged and the car was held in the pit lane: "
-                + "; ".join(held.detail) + "."
-            )
-        else:
+        # and not plotted. That case is already explained by the line above, so
+        # only the genuine coverage gap needs saying here. Blaming a red flag on
+        # missing coverage would send someone looking for a hole that is not there.
+        if held.empty:
             st.caption(
                 "No individual pit records for this driver. Pit coverage is "
                 f"incomplete: {coverage_gaps('pit_stop')} have none."

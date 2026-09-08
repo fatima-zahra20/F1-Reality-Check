@@ -35,6 +35,43 @@ def guide(text: str) -> None:
     st.caption(f"**How to read this.** {text}")
 
 
+def red_flag_holds(session_key: int, driver_numbers=None) -> pd.DataFrame:
+    """
+    Spells in the pit lane under a race suspension, which are recorded but are
+    not pit stops. See NOTES_LOG #65 and DATA_DICTIONARY on is_red_flag_stop.
+
+    Optionally narrowed to specific cars, for the driver and team pages.
+    """
+    sql = ("SELECT driver_number, lap_number, detail FROM fact_event "
+           "WHERE session_key = ? AND event_type = 'red_flag_stop'")
+    if driver_numbers is not None:
+        nums = ",".join(str(int(n)) for n in driver_numbers)
+        if not nums:
+            return pd.DataFrame(columns=["driver_number", "lap_number", "detail"])
+        sql += f" AND driver_number IN ({nums})"
+    return query(sql + " ORDER BY driver_number, lap_number", (session_key,))
+
+
+def held_note(held: pd.DataFrame) -> str:
+    """
+    The line that goes directly under a pit stop count.
+
+    Phrased around "not counted", because that is the question it exists to
+    answer: someone looking at a red-flagged race sees a stop total lower than
+    they remember and needs to know the difference was deliberate, not missing.
+
+    The detail strings are used verbatim rather than reworded here. They are
+    built once in s04 alongside the tyre lookup, and restating that logic in the
+    dashboard is how the two drift apart.
+    """
+    n = len(held)
+    if not n:
+        return ""
+    lead = ("Not counted as a pit stop" if n == 1
+            else f"Not counted as pit stops ({n} records)")
+    return f"{lead}: " + "; ".join(held.detail) + "."
+
+
 def hbar(df, x, y, colours, hover, xtitle=None, zeroline=False, height=None):
     """One horizontal bar chart, styled once so every block looks the same."""
     fig = go.Figure(go.Bar(

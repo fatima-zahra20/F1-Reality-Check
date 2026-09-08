@@ -30,7 +30,7 @@ import streamlit as st
 from app_common import coverage_gaps, fmt_gap, fmt_lap, query, team_colours
 from story_common import (
     ACCENT, AXIS_BASE, CLEAN_LAP, MUTED, PLOT_BASE, ink,
-    field, guide, line_layout,
+    field, guide, held_note, line_layout, red_flag_holds,
 )
 
 # The two cars need to be told apart on a shared chart. The team's own colour
@@ -250,6 +250,13 @@ def _pits(session_key: int, cars: pd.DataFrame) -> None:
             f"{field_stops.lane_seconds.median():.1f}s."
         )
 
+    # Directly under the numbers, and per car rather than pooled: this section
+    # exists to compare the two, and "one of them changed tyres under the red
+    # flag" is exactly the kind of difference it should not hide.
+    held = red_flag_holds(session_key, cars.driver_number)
+    for num, grp in held.groupby("driver_number"):
+        st.caption(f"**Car {int(num)}.** " + held_note(grp))
+
     stops = query("""
         SELECT e.driver_number, e.lap_number, e.value AS lane_seconds,
                d.full_name
@@ -264,22 +271,10 @@ def _pits(session_key: int, cars: pd.DataFrame) -> None:
         (session_key,))
 
     if stops.empty:
-        # Same distinction as the driver page: a red-flag hold is a record that
-        # is deliberately not counted as a stop, not a hole in the data.
-        held = query("""
-            SELECT detail FROM fact_event
-            WHERE session_key = ? AND event_type = 'red_flag_stop'
-              AND driver_number IN ({})
-            ORDER BY driver_number, lap_number
-        """.format(",".join(str(int(n)) for n in cars.driver_number)),
-            (session_key,))
-        if len(held):
-            st.caption(
-                "Neither car made a pit stop in this race. It was red-flagged "
-                "and both were held in the pit lane: "
-                + "; ".join(held.detail) + "."
-            )
-        else:
+        # The red-flag case is already stated above, per car. Only the genuine
+        # coverage gap is left to explain here, and saying the wrong one of the
+        # two would send someone hunting a hole in the data that is not there.
+        if held.empty:
             st.caption(
                 "No individual pit records for either car. Pit coverage is "
                 f"incomplete: {coverage_gaps('pit_stop')} have none."
