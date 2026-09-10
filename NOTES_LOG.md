@@ -1893,6 +1893,87 @@ filter, moving the filter upstream turned the threshold into a confident stateme
 whatever was left behind.
 
 
+### 68. Question G was a wrong answer from numexpr, not a bug in this project
+
+*2026-09-10. Open since 14 August. One line of code, four probes to earn it.*
+
+**The state it was in.** Identical inputs, different outputs, across processes only. Two
+previous attempts had failed: a deterministic-selection rewrite that produced four
+distinct hashes from six runs, and a pinning scheme that stabilised the published output
+without explaining anything. Everything upstream had been proved identical by hash:
+candidate laps, query text, and 4,545,724 position rows matching on count, content and
+order. The failure sat in `lap_segment`, four boolean masks over that frame, which
+returned **zero samples for laps that have hundreds**.
+
+**Step 1, decompose the mask.** The prior diagnostics compared inputs and outputs; the
+fault was in between. Recording each of the four conditions separately, per candidate,
+across four processes, immediately split the field:
+
+| condition | flipped? |
+|---|---|
+| `pos.date >= start`, `pos.date <= end` | never |
+| `end_is_nat`, `lap_duration`, `start_value_ns`, `end_value_ns` | never |
+| `pos.session_key == cand.session_key` | **6 of 7 failures** |
+| `pos.driver_number == cand.driver_number` | **1 of 7** |
+
+That killed the leading hypothesis. The timestamps were innocent; an integer equality was
+returning nothing at all.
+
+**Step 2, is the frame really identical?** Rows per session, per process, no hashing.
+Every suspect session present with full row counts in every run. So `pos` was identical
+and the comparison was wrong, which should be impossible.
+
+**Step 3, ask the same question three ways in one process.** pandas mask, numpy on the
+same buffer, and `value_counts`:
+
+```
+session 9278:  pandas 0    numpy 11766    value_counts 11766
+session 9541:  pandas 0    numpy 14701    value_counts 14701
+```
+
+Three answers from one process, one of them wrong. Not a data problem at all.
+
+**Step 4, and an experiment that proved nothing.** pandas dispatches elementwise ops to
+numexpr above `expressions._MIN_ELEMENTS`, 1,000,000, and this frame is 4.5M. Twelve runs
+with numexpr off produced no failures, but so did six with it **on**: the base rate is
+about 5e-4 per comparison, far too low for run-level sampling. That experiment was
+worthless and saying so mattered, because the two earlier attempts on this question both
+failed by treating an absence of failure as a confirmation.
+
+Fetching once and repeating the comparison in-process raised the rate enough to test:
+
+```
+numexpr on    16 wrong in 32,400 comparisons    264.1s
+numexpr off    0 wrong in 32,400 comparisons    244.2s
+```
+
+**It is free.** Turning it off was marginally faster on this machine, so there is no
+tradeoff to weigh.
+
+**What it had been doing.** A wrong mask returned zero position samples for a lap with
+hundreds, so a pinned reference lap failed to trace, `build_outlines` fell through to
+another lap, and the circuit geometry moved. On a bad run enough candidates failed that a
+circuit got no outline at all and the dashboard showed "No track map for this circuit".
+The August pinning reduced how often that surfaced but could not prevent it, because the
+fallback path runs the same broken comparison.
+
+**The fix** is one line in `config.py`, which every pipeline module imports, so no step
+can be fixed and later forgotten. Exposure is anything over a million rows: s05c's 4.5M
+positions and s05d's 2.75M `car_data` samples. The dashboard is not exposed today, its
+largest bundle table being `map_measured_xy` at 372,356 rows, but that is a fact about
+today's data rather than a guarantee.
+
+**Acceptance.** The original entry asked for four or more runs and one distinct geometry
+hash. Six runs gave `e1f9f6673475540f` every time, 24 circuits, 9,600 rows, and **24 of 24
+traced from their pinned lap with no fallback**, which had never happened before.
+
+**Worth remembering.** Three separate investigations assumed the fault was in this
+project's logic, because that is nearly always where faults are. The evidence said
+otherwise from the first day: inputs provably identical, output different, in-process
+stable. That combination does not describe a logic error, it describes a wrong answer from
+a dependency, and it took two failed fixes before anyone read it that way.
+
+
 ## Open questions
 
 ### A. `caution_flag` under-detects Safety Car periods
@@ -1950,9 +2031,25 @@ Circuit has essentially no effect on median stop duration, but circuit-specific
 extreme opposites would be a targeted analysis worth running during feature engineering.
 
 ### G. `s05c_racemap` does not reproduce itself
-*Raised 2026-08-14. OUTPUT STABILISED 2026-08-21, see #59. The cause below is still
-not understood, so this stays open; what changed is that it no longer reaches the
-bundle. Everything from here to "Next step" is the original entry, kept for the trail.*
+*Raised 2026-08-14. Output stabilised 2026-08-21, see #59. **RESOLVED 2026-09-10, see
+#68.** The original entry and both wrong guesses are kept below, because the shape of
+being wrong here is the useful part.*
+
+**It was never this project's code, and never the data.** pandas hands elementwise
+operations to numexpr above 1,000,000 elements, and numexpr 2.14.1 on four threads
+intermittently returns a wrong answer for an integer comparison at that size:
+`series == scalar` yields all-False while numpy on the same buffer finds tens of
+thousands of matches. On the 4,545,724-row position frame, measured: **16 wrong answers
+in 32,400 comparisons with numexpr on, 0 in 32,400 with it off.** `config.py` now sets
+`compute.use_numexpr` to False for every pipeline module. Six `s05c` runs then produced
+one geometry hash and traced 24 of 24 circuits from their pinned lap, with no fallbacks.
+
+Everything that made this look impossible follows from it. The inputs really were
+identical, and every hash proving so was correct. The comparison consuming them was not.
+
+---
+
+*Original entry, and the two failed attempts:*
 
 Running the pipeline twice on unchanged inputs gives a different `map_circuit_outline`.
 Every other table in the bundle is byte-identical across runs; this one is not.

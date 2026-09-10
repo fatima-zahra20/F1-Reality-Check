@@ -124,6 +124,39 @@ for _d in (MODELS_DIR, LOGS_DIR):
     _d.mkdir(exist_ok=True)
 
 
+# --- numexpr, disabled on purpose -------------------------------------------------
+# NOT a performance setting. This is a correctness fix, and it closes open
+# question G.
+#
+# pandas hands elementwise operations to numexpr once an array passes
+# `expressions._MIN_ELEMENTS`, which is 1,000,000. numexpr 2.14.1 running four
+# threads INTERMITTENTLY RETURNS A WRONG ANSWER for an integer comparison at
+# that size: `series == scalar` yields all-False while numpy on the same buffer
+# finds tens of thousands of matches.
+#
+# Measured here rather than suspected. On the 4,545,724-row position frame that
+# s05c builds, comparing pandas against numpy for the same 27 keys:
+#
+#     numexpr on    16 wrong answers in 32,400 comparisons   (rate 5e-4)
+#     numexpr off    0 wrong answers in 32,400 comparisons
+#
+# It costs nothing. The same 24,300 comparisons took 264.1s with numexpr and
+# 244.2s without, so turning it off was marginally FASTER on this machine.
+#
+# What it was doing to the project: s05c's `lap_segment` is four boolean masks
+# over that frame, so a wrong answer silently returned zero position samples for
+# a lap that has hundreds. That made a pinned reference lap fail to trace, sent
+# build_outlines to a fallback lap, and moved the circuit geometry between runs.
+# On a bad run it dropped a circuit's outline entirely and the dashboard showed
+# "No track map for this circuit". Two years of "identical inputs, different
+# outputs" came from here.
+#
+# Set in config because every pipeline step imports it, so no module can be
+# fixed and then forgotten. Exposure is anything over a million rows: s05c's
+# 4.5M positions and s05d's 2.75M car_data samples today.
+_pd.set_option("compute.use_numexpr", False)
+
+
 # --- database access -------------------------------------------------------------
 # Lives here rather than in a module of its own because every pipeline step
 # already imports config, and one shared definition beats the same five lines
