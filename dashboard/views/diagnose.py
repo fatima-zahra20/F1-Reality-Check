@@ -491,11 +491,13 @@ def chart(test_id: str, tests: pd.DataFrame, coefs: pd.DataFrame,
             width="stretch")
         guide(
             "What each event does to a driver's position on the lap it "
-            "happens. Pitting costs about nine tenths of a place; a safety car "
-            "discounts that, because everyone else has slowed too. Together "
-            "these explain only 2.6% of all swing variance, which is expected: "
-            "most laps are quiet, and the model is describing the few that "
-            "are not."
+            "happens. A real pit stop costs about nine tenths of a place; a "
+            "safety car discounts that, because everyone else has slowed too. "
+            "A red-flag stop is counted separately and costs far less, because "
+            "the field is held rather than racing, and mixing the two would "
+            "understate what a real stop costs. Together these explain only "
+            "2.7% of all swing variance, which is expected: most laps are "
+            "quiet, and the model is describing the few that are not."
         )
 
     # --- gaps ---

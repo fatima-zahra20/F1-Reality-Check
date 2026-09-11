@@ -1324,12 +1324,15 @@ def a15_position_swings(d: Diagnostics, ctx) -> None:
     Not in the task list. Rebuilt on silver_lap_flags rather than the exact-lap
     race-control join the notebook used, and with SC and VSC separated — the
     original conflated them, which is the error s02b was written to fix.
+
+    Real stops and red-flag holds are separate regressors, which closes open
+    question J. See the comment on pit_laps below.
     """
     con = ctx["con"]
     laps = read_sql(f"""
         WITH scope AS ({RACE_SCOPE})
         SELECT l.session_key, l.driver_number, l.lap_number, l.date_start,
-               f.sc_flag, f.vsc_flag
+               f.sc_flag, f.vsc_flag, f.red_flag
         FROM scope
         JOIN silver_laps l ON l.session_key = scope.session_key
         JOIN silver_lap_flags f
@@ -1359,35 +1362,56 @@ def a15_position_swings(d: Diagnostics, ctx) -> None:
     snap["position_swing"] = snap["next_position"] - snap["position"]
     snap = snap.dropna(subset=["position_swing"])
 
+    # Split rather than filtered, which is question J. The old pit_flag meant
+    # "the car was in the pit lane on this lap" and pooled two different events:
+    # 2,679 racing stops and 184 cars parked by a suspension. They do not behave
+    # alike. A real stop swings +0.86 places on average and 13.9% of them move
+    # 3 or more; a red-flag hold swings +0.04 with 2.2% big, which is a quiet lap
+    # (-0.04, 2.3%). Pooling them therefore diluted the thing the model exists to
+    # measure: pitting reads +0.882 pooled against +0.929 once separated.
+    #
+    # Kept as its own regressor, not dropped. The hold coefficient is small but
+    # real (+0.163, p=0.02), so the rows carry information, and deleting them
+    # would silently answer a different question than "what does a pit stop do".
+    #
+    # A bare red_flag control for suspended laps with no stop was tested and
+    # rejected: -0.068, p=0.108, and r-squared moves 0.0267 to 0.0268. It earns
+    # nothing, so the model stays at four terms.
     pit_laps = read_sql(f"""
         WITH scope AS ({RACE_SCOPE})
-        SELECT DISTINCT p.session_key, p.driver_number, p.lap_number, 1 AS pit_flag
+        SELECT DISTINCT p.session_key, p.driver_number, p.lap_number, 1 AS in_lane
         FROM scope JOIN silver_pit p ON p.session_key = scope.session_key
     """, con)
     snap = snap.merge(pit_laps, on=["session_key", "driver_number", "lap_number"], how="left")
-    snap["pit_flag"] = snap["pit_flag"].fillna(0).astype(int)
-    snap["sc_flag"] = snap["sc_flag"].fillna(0).astype(int)
-    snap["vsc_flag"] = snap["vsc_flag"].fillna(0).astype(int)
+    for c in ("in_lane", "sc_flag", "vsc_flag", "red_flag"):
+        snap[c] = snap[c].fillna(0).astype(int)
+    snap["pit_flag"] = (snap["in_lane"].eq(1) & snap["red_flag"].eq(0)).astype(int)
+    snap["red_flag_stop"] = (snap["in_lane"].eq(1) & snap["red_flag"].eq(1)).astype(int)
 
-    fit = smf.ols("position_swing ~ pit_flag + sc_flag + vsc_flag", data=snap).fit()
+    fit = smf.ols("position_swing ~ pit_flag + red_flag_stop + sc_flag + vsc_flag",
+                  data=snap).fit()
     resid = snap["position_swing"] - fit.predict(snap)
     big = int((resid.abs() >= 3).sum())
 
     d.add_test(
         "T15", "racecraft",
         "Are the biggest position swings explained by pit cycles and neutralisations?",
-        "OLS: position_swing ~ pit_flag + sc_flag + vsc_flag (SC and VSC separated)",
+        "OLS: position_swing ~ pit_flag + red_flag_stop + sc_flag + vsc_flag "
+        "(real stops separated from red-flag holds, SC from VSC)",
         fit.fvalue, fit.f_pvalue, fit.rsquared, "r_squared", int(fit.nobs),
         fit.f_pvalue < ALPHA,
-        f"Pitting costs about {fit.params['pit_flag']:.2f} places on the lap it "
-        f"happens, and a Safety Car discounts that. The three flags explain "
+        f"A real pit stop costs about {fit.params['pit_flag']:.2f} places on the "
+        f"lap it happens, and a Safety Car discounts that. Being held in the lane "
+        f"under a red flag costs {fit.params['red_flag_stop']:.2f}, which is why "
+        f"it is counted separately and not as a pit stop. The four flags explain "
         f"{fit.rsquared:.1%} of total swing variance because most laps are quiet, "
         f"not because the model is wrong about the laps that are not.",
         f"{big} laps ({big/len(snap):.1%}) still show a swing of 3+ places "
         f"unexplained by these flags — on-track battles, damage and tyre cliffs.",
     )
     d.add_coefficients("T15", "position_swing", fit,
-                       vifs=compute_vifs(snap, ["pit_flag", "sc_flag", "vsc_flag"]))
+                       vifs=compute_vifs(snap, ["pit_flag", "red_flag_stop",
+                                                "sc_flag", "vsc_flag"]))
 
 
 def a16_lap1_swing(d: Diagnostics, ctx) -> None:

@@ -1974,6 +1974,48 @@ stable. That combination does not describe a logic error, it describes a wrong a
 a dependency, and it took two failed fixes before anyone read it that way.
 
 
+### 69. Question J: the position-swing model now separates real stops from red-flag holds
+
+*2026-09-10. The last thing question H left behind.*
+
+**What it was.** `a15_position_swings` built `pit_flag` straight from `silver_pit`, so a
+car parked by a race suspension counted as a lap the driver pitted. Deliberately left
+alone in September on the argument that the variable means "the car was in the pit lane",
+which stays true under a suspension. That argument was wrong, and measuring it says why.
+
+**Measured before changing anything.** 2,863 lap rows carried the old flag, 184 of them
+(6.4%) red-flag holds. The two populations do not behave alike:
+
+| group | rows | mean swing | 3+ place swings |
+|---|---|---|---|
+| real pit stop | 2,679 | +0.857 | 13.9% |
+| red-flag hold | 184 | +0.038 | 2.2% |
+| red flag, no stop | 500 | -0.116 | 6.4% |
+| quiet lap | 87,440 | -0.038 | 2.3% |
+
+A red-flag hold is statistically a quiet lap. Pooling it with real stops diluted exactly
+what the model exists to measure: pitting read **+0.882 pooled against +0.929 separated**,
+so the old coefficient was about 5% low.
+
+**Split, not filtered.** Two regressors, no rows dropped, `n` unchanged at 90,803. The
+hold coefficient is small but real (+0.163, p=0.02), so those rows carry information, and
+deleting them would have quietly answered a different question than "what does a pit stop
+cost". This is the same rule the dashboard already follows: red-flag stops are shown, kept
+clear, and never counted as pit stops.
+
+**A third term was tested and rejected.** A bare `red_flag` control for suspended laps
+with no stop is the obvious next thought, since the field is reordered administratively
+under a suspension. It earns nothing: -0.068, p=0.108, r-squared 0.0267 to 0.0268. The
+model stays at four terms. Recorded because "it seemed likely" is not a reason to keep a
+predictor, and the next person will think of it too.
+
+**Collinearity.** All four VIFs between 1.01 and 1.02, so the split introduces none.
+
+**Verified** by running the real `a15_position_swings` against a read-only connection with
+the real `Diagnostics`, rather than a copy of the code, which would only have proved the
+copy works.
+
+
 ## Open questions
 
 ### A. `caution_flag` under-detects Safety Car periods
@@ -2247,7 +2289,9 @@ currently displays. Deliberately left open rather than fixed with a constant tha
 principled value.
 
 ### J. `pit_flag` still counts a red-flag lap as a lap the driver pitted
-*Raised 2026-09-06, deliberately not changed while resolving question H.*
+*Raised 2026-09-06, deliberately not changed while resolving question H. **RESOLVED
+2026-09-10, see #69.** The original entry is kept below, including the reasoning that
+turned out to be wrong.*
 
 The position-swing analysis in `s05` builds `pit_flag` from `silver_pit` with no red-flag
 filter, unlike T07a and T22 which now exclude them. It was left alone because the variable
@@ -2256,3 +2300,9 @@ it is a control in a model about Safety Car position swings rather than a statem
 pit strategy. Worth revisiting if that model is ever reworked: under a red flag the field
 is reordered administratively, so attributing those position changes to pitting is the
 kind of thing that would quietly bias the coefficient.
+
+**Closing note.** The bias was real and measurable, +0.882 against +0.929. The "it is only
+a control" defence does not survive the fact that `pit_flag` is the term the test is
+reported on. The suspected mechanism was wrong too: it is not that suspended laps swing
+wildly, it is that they barely swing at all, so pooling them flattened the estimate rather
+than inflating it.
