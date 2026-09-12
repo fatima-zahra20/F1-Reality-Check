@@ -664,6 +664,7 @@ def build_pit(con) -> pd.DataFrame:
         SELECT p.session_key, p.driver_number, p.lap_number, p.meeting_key,
                p.date, p.stop_duration, p.pit_duration,
                f.sc_flag, f.vsc_flag, f.red_flag, f.neutralised,
+               pf.red_flag AS pit_red_flag, pf.garage_repair,
                s.year, s.session_name, s.session_type, s.circuit_short_name,
                d.team_name AS team_name_raw
         FROM silver_pit p
@@ -672,6 +673,10 @@ def build_pit(con) -> pd.DataFrame:
           ON  f.session_key   = p.session_key
           AND f.driver_number = p.driver_number
           AND f.lap_number    = p.lap_number
+        LEFT JOIN silver_pit_flags pf
+          ON  pf.session_key   = p.session_key
+          AND pf.driver_number = p.driver_number
+          AND pf.lap_number    = p.lap_number
         LEFT JOIN silver_drivers d
           ON  d.session_key   = p.session_key
           AND d.driver_number = p.driver_number
@@ -687,12 +692,26 @@ def build_pit(con) -> pd.DataFrame:
     # a label rather than a deletion, because the car really was in the lane and
     # a red-flag tyre change is a genuine strategic event. Consumers that count
     # stops exclude it; consumers that describe what happened keep it.
-    p["is_red_flag_stop"] = p.red_flag.fillna(0).astype(int)
+    #
+    # pit_red_flag, not red_flag. red_flag is the caution state of the LAP and
+    # stays that way, because under_caution needs it. Whether the RECORD is a
+    # hold is a different question, and a car can enter the lane on a green lap
+    # and still be sitting there when the race is suspended. See build_pit_flags
+    # in s02b. Falls back to the lap flag for any record with no pit-flag row.
+    p["is_red_flag_stop"] = (p.pit_red_flag.fillna(p.red_flag)
+                             .fillna(0).astype(int))
+    # A car in the lane for longer than three racing laps was being worked on, not
+    # making a pit stop. Same treatment as is_red_flag_stop and for the same
+    # reason: the record is true, the label is what was missing. Question I.
+    p["is_garage_repair"] = p.garage_repair.fillna(0).astype(int)
     # The conformed population for "how long does a pit stop take".
     p["is_green_race_stop"] = ((p.is_race_stop == 1)
                                & (p.under_caution == 0)
+                               & (p.is_garage_repair == 0)
                                & p.pit_duration.notna()).astype(int)
-    return p.drop(columns=["session_type"])
+    # pit_red_flag and garage_repair are scaffolding for the two is_* columns
+    # above, not second published columns saying nearly the same thing.
+    return p.drop(columns=["session_type", "pit_red_flag", "garage_repair"])
 
 
 @builds("gold_session_result")
@@ -956,7 +975,10 @@ def build_agg_driver_session(gold: dict) -> pd.DataFrame:
     pit = gold["gold_pit"]
     # is_red_flag_stop excluded: see build_pit. Without this the count is one too
     # high for every driver in each of the 14 red-flagged races since 2023.
-    pit_all = pit[pit.is_red_flag_stop == 0].groupby(
+    # is_garage_repair excluded for the same reason, question I: a car worked on
+    # for 13 to 41 minutes did not make a pit stop.
+    pit_all = pit[(pit.is_red_flag_stop == 0)
+                  & (pit.is_garage_repair == 0)].groupby(
         ["session_key", "driver_number"]).agg(
         n_pit_stops=("lap_number", "size"))
     pit_green = pit[pit.is_green_race_stop == 1].groupby(

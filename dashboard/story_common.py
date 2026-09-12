@@ -66,6 +66,20 @@ def with_tyres(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def _pit_events(session_key: int, event_type: str, driver_numbers=None) -> pd.DataFrame:
+    """Time in the pit lane that is recorded but is not a pit stop."""
+    cols = ", ".join(HELD_COLUMNS)
+    sql = (f"SELECT {cols} FROM fact_event "
+           "WHERE session_key = ? AND event_type = ?")
+    if driver_numbers is not None:
+        nums = ",".join(str(int(n)) for n in driver_numbers)
+        if not nums:
+            return pd.DataFrame(columns=HELD_COLUMNS)
+        sql += f" AND driver_number IN ({nums})"
+    return query(sql + " ORDER BY driver_number, lap_number",
+                 (session_key, event_type))
+
+
 def red_flag_holds(session_key: int, driver_numbers=None) -> pd.DataFrame:
     """
     Spells in the pit lane under a race suspension, which are recorded but are
@@ -73,35 +87,38 @@ def red_flag_holds(session_key: int, driver_numbers=None) -> pd.DataFrame:
 
     Optionally narrowed to specific cars, for the driver and team pages.
     """
-    cols = ", ".join(HELD_COLUMNS)
-    sql = (f"SELECT {cols} FROM fact_event "
-           "WHERE session_key = ? AND event_type = 'red_flag_stop'")
-    if driver_numbers is not None:
-        nums = ",".join(str(int(n)) for n in driver_numbers)
-        if not nums:
-            return pd.DataFrame(columns=HELD_COLUMNS)
-        sql += f" AND driver_number IN ({nums})"
-    return query(sql + " ORDER BY driver_number, lap_number", (session_key,))
+    return _pit_events(session_key, "red_flag_stop", driver_numbers)
 
 
-def held_table(held: pd.DataFrame, show_car: bool = False) -> None:
+def garage_repairs(session_key: int, driver_numbers=None) -> pd.DataFrame:
     """
-    The red-flag half of a pit stop section: one row per spell held.
+    Spells in the pit lane longer than three racing laps, which are repairs and
+    not pit stops. See NOTES_LOG question I and DATA_DICTIONARY on
+    is_garage_repair.
+    """
+    return _pit_events(session_key, "garage_repair", driver_numbers)
 
-    Held time is shown in minutes because that is the scale it lives on. These
-    run 20 to 41 minutes and printing 2,486.0 s invites the reader to compare it
-    with a 24 second stop, which is the confusion the split exists to end.
+
+def held_table(held: pd.DataFrame, show_car: bool = False,
+               label: str = "Held") -> None:
+    """
+    The non-stop half of a pit section: one row per spell in the lane.
+
+    Time is shown in minutes because that is the scale these live on. They run
+    from about 3 to 41 minutes, and printing 2,486.0 s invites the reader to
+    compare it with a 24 second stop, which is the confusion the split exists
+    to end.
     """
     t = with_tyres(held)
-    t["Held"] = t.value / 60.0
-    cols = (["driver_number"] if show_car else []) + ["lap_number", "Held", "Tyre"]
+    t[label] = t.value / 60.0
+    cols = (["driver_number"] if show_car else []) + ["lap_number", label, "Tyre"]
     st.dataframe(
         t[cols].rename(columns={"driver_number": "Car", "lap_number": "Lap"}),
         hide_index=True, width="stretch",
         column_config={
             "Car": st.column_config.NumberColumn(format="%d", width="small"),
             "Lap": st.column_config.NumberColumn(format="%d", width="small"),
-            "Held": st.column_config.NumberColumn(format="%.0f min"),
+            label: st.column_config.NumberColumn(format="%.0f min"),
         },
     )
 

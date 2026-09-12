@@ -30,7 +30,8 @@ import streamlit as st
 from app_common import coverage_gaps, fmt_gap, fmt_lap, query, team_colours
 from story_common import (
     ACCENT, AXIS_BASE, CLEAN_LAP, MUTED, PLOT_BASE, ink,
-    field, guide, held_table, line_layout, red_flag_holds, with_tyres,
+    field, garage_repairs, guide, held_table, line_layout, red_flag_holds,
+    with_tyres,
 )
 
 # The two cars need to be told apart on a shared chart. The team's own colour
@@ -244,6 +245,7 @@ def _pits(session_key: int, cars: pd.DataFrame) -> None:
     """, (session_key,))
 
     held = red_flag_holds(session_key, cars.driver_number)
+    repairs = garage_repairs(session_key, cars.driver_number)
 
     _pair_metrics(cars, "mean_lane_duration", "{:.1f}s", "average in lane")
     if len(field_stops):
@@ -251,13 +253,19 @@ def _pits(session_key: int, cars: pd.DataFrame) -> None:
             f"Field median time in lane this race: "
             f"{field_stops.lane_seconds.median():.1f}s."
         )
-    if len(held):
-        per_car = held.groupby("driver_number").size()
+
+    def _per_car(df: pd.DataFrame, label: str) -> None:
+        if df.empty:
+            return
+        per_car = df.groupby("driver_number").size()
         st.caption(
-            "**Red-flag stops:** "
+            f"**{label}:** "
             + ", ".join(f"car {int(n)}: {c}" for n, c in per_car.items())
             + ". Listed separately below, not counted as pit stops."
         )
+
+    _per_car(held, "Red-flag stops")
+    _per_car(repairs, "Garage repairs")
 
     stops = query("""
         SELECT e.driver_number, e.lap_number, e.value AS lane_seconds,
@@ -276,21 +284,26 @@ def _pits(session_key: int, cars: pd.DataFrame) -> None:
         # Two different reasons for an empty table. Saying the wrong one sends
         # someone hunting a hole in the data that is not there, so the red-flag
         # case is named explicitly rather than left implied by the block below.
-        if held.empty:
+        if held.empty and repairs.empty:
             st.caption(
                 "No individual pit records for either car. Pit coverage is "
                 f"incomplete: {coverage_gaps('pit_stop')} have none."
             )
-        else:
+        elif not held.empty:
             st.caption(
                 "Neither car made a pit stop in this race. Both were held in "
                 "the pit lane when it was red-flagged, and neither stopped "
                 "again after the restart."
             )
-        _held_block(held)
+        else:
+            st.caption(
+                "Neither car made a pit stop in this race. What the pit records "
+                "hold is time in the garage being repaired."
+            )
+        _held_block(held, repairs)
         return
 
-    if len(held):
+    if len(held) or len(repairs):
         st.markdown("**Stops made**")
 
     st.dataframe(
@@ -307,23 +320,32 @@ def _pits(session_key: int, cars: pd.DataFrame) -> None:
     guide(
         "Time in lane is the full pit lane transit, including the speed limit, "
         "not just the stationary time. Two cars stopping on the same lap means "
-        "a double stack, which necessarily costs the second car time. Stops "
-        "made under a red flag are listed separately below."
+        "a double stack, which necessarily costs the second car time. Time in "
+        "the lane under a red flag, or in the garage being repaired, is listed "
+        "separately below."
     )
-    _held_block(held)
+    _held_block(held, repairs)
 
 
-def _held_block(held: pd.DataFrame) -> None:
-    """The red-flag half of the pit section, per car so the two can be compared."""
-    if held.empty:
-        return
-    st.markdown("**Red-flag stops**")
-    st.caption(
-        "The race was suspended and both cars were held in the pit lane. Not "
-        "pit stops, so not counted above, but the tyre each came out on was a "
-        "real strategic choice and the two are not always the same."
-    )
-    held_table(held, show_car=True)
+def _held_block(held: pd.DataFrame, repairs: pd.DataFrame) -> None:
+    """The non-stop half of the pit section, per car so the two can be compared."""
+    if not held.empty:
+        st.markdown("**Red-flag stops**")
+        st.caption(
+            "The race was suspended and both cars were held in the pit lane. "
+            "Not pit stops, so not counted above, but the tyre each came out on "
+            "was a real strategic choice and the two are not always the same."
+        )
+        held_table(held, show_car=True)
+
+    if not repairs.empty:
+        st.markdown("**Garage repairs**")
+        st.caption(
+            "Longer than three racing laps in the pit lane with no suspension on, "
+            "which is a repair rather than pit work. Not counted above, and the "
+            "car rejoined and kept racing afterwards."
+        )
+        held_table(repairs, show_car=True, label="In lane")
 
 
 # --- 6. Position dynamics ------------------------------------------------------

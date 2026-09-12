@@ -130,6 +130,36 @@ def rows_inserted(stdout: str) -> int:
     return int(m.group(1).replace(",", "")) if m else 0
 
 
+def missing_derived() -> list[str]:
+    """
+    Derived flag tables that s02b should have built and that are not there.
+
+    A SECOND blind spot of the same shape as the one stale_tables documents.
+    s02b only runs when silver is rebuilt, so on a run that finds no new data it
+    is skipped, which is correct as long as its tables already exist. The moment
+    s02b learns to build a NEW table, every no-new-data run would reach the
+    serving layers with that table missing and fail there instead.
+
+    Found while adding silver_pit_flags, before it could happen: the run
+    immediately before had ingested zero rows, so the next run would have been
+    the failing one.
+
+    Kept in step with s03_verify.DERIVED_TABLES, which checks the same list from
+    the other side.
+    """
+    expected = ["silver_caution_periods", "silver_lap_flags", "silver_pit_flags"]
+    if not DB_PATH.exists():
+        return []
+    con = duckdb.connect(str(DB_PATH), read_only=True)
+    try:
+        present = {r[0] for r in con.execute(
+            "SELECT table_name FROM information_schema.tables "
+            "WHERE table_schema = 'main'").fetchall()}
+    finally:
+        con.close()
+    return [t for t in expected if t not in present]
+
+
 def stale_tables() -> list[str]:
     """
     Tables where bronze has grown since silver was last built from it.
@@ -241,9 +271,16 @@ def main() -> int:
 
     should_rebuild = args.execute and (new_rows > 0 or args.force_rebuild or stale)
 
+    # Independent of the rebuild triggers: a table s02b is supposed to own can
+    # be absent while silver itself is perfectly current. See missing_derived.
+    derived_missing = missing_derived() if args.execute else []
+    if derived_missing:
+        runner.log(f"\nDerived flag tables missing: {', '.join(derived_missing)}")
+        runner.log("Running the caution flag build even though silver is current.")
+
     if not should_rebuild:
         reason = "dry run" if not args.execute else "no new data"
-        runner.log(f"\nSkipping silver rebuild and caution flags ({reason}).")
+        runner.log(f"\nSkipping silver rebuild ({reason}).")
         runner.log("Use --force-rebuild to rebuild anyway.")
     else:
         code, _ = runner.run_step("build_silver", "s02_build_silver.py",
@@ -254,8 +291,9 @@ def main() -> int:
             runner.flush()
             return 1
 
-        # Derived from silver_laps and silver_race_control, so it must follow
-        # the rebuild or the flags silently go stale.
+    # Derived from silver_laps and silver_race_control, so it must follow the
+    # rebuild or the flags silently go stale.
+    if should_rebuild or derived_missing:
         code, _ = runner.run_step("caution_flags", "s02b_caution_flags.py")
         if code != 0:
             runner.log("\nCaution flag build FAILED — stopping.")

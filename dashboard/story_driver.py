@@ -32,7 +32,8 @@ from app_common import (NEUTRAL, coverage_gaps, fmt_gap, fmt_lap, query,
                         team_colours)
 from story_common import (
     ACCENT, AXIS_BASE, CLEAN_LAP, FIGHTING_SECONDS, MUTED, PLOT_BASE, ink,
-    field, guide, held_table, line_layout, red_flag_holds, with_tyres,
+    field, garage_repairs, guide, held_table, line_layout, red_flag_holds,
+    with_tyres,
 )
 
 # Below this many clean laps a trend line describes noise rather than a race.
@@ -330,24 +331,28 @@ def _pits(session_key: int, me: pd.Series) -> None:
     # on an empty chart, as an earlier version did, hid it in the common case:
     # 132 of the 160 driver-races with a red-flag record also have real stops.
     held = red_flag_holds(session_key, [int(me.driver_number)])
+    repairs = garage_repairs(session_key, [int(me.driver_number)])
 
-    # Third column only when there is something to put in it. A permanent
+    # Extra columns only when there is something to put in them. A permanent
     # "Red-flag stops: 0" on all 74 clean races would be noise implying the
-    # number is interesting, when for almost every race it is not.
-    cols = st.columns(3 if len(held) else 2)
-    cols[0].metric("Stops", int(me.pit_stops) if pd.notna(me.pit_stops) else 0)
-    slot = 1
+    # number is interesting, when for almost every race it is not. The same
+    # goes for repairs, which are rarer still.
+    metrics = [("Stops", int(me.pit_stops) if pd.notna(me.pit_stops) else 0, None)]
     if len(held):
-        cols[1].metric("Red-flag stops", len(held))
-        slot = 2
+        metrics.append(("Red-flag stops", len(held), None))
+    if len(repairs):
+        metrics.append(("Garage repairs", len(repairs), None))
     if pd.notna(me.mean_lane_duration):
         delta = None
         if len(field_stops):
             delta = me.mean_lane_duration - field_stops.lane_seconds.median()
-        cols[slot].metric(
+        metrics.append((
             "Average time in lane", f"{me.mean_lane_duration:.1f}s",
-            f"{delta:+.1f}s vs the field median" if delta is not None else None,
-            delta_color="inverse")
+            f"{delta:+.1f}s vs the field median" if delta is not None else None))
+
+    cols = st.columns(len(metrics))
+    for col, (label, value, delta_text) in zip(cols, metrics):
+        col.metric(label, value, delta_text, delta_color="inverse")
 
     # --- the stops the driver chose to make -----------------------------------
     if stops.empty:
@@ -355,13 +360,13 @@ def _pits(session_key: int, me: pd.Series) -> None:
         # one is worse than saying nothing. A car held by a red flag has a
         # record; it is simply not a pit stop. That case is covered by the
         # section below, so only the genuine coverage gap needs saying here.
-        if held.empty:
+        if held.empty and repairs.empty:
             st.caption(
                 "No individual pit records for this driver. Pit coverage is "
                 f"incomplete: {coverage_gaps('pit_stop')} have none."
             )
     else:
-        if len(held):
+        if len(held) or len(repairs):
             st.markdown("**Stops made**")
 
         # Judge a bad stop against the field on the day, not a fixed number: pit
@@ -375,12 +380,10 @@ def _pits(session_key: int, me: pd.Series) -> None:
         show["Verdict"] = "routine"
         if fence is not None:
             show.loc[show.lane_seconds > fence, "Verdict"] = "unusually long"
-        # NOT "red-flag suspension" any more. Red-flag records left this table
-        # when they got their own event_type, so the only thing still above two
-        # minutes here is a car worked on in the garage under green flags: open
-        # question I. The old label was correct until it silently began
-        # describing different rows.
-        show.loc[show.lane_seconds > 120, "Verdict"] = "garage repair"
+        # There is deliberately no "garage repair" verdict here any more. Repairs
+        # left this table when they got their own event_type, so a row saying it
+        # could only ever be wrong. This is the second time a label here outlived
+        # the rows it described; the first was "red-flag suspension".
 
         st.dataframe(
             show[["lap_number", "lane_seconds", "Tyre", "Verdict"]].rename(
@@ -396,8 +399,8 @@ def _pits(session_key: int, me: pd.Series) -> None:
             "time, so it includes the pit lane speed limit. "
             + (f"Anything over {fence:.1f}s was unusual for this race. "
                if fence is not None else "")
-            + "Stops made under a red flag are listed separately below and are "
-              "not counted here."
+            + "Time in the lane under a red flag, or in the garage being "
+              "repaired, is listed separately below and is not counted here."
         )
 
     # --- the time the race took away ------------------------------------------
@@ -409,6 +412,15 @@ def _pits(session_key: int, me: pd.Series) -> None:
             "was a real strategic choice."
         )
         held_table(held)
+
+    if len(repairs):
+        st.markdown("**Garage repairs**")
+        st.caption(
+            "The car was in the pit lane for longer than three racing laps with no "
+            "suspension on. That is a repair, not a stop, so it is not in the "
+            "count or the average above. The car rejoined and kept racing."
+        )
+        held_table(repairs, label="In lane")
 
 
 # --- 6. Position dynamics ------------------------------------------------------

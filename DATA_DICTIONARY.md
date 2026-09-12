@@ -303,13 +303,36 @@ Comparing 2024 with 2025 on this column compares an 18% sample against an 85% on
 
 `gold_pit` therefore has no duration threshold anywhere. It carries `under_caution`, `is_race_stop` and `is_green_race_stop`, the last being the conformed population for "how long does a pit stop take".
 
-**`is_red_flag_stop`: a record that is kept but never counted.** A race suspension parks the whole field in the pit lane, and `silver_pit` records that, correctly, as time in the lane. It is not a pit stop: nobody chose it and it costs nobody anything relative to anybody else. The column is taken from the `red_flag` that `silver_lap_flags` already derives, so it needs no new join.
+**`is_red_flag_stop`: a record that is kept but never counted.** A race suspension parks the whole field in the pit lane, and `silver_pit` records that, correctly, as time in the lane. It is not a pit stop: nobody chose it and it costs nobody anything relative to anybody else.
 
-This is a **different question from the duration fence above**, and the two are easy to confuse. The fence asks which stops were too slow. This asks which records are stops at all.
+The column comes from **`silver_pit_flags`**, a derived table built by `s02b_caution_flags.py` alongside `silver_lap_flags`, keyed the same way as `silver_pit` (`session_key`, `driver_number`, `lap_number`) and carrying one column, `red_flag`.
+
+**Why a pit-level table rather than the lap flag.** It originally read `silver_lap_flags.red_flag`, joined on lap number. That misses a car which enters the lane on a green lap and is still sitting there when the race is suspended, because the record keeps its green lap number. 2023 Zandvoort car 11 is exactly that: 2,461.6s in the lane filed under lap 63, while that driver's red-flag laps are 64 to 67. It read as a 41 minute green-flag pit stop. Flagging lap 63 instead would be wrong, because lap 63 really was raced green, so the flag has to belong to the record.
+
+`silver_pit_flags.red_flag` is set when the lap flag says so **or** the time in the lane overlaps a red-flag period, so it can only ever add to what the lap join found. The window is `[date - lane_duration, date]`, because **`silver_pit.date` is the moment the car leaves the pit lane, not the moment it enters**. That is measured: reading it as the exit puts 84.5% of ordinary stops entering the lane in the last tenth of the lap they are filed under, while reading it as the entry puts 98.6% of them entering after their lap had already ended. See NOTES_LOG #70.
+
+**`is_garage_repair`: the same treatment, for a different cause.** A car in the pit lane for longer than **three racing laps** with no caution flying was being worked on, not making a pit stop. Also from `silver_pit_flags`, and mutually exclusive with `is_red_flag_stop`.
+
+The threshold is in **laps, not seconds**, so it calibrates itself: Monaco runs 70.5s laps and Spa 113.2s, and the rule has to be strict at one and lenient at the other without a number per circuit. A car in the lane that long has been lapped several times, which no pit strategy involves. It is an honest calibration rather than a structural certainty, and it should be read as one.
+
+**Why three and not two.** Every green race and sprint record near the line:
+
+| time in lane | | |
+|---|---|---|
+| 0.92 laps | 93.2s | 2024 Shanghai race, a slow stop |
+| 1.15 laps | 88.9s | 2023 Montreal race, a badly botched stop |
+| 2.02 laps | 155.1s | 2026 Montreal sprint, ambiguous |
+| 9.26 laps | 777.7s | 2026 Catalunya race, unambiguous repair |
+
+Two laps was the first choice, from a table measured on races only where nothing genuine sits between 1.15 and 9.26 laps. Sprints were not in that sample and the rule runs on them too, so a line at 2.0 would have been touching a record rather than sitting in a gap, and a couple of percent of drift in that session's reference lap would have flipped it with nothing to explain the change. At 3.0 the nearest records are 2.02 below and 9.26 above.
+
+It catches five records across races and sprints, from 777.7s to 2,485.9s, against a longest genuine stop of 93.2s. Practice and qualifying flag heavily and that is correct: sitting in the garage is what practice is for, and nothing counts practice pit stops. See NOTES_LOG question I and #71.
+
+Both flags answer a **different question from the duration fence above**, and the three are easy to confuse. The fence asks which stops were too slow. These ask which records are stops at all.
 
 - **Anything counting stops excludes it**: `gold_agg_driver_session.n_pit_stops`, `fact_driver_race.pit_stops`, `fact_driver_race.mean_lane_duration`, and tests T07a, T07b and T22.
-- **Nothing deletes it.** The row stays in `silver_pit` and `gold_pit` with its duration, and reaches the dashboard as `fact_event.event_type = 'red_flag_stop'` carrying the compound: *"Red flag, 39 min in the pit lane, MEDIUM to HARD"*. Every pit section is split in two, `Stops made` and `Red-flag stops`, each with its own table.
-- **`fact_event.tyre_before` / `tyre_after`** carry the compound as columns rather than only inside the `detail` sentence, so a table can show a `Tyre` column without re-parsing prose. Populated for `pit_stop` and `red_flag_stop`, null for every other event type. `tyre_after` is read from the stint that begins at or after the stop, so its presence already means a new stint started: the same compound in both columns is a **fresh set**, not "no change".
+- **Nothing deletes either.** The row stays in `silver_pit` and `gold_pit` with its duration, and reaches the dashboard as `fact_event.event_type` of `red_flag_stop` or `garage_repair`, carrying the compound: *"Red flag, 39 min in the pit lane, MEDIUM to HARD"*, *"Garage repair, 18 min in the pit lane, fresh HARD"*. Every pit section splits into `Stops made` and, when they occur, `Red-flag stops` and `Garage repairs`, each with its own table.
+- **`fact_event.tyre_before` / `tyre_after`** carry the compound as columns rather than only inside the `detail` sentence, so a table can show a `Tyre` column without re-parsing prose. Populated for `pit_stop`, `red_flag_stop` and `garage_repair`, null for every other event type. `tyre_after` is read from the stint that begins at or after the stop, so its presence already means a new stint started: the same compound in both columns is a **fresh set**, not "no change".
 - **Expect zeroes.** 16 driver-races read zero pit stops, ten of them at the 2024 Monaco GP where the field changed tyres under the red flag and never stopped again. Zero is the right answer here, and the tyre change is on the timeline rather than lost.
 
 Before this existed, `mean_lane_duration` was computed off unfiltered `silver_pit` and 143 driver-races carried an average above 120 seconds, ten of them reading roughly 2,389s. See NOTES_LOG #65 and question H.
@@ -586,7 +609,7 @@ This is the source for `map_measured_xy` and `map_circuit_outline` in the dashbo
 |---|---|---|
 | `gold_lap` | `(session_key, driver_number, lap_number)` | The wide lap fact. Session, meeting, team and driver context on the row, so the laps-to-sessions-to-meetings join disappears. Carries `is_valid_lap`, `is_representative_lap`, `pace_ratio`, the caution flags, tyre `compound` and `tyre_age`, and lap-start state (`position`, both gaps) |
 | `gold_stint` | `(session_key, driver_number, stint_number)` | `is_phantom_stint`, `overlaps_previous`, `gap_from_previous`, `has_known_compound`, `is_valid_stint` |
-| `gold_pit` | one row per stop | `under_caution`, `is_race_stop`, `is_green_race_stop`, `is_red_flag_stop`, `has_stop_duration`. No duration threshold anywhere |
+| `gold_pit` | one row per stop | `under_caution`, `is_race_stop`, `is_green_race_stop`, `is_red_flag_stop`, `is_garage_repair`, `has_stop_duration`. No duration threshold in seconds anywhere |
 | `gold_session_result` | `(session_key, driver_number)` | Result plus the grid it started from, which needs a hop out to the meeting and back into Qualifying. `positions_gained`, `classified`, `has_grid` |
 | `gold_weather` | `(session_key, date)` | |
 | `gold_overtake` | one row per pass | Both drivers' teams conformed, plus `same_team` |

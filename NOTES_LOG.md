@@ -2016,6 +2016,113 @@ the real `Diagnostics`, rather than a copy of the code, which would only have pr
 copy works.
 
 
+### 70. A red-flag hold can wear a green lap number, and `pit.date` is the exit
+
+*2026-09-11. Started as a question about question I and turned into a gap in question H.*
+
+**The prompt.** Asked directly whether these long green-flag stops are DNFs, or the
+drivers who crashed and brought out the red flag. Both were worth measuring and neither
+had been.
+
+**DNF: a correlate, not a rule.** 40% of green stops over 300s end in a DNF against an 8.2%
+baseline, so the instinct points at something real. But three of the five did not retire,
+and 219 perfectly ordinary sub-60s stops sit in races the driver retired from for
+unrelated reasons. A DNF test would miss most of the problem and wrongly strip hundreds of
+genuine stops.
+
+**The crash question found a real bug.** Question H matched red-flag holds on LAP NUMBER.
+A car that enters the lane on a green lap and is still there when the race is suspended
+keeps its green lap number and walks straight through the filter. 2023 Zandvoort car 11:
+2,461.6s in the lane, filed under lap 63, that driver's red-flag laps 64 to 67. It read as
+a 41 minute green-flag pit stop. Flagging lap 63 would be wrong, because lap 63 really was
+raced green, so the flag has to belong to the pit record.
+
+**`silver_pit.date` is the pit lane EXIT.** The fix needs the interval the car was in the
+lane, which made the convention load-bearing, so it was measured rather than assumed:
+
+| reading | entry lands in the last tenth of its lap | entry lands AFTER its lap ended |
+|---|---|---|
+| `date` is the exit, window `[date-dur, date]` | **84.5%** | 0.4% |
+| `date` is the entry, window `[date, date+dur]` | 0.3% | **98.6%** |
+
+A pit entry cannot happen after its own lap finished, so `date` is the exit. This also
+settles Zandvoort: read as the exit, 2,450 of its 2,461.6 lane seconds fall inside the
+suspension, so the car was held there essentially the whole time. Read as the entry only
+318s overlap, which would mean a car that finished 4th sat in the lane for 36 green
+minutes first.
+
+**The fix** is `silver_pit_flags`, built by s02b beside `silver_lap_flags` and keyed like
+`silver_pit`. `red_flag` is the union of the lap flag and a clock overlap, so it can only
+ever add: verified as a strict superset, nothing lost, exactly one record gained.
+
+**A second bug, caught before it fired.** s02b only runs when silver is rebuilt, which is
+correct while its tables already exist and wrong the moment it learns to build a new one.
+Every no-new-data run would have reached the serving layers with `silver_pit_flags`
+missing and failed there. The run immediately before this one ingested zero rows, so the
+next run would have been the failing one. `missing_derived()` now triggers s02b on its
+own. This is the same shape as the blind spot `stale_tables` was written for in August:
+the rebuild trigger and the thing that needs rebuilding were not the same question.
+
+**What it did not fix.** Four garage repairs with no caution flying at all, which is
+question I proper, plus one more in a sprint. Those are unaffected.
+
+
+### 71. Question I: a garage repair is measured in laps, not seconds
+
+*2026-09-11. Closed the same day as #70, which had to come first.*
+
+**The decision taken.** A record over **three racing laps** in the lane is a garage repair,
+and repairs are labelled and shown rather than filtered, the same treatment red-flag holds
+already get.
+
+**Why laps.** A pit stop happens within a lap; that is what it is. Dividing time in the
+lane by the session's median green lap makes the test calibrate itself, strict at Monaco's
+70.5s laps and lenient at Spa's 113.2s, with nobody choosing a number per circuit. The
+threshold also means something physical: a car in the lane that long has been lapped
+several times, which no pit strategy involves.
+
+**The alternatives, measured rather than asserted.** A flat 300s ceiling removes the same
+records today, but its gap is in seconds, which move with circuit and season. A Tukey
+fence, this project's usual robust-outlier tool, lands at 31.5s and removes 167 records,
+because it is built to find slow stops and not non-stops.
+
+**Where the evidence was weaker than it first looked.** The empty band was measured on
+RACES, where nothing genuine sits between 1.15 and 9.26 laps, a factor of eight. Sprints
+were not in that sample. Including them, which is the population the rule actually runs
+on, puts a record at **2.02 laps**, so the threshold sits about 1% away from a data point
+rather than in the middle of a gap:
+
+    1.15 laps   Montreal 2023 race    88.9s    a badly botched stop
+    2.02 laps   Montreal 2026 sprint 155.1s    ambiguous, currently flagged
+    9.26 laps   Catalunya 2026 race  777.7s    unambiguous repair
+
+The true empty band is 2.02 to 9.26. **The threshold was moved to 3 laps the same day**,
+which puts it inside that band with 2.02 below and 9.26 above. Raised rather than quietly
+changed, because the two-lap value had been chosen against the race-only table and that
+table was incomplete, so the choice deserved to be made again on the real picture.
+
+The stakes were one record, the 2026 Montreal sprint at 155.1s, and `fact_event` is
+race-scoped, so it never reached a dashboard page either way. That is worth writing down:
+the argument for moving the line was entirely about it not drifting later, not about
+getting a visible number right today.
+
+**Scope.** Five records across races and sprints, 777.7s to 2,485.9s, against a longest
+genuine stop of 93.2s. Four of them are races and therefore visible. Practice and
+qualifying flag in the thousands and that is correct rather than a bug: sitting in the
+garage is what practice is for, and nothing counts practice pit stops.
+
+**Effect on the green population.** Across races and sprints, mean 24.35s and maximum
+155.1s, against a maximum of **2,485.9s** before. On races alone, which is what the
+dashboard shows, `fact_event.pit_stop` tops out at **93.2s**. That maximum is the number
+question I existed for; the 155.1s is the deliberately kept sprint record above.
+
+**Dead code removed, twice over.** Both the driver page's `"garage repair"` verdict and
+the race page's `LONG_VISIT_SECONDS = 120` caption existed only because repairs had nowhere
+to go. Both would now describe nothing, since repairs left those tables the moment they got
+their own event type. That is the second time a label here outlived the rows it described;
+the first was `"red-flag suspension"` after question H.
+
+
 ## Open questions
 
 ### A. `caution_flag` under-detects Safety Car periods
@@ -2259,7 +2366,8 @@ to tell the two apart, not to delete one.
 
 ### I. A long garage repair is still recorded as a green-flag pit stop
 *Raised 2026-09-06 while resolving question H, which fixed the red-flag case and left
-this one visible.*
+this one visible. **RESOLVED 2026-09-11, see #71.** The original entry is kept below,
+including the correction that shows its numbers were wrong.*
 
 Three race records show a car in the pit lane for 13 to 18 minutes with **no caution
 flying at all**, so nothing excludes them and they sit in the green-flag stop population:
@@ -2287,6 +2395,64 @@ on a pipeline that runs unattended twice a week. T22's Tukey fence is quartile-b
 already robust to these, so the practical damage is confined to a maximum nobody
 currently displays. Deliberately left open rather than fixed with a constant that has no
 principled value.
+
+---
+
+**CORRECTION, 2026-09-11. Everything above the line was measured on the wrong
+population.** A full scan of green race records finds **five**, not three, and the worst
+is **41 minutes, not 18**:
+
+| Race | Car | In lane | Lap | |
+|---|---|---|---|---|
+| 2023 Suzuka | 11 | 2,485.9s | 13 | DNF |
+| 2023 Zandvoort | 11 | 2,461.6s | 63 | a red-flag hold, see #70 |
+| 2026 Melbourne | 18 | 1,081.5s | 34 | |
+| 2026 Melbourne | 14 | 972.3s | 13 | DNF |
+| 2026 Catalunya | 23 | 777.7s | 34 | |
+
+The true means are 27.12s with them and 24.27s without, against the 25.60 and 24.22
+recorded above. The original count and maximum reproduce only on a population that
+excludes 2023, but no slice reproduces all four figures, so the cause is not worth
+guessing at: the numbers are simply unreliable. The conclusion they supported, that "the
+practical damage is confined to a maximum nobody currently displays", rested on a maximum
+that was wrong by a factor of two.
+
+Zandvoort is now handled as a red-flag hold by #70 and is no longer part of this question.
+Sprint sessions add one more, 2026 Zandvoort car 27 at 1,270.4s, so **five genuine garage
+repairs remain across races and sprints**.
+
+**A rule that is not a constant, measured.** A pit stop happens within a lap; that is what
+it is. Expressing time in the lane as a multiple of that session's median green lap makes
+the test self-calibrating, so it is strict at Monaco (70.5s laps) and lenient at Spa
+(113.2s) without anyone choosing a number:
+
+| time in lane, in racing laps | records |
+|---|---|
+| under 0.8 | 2,666 |
+| 0.8 to 1.0 | 1 (Shanghai 2024 car 18, 93.2s) |
+| 1.0 to 1.5 | 1 (Montreal 2023 car 63, 88.9s) |
+| **1.5 to 5.0** | **0** |
+| 5.0 and above | 5, every one a repair |
+
+The empty band runs from 1.15 to 9.26 laps, a factor of eight, and the two records just
+above 1.0 are long stops rather than repairs, so the boundary should not sit at exactly
+one lap. A line of a few racing laps sits in the middle of the empty band and has a
+physical reading: a car in the lane that long has been lapped repeatedly, which no pit
+strategy involves. (Two was chosen first and then moved to three once sprints were
+included in the measurement. See #71.)
+
+This is still a calibrated threshold and not a structural certainty, and it should be
+recorded as one. What it is not is arbitrary: the flat 300s ceiling removes the same five
+records today, but its gap is in seconds, which move with the circuit and the season,
+while the lap-normalised gap does not.
+
+**A Tukey fence is the wrong tool here** and confirms the original instinct. On lane
+duration it lands at 31.5s and removes 167 records, because it is built to find slow stops,
+not non-stops.
+
+**Both decisions were taken on 2026-09-11:** the two-lap rule, and labelling rather than
+filtering. See #71, which also records where this evidence turned out to be thinner than
+it looks, because the empty band above was measured on races and sprints were not in it.
 
 ### J. `pit_flag` still counts a red-flag lap as a lap the driver pitted
 *Raised 2026-09-06, deliberately not changed while resolving question H. **RESOLVED

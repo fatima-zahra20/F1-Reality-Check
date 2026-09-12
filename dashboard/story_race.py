@@ -30,7 +30,7 @@ from app_common import NEUTRAL, coverage_gaps, fmt_lap, query, team_colours
 from story_common import (
     AXIS_BASE, CLEAN_LAP, FIGHTING_SECONDS, PLOT_BASE, ink,
     field as _field, guide as _guide, hbar as _bar, labels as _labels,
-    held_table, red_flag_holds,
+    garage_repairs, held_table, red_flag_holds,
 )
 
 
@@ -381,11 +381,12 @@ def _pit_stops(session_key: int) -> None:
         # anyway, because a race suspended before anybody pitted would otherwise
         # be reported as missing data, which is the same wrong-explanation bug
         # the driver page had (NOTES_LOG #65).
-        if len(red_flag_holds(session_key)):
+        if len(red_flag_holds(session_key)) or len(garage_repairs(session_key)):
             st.info(
-                "No pit stops were made in this race. It was red-flagged and "
-                "the field was held in the pit lane, which is recorded but is "
-                "not a pit stop. Open a driver to see what each car did."
+                "No pit stops were made in this race. What the pit records "
+                "hold is time in the lane under a red flag, or a car in the "
+                "garage being repaired, neither of which is a pit stop. Open a "
+                "driver to see what each car did."
             )
         else:
             st.info(
@@ -403,40 +404,30 @@ def _pit_stops(session_key: int) -> None:
     disasters = stops[stops.lane_seconds > fence].sort_values(
         "lane_seconds", ascending=False)
 
-    # This threshold no longer has anything to do with red flags, and the note
-    # it used to print was wrong the moment those got their own event_type
-    # (NOTES_LOG #65): `stops` is now pit stops only, so nothing above two
-    # minutes here is a suspension. What is left above it are the long garage
-    # repairs of open question I, three cars taken in for 13 to 18 minutes with
-    # no caution flying and then sent back out. Real, still counted, but calling
-    # one of them the slowest pit stop of the race would be nonsense.
-    LONG_VISIT_SECONDS = 120
-    racing_stops = valid[valid <= LONG_VISIT_SECONDS]
-    repairs = int((valid > LONG_VISIT_SECONDS).sum())
-
+    # The 120-second workaround that used to live here is gone. It existed only
+    # because garage repairs had nowhere else to go, and it would now describe
+    # nothing: repairs left `stops` when they got their own event_type, exactly
+    # as red-flag records did before them. Both are fetched properly below.
     held = red_flag_holds(session_key)
+    repairs = garage_repairs(session_key)
 
-    # A fourth metric only when there is something to put in it. On the 74 races
+    # Extra metrics only when there is something to put in them. On the 74 races
     # with no red flag a permanent "Red-flag stops: 0" would imply the number is
     # interesting, and it is not.
-    cols = st.columns(4 if len(held) else 3)
-    cols[0].metric("Stops made", f"{len(stops)}")
+    metrics = [("Stops made", f"{len(stops)}", None)]
     if len(held):
-        cols[1].metric("Red-flag stops", f"{len(held)}",
-                       f"{held.driver_number.nunique()} cars held")
-    cols[-2].metric("Median time in lane", f"{valid.median():.1f}s",
-                    f"slowest {racing_stops.max():.1f}s"
-                    if len(racing_stops) else None)
-    cols[-1].metric("Unusually long", f"{len(disasters)}", f"over {fence:.1f}s")
+        metrics.append(("Red-flag stops", f"{len(held)}",
+                        f"{held.driver_number.nunique()} cars held"))
+    if len(repairs):
+        metrics.append(("Garage repairs", f"{len(repairs)}",
+                        f"{repairs.driver_number.nunique()} cars"))
+    metrics.append(("Median time in lane", f"{valid.median():.1f}s",
+                    f"slowest {valid.max():.1f}s" if len(valid) else None))
+    metrics.append(("Unusually long", f"{len(disasters)}", f"over {fence:.1f}s"))
 
-    if repairs:
-        st.caption(
-            f"{repairs} car{'s' if repairs > 1 else ''} spent over "
-            f"{LONG_VISIT_SECONDS}s in the lane under green flags, which is a "
-            "garage repair rather than pit work. Those are excluded from the "
-            "slowest-stop figure above but remain in the counts and the table "
-            "below."
-        )
+    cols = st.columns(len(metrics))
+    for col, (label, value, delta_text) in zip(cols, metrics):
+        col.metric(label, value, delta_text, delta_color="off")
 
     by_lap = stops.groupby("lap_number").size().reset_index(name="stops")
     fig = go.Figure(go.Bar(
@@ -493,6 +484,21 @@ def _pit_stops(session_key: int) -> None:
             "Held is the time the car spent in the pit lane, which is the "
             "length of the suspension rather than anything the crew did. "
             "\"Fresh\" means a new set of the compound the car was already on."
+        )
+
+    if len(repairs):
+        st.markdown("**Garage repairs**")
+        st.caption(
+            "These cars were in the pit lane for longer than three racing laps "
+            "with no suspension on, which is a repair rather than pit work. "
+            "Not counted above, and each car rejoined and kept racing."
+        )
+        held_table(repairs, show_car=True, label="In lane")
+        _guide(
+            "The threshold is three racing laps at this circuit rather than a "
+            "fixed number of seconds, because pit lanes and lap times differ "
+            "enormously between tracks. A car in the lane that long has been "
+            "lapped repeatedly, which no pit strategy involves."
         )
 
 

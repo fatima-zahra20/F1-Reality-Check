@@ -42,7 +42,7 @@ EXPECTED_TABLES = [
     "silver_championship_drivers", "silver_championship_teams",
 ]
 # Derived tables, built by s02b_caution_flags.py rather than the silver build.
-DERIVED_TABLES = ["silver_caution_periods", "silver_lap_flags"]
+DERIVED_TABLES = ["silver_caution_periods", "silver_lap_flags", "silver_pit_flags"]
 # Columns created by the silver build that the data dictionary does NOT document.
 # If these go missing, a rebuild silently regressed to the raw mixed-type columns.
 REQUIRED_SPLIT_COLUMNS = {

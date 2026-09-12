@@ -845,6 +845,13 @@ def a07_pit_lane_by_team(d: Diagnostics, ctx) -> None:
     # stop, so it is not part of "how long does a team's pit stop take". The
     # Tukey fence used to swallow these anyway and report them as disasters,
     # which attributed a stewards' decision to a pit crew.
+    #
+    # silver_pit_flags, not silver_lap_flags: the flag has to be per pit record,
+    # because a car can enter the lane on a green lap and still be there when
+    # the race is suspended. See build_pit_flags in s02b.
+    #
+    # garage_repair goes too, question I. A car worked on for longer than two
+    # racing laps is not evidence about how fast a pit crew works.
     pits = read_sql(f"""
         WITH scope AS ({RACE_SCOPE})
         SELECT p.session_key, p.driver_number, p.lap_number, p.lane_duration,
@@ -855,12 +862,13 @@ def a07_pit_lane_by_team(d: Diagnostics, ctx) -> None:
         JOIN silver_meetings m ON m.meeting_key = s.meeting_key
         JOIN silver_drivers d
           ON d.session_key = p.session_key AND d.driver_number = p.driver_number
-        LEFT JOIN silver_lap_flags lf
+        LEFT JOIN silver_pit_flags lf
           ON  lf.session_key   = p.session_key
           AND lf.driver_number = p.driver_number
           AND lf.lap_number    = p.lap_number
         WHERE p.lane_duration IS NOT NULL
           AND COALESCE(lf.red_flag, 0) = 0
+          AND COALESCE(lf.garage_repair, 0) = 0
     """, con)
     pits = drop_excluded_teams(normalize_teams(pits))
 
@@ -1849,6 +1857,10 @@ def a22_disaster_stop_concentration(d: Diagnostics, ctx) -> None:
     # red_flag = 0, for two reasons. A suspension is not a disaster stop, and
     # leaving it in also shifted stop_number: a red-flag row consumed an ordinal,
     # so a driver's genuine second stop was counted as their third.
+    #
+    # silver_pit_flags, not silver_lap_flags: see build_pit_flags in s02b.
+    # garage_repair excluded alongside it: a 13 minute repair is not a disaster
+    # STOP, and leaving it in shifts stop_number the same way a red flag did.
     pits = read_sql(f"""
         WITH scope AS ({RACE_SCOPE})
         SELECT p.session_key, p.driver_number, p.lap_number, p.lane_duration,
@@ -1857,12 +1869,13 @@ def a22_disaster_stop_concentration(d: Diagnostics, ctx) -> None:
         JOIN silver_pit p ON p.session_key = scope.session_key
         JOIN silver_drivers d
           ON d.session_key = p.session_key AND d.driver_number = p.driver_number
-        LEFT JOIN silver_lap_flags lf
+        LEFT JOIN silver_pit_flags lf
           ON  lf.session_key   = p.session_key
           AND lf.driver_number = p.driver_number
           AND lf.lap_number    = p.lap_number
         WHERE p.lane_duration IS NOT NULL
           AND COALESCE(lf.red_flag, 0) = 0
+          AND COALESCE(lf.garage_repair, 0) = 0
     """, con)
     pits = drop_excluded_teams(normalize_teams(pits))
 

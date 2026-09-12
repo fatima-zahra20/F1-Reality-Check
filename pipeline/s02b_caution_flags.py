@@ -66,6 +66,19 @@ MIN_CARS_FOR_RESTART = 3
 # Fallback lap length when lap_duration is NULL and there is no following lap.
 DEFAULT_LAP_SECONDS = 120
 
+# Time in the pit lane, in RACING LAPS, above which a record is a garage repair
+# rather than a pit stop. In laps and not seconds so it calibrates itself across
+# circuits. See build_pit_flags and open question I.
+#
+# THREE, not two. Two was the first choice, from a table measured on races only,
+# where nothing genuine sits between 1.15 and 9.26 laps. Sprints were not in
+# that sample and the rule runs on them too: 2026 Montreal sprint car 6 sits at
+# 2.02 laps, so a line at 2.0 would have been touching a record rather than
+# sitting in a gap, and a couple of percent of drift in that session's reference
+# lap would have flipped it with nothing to explain the change. At 3.0 the
+# nearest records are 2.02 below and 9.26 above.
+GARAGE_REPAIR_LAPS = 3.0
+
 # Ways a red flag period can close that mean the race demonstrably resumed, and
 # so that a formation lap follows. 'session_end' is excluded deliberately: a
 # race that finished under red flag never restarted and has no formation lap.
@@ -789,7 +802,132 @@ def build_lap_flags(con: duckdb.DuckDBPyConnection, periods: pd.DataFrame) -> pd
     ]]
 
 
-def write_tables(con: duckdb.DuckDBPyConnection, periods: pd.DataFrame, flags: pd.DataFrame) -> None:
+def build_pit_flags(con: duckdb.DuckDBPyConnection, periods: pd.DataFrame,
+                    lap_flags: pd.DataFrame) -> pd.DataFrame:
+    """
+    Classifies each PIT RECORD: was it a suspension, and was it a repair?
+
+    Two flags, both answering "is this record a pit stop at all", which is a
+    different question from "was this pit stop slow". Neither one deletes
+    anything.
+
+    WHY THIS IS NOT silver_lap_flags. Question H stopped counting red-flag holds
+    as pit stops by joining silver_pit to silver_lap_flags on the lap number.
+    That misses a car which enters the lane on a green lap and is still sitting
+    there when the race is suspended: the record keeps its green lap number and
+    walks straight through the filter. 2023 Zandvoort car 11 is exactly that,
+    2,461.6s in the lane filed under lap 63 while that driver's red-flag laps
+    are 64 to 67. It read as a 41 minute green-flag pit stop.
+
+    Marking lap 63 red would be wrong, because lap 63 really was raced green, so
+    the flag belongs to the pit record and needs a table of its own.
+
+    THE TIME WINDOW. silver_pit.date is the moment the car LEAVES the pit lane,
+    not the moment it enters, so the window is [date - lane_duration, date].
+    That is measured, not assumed: taking date - lane_duration as the entry puts
+    84.5% of ordinary stops in the last tenth of the lap they are filed under,
+    which is what a pit entry looks like, while reading date as the entry puts
+    98.6% of them AFTER their lap had already ended, which is impossible.
+
+    A UNION, not a replacement. red_flag is set when the lap flag says so OR the
+    lane time overlaps a red period. Overlap alone catches 181 of the 184 holds
+    the lap join already finds, and the three it misses are real; keeping both
+    means this can only ever add.
+
+    GARAGE REPAIRS, which is open question I. A pit stop happens within a lap;
+    that is what it is. So time in the lane is measured against ONE RACING LAP
+    at that session, the median lap with no caution of any kind flying. A record
+    over GARAGE_REPAIR_LAPS of those is a repair, not a stop.
+
+    Measured in laps rather than seconds so the test calibrates itself: Monaco
+    runs 70.5s laps and Spa 113.2s, and the same rule has to be strict at one
+    and lenient at the other without anyone choosing a number per circuit.
+
+    Where the line goes. Every green race and sprint record near it:
+
+        0.92 laps    93.2s   2024 Shanghai race    a slow stop
+        1.15 laps    88.9s   2023 Montreal race    a badly botched stop
+        2.02 laps   155.1s   2026 Montreal sprint  ambiguous
+        9.26 laps   777.7s   2026 Catalunya race   unambiguous repair
+
+    At 3.0 the line sits between 2.02 and 9.26 with nothing near it. See the
+    constant for why it is not 2.0.
+
+    This is an honest calibration and not a structural certainty, and it should
+    be read as one. What it is not is arbitrary. A flat 300s ceiling removes the
+    same records today, but its gap is in seconds, which move with circuit and
+    season. A Tukey fence is the wrong tool entirely: on lane duration it lands
+    at 31.5s and takes 167 records, because it is built to find slow stops, not
+    non-stops.
+
+    PRACTICE SESSIONS WILL FLAG HEAVILY and that is correct, not a bug. Sitting
+    in the garage for twenty minutes is what practice is for. Nothing counts
+    practice pit stops, and the flag states a true fact about the record either
+    way.
+
+    lap_flags arrives as the frame build_lap_flags just produced, not from
+    silver_lap_flags, because write_tables has not run yet at this point and the
+    table still holds the previous run's values.
+    """
+    pits = read_sql("""
+        SELECT session_key, driver_number, lap_number, "date", lane_duration
+        FROM silver_pit
+        ORDER BY session_key, driver_number, lap_number
+    """, con)
+
+    pits = pits.merge(
+        lap_flags[["session_key", "driver_number", "lap_number", "red_flag"]]
+        .rename(columns={"red_flag": "lap_red_flag"}),
+        on=["session_key", "driver_number", "lap_number"], how="left")
+    pits["lap_red_flag"] = pits["lap_red_flag"].fillna(0)
+
+    pits["exit_at"] = pd.to_datetime(pits["date"], format="ISO8601", utc=True)
+    pits["enter_at"] = pits["exit_at"] - pd.to_timedelta(
+        pits["lane_duration"], unit="s")
+    # No duration means no window to test; fall back to the lap flag alone.
+    pits["enter_at"] = pits["enter_at"].fillna(pits["exit_at"])
+
+    pits["red_flag"] = pits["lap_red_flag"].astype(int)
+
+    red = periods[periods["kind"] == "RED"] if not periods.empty else periods
+    if not red.empty:
+        for session_key, per in red.groupby("session_key", sort=False):
+            mask_session = pits["session_key"] == session_key
+            if not mask_session.any():
+                continue
+            sub = pits.loc[mask_session]
+            for _, p in per.iterrows():
+                overlap = ((sub["enter_at"] < p["date_end"])
+                           & (sub["exit_at"] > p["date_start"]))
+                pits.loc[sub.index[overlap.fillna(False)], "red_flag"] = 1
+
+    # --- garage repairs, question I ------------------------------------------
+    laps = read_sql("""
+        SELECT session_key, driver_number, lap_number, lap_duration
+        FROM silver_laps WHERE lap_duration IS NOT NULL
+    """, con)
+    laps = laps.merge(lap_flags, on=["session_key", "driver_number", "lap_number"],
+                      how="left")
+    clean = laps[(laps["neutralised"].fillna(0) == 0)
+                 & (laps["yellow_sector_flag"].fillna(0) == 0)]
+    ref = clean.groupby("session_key")["lap_duration"].median()
+
+    pits["ref_lap"] = pits["session_key"].map(ref)
+    pits["lane_laps"] = pits["lane_duration"] / pits["ref_lap"]
+    # No reference lap or no duration means the question cannot be asked. Not a
+    # repair is the right default: this flag exists to remove records from the
+    # stop population, and removing one on missing evidence is the worse error.
+    pits["garage_repair"] = (pits["lane_laps"] >= GARAGE_REPAIR_LAPS).fillna(
+        False).astype(int)
+    # A car held by a suspension is already accounted for and is not a repair.
+    pits.loc[pits["red_flag"] == 1, "garage_repair"] = 0
+
+    return pits[["session_key", "driver_number", "lap_number",
+                 "red_flag", "garage_repair"]]
+
+
+def write_tables(con: duckdb.DuckDBPyConnection, periods: pd.DataFrame, flags: pd.DataFrame,
+                 pit_flags: pd.DataFrame) -> None:
     con.execute("DROP TABLE IF EXISTS silver_caution_periods")
     con.execute("""
         CREATE TABLE silver_caution_periods (
@@ -854,6 +992,31 @@ def write_tables(con: duckdb.DuckDBPyConnection, periods: pd.DataFrame, flags: p
         con.unregister("_flags")
     con.execute("""
         CREATE INDEX idx_lap_flags_session ON silver_lap_flags (session_key)
+    """)
+
+    con.execute("DROP TABLE IF EXISTS silver_pit_flags")
+    con.execute("""
+        CREATE TABLE silver_pit_flags (
+            session_key   INTEGER NOT NULL,
+            driver_number INTEGER NOT NULL,
+            lap_number    INTEGER NOT NULL,
+            red_flag      INTEGER,
+            garage_repair INTEGER,
+            PRIMARY KEY (session_key, driver_number, lap_number)
+        )
+    """)
+    con.register("_pit_flags", pit_flags)
+    try:
+        con.execute("""
+            INSERT INTO silver_pit_flags
+                (session_key, driver_number, lap_number, red_flag, garage_repair)
+            SELECT session_key, driver_number, lap_number, red_flag, garage_repair
+            FROM _pit_flags
+        """)
+    finally:
+        con.unregister("_pit_flags")
+    con.execute("""
+        CREATE INDEX idx_pit_flags_session ON silver_pit_flags (session_key)
     """)
 
 
@@ -943,8 +1106,14 @@ def main() -> int:
     flags = build_lap_flags(con, periods)
     print(f"  {len(flags):,} laps processed")
 
+    print("\nFlagging pit records by time in the lane...")
+    pit_flags = build_pit_flags(con, periods, flags)
+    print(f"  {len(pit_flags):,} pit records processed, "
+          f"{int(pit_flags['red_flag'].sum()):,} under a red flag, "
+          f"{int(pit_flags['garage_repair'].sum()):,} garage repairs")
+
     print("\nWriting tables...")
-    write_tables(con, periods, flags)
+    write_tables(con, periods, flags, pit_flags)
 
     summary = flags[["sc_flag", "vsc_flag", "red_flag", "yellow_sector_flag", "neutralised"]].sum()
     print("\nFlagged laps:")
