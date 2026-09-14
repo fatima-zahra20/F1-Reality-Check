@@ -2131,6 +2131,114 @@ their own event type. That is the second time a label here outlived the rows it 
 the first was `"red-flag suspension"` after question H.
 
 
+### 72. A new circuit gets its track map automatically, and bronze writes are 600 times faster
+
+*2026-09-14. Started as "no track map for Madring" and uncovered two older defects underneath.*
+
+**What happened.** The Spanish Grand Prix at Madring, a circuit new to the calendar, published
+with "No track map for this circuit". Waiting would never have fixed it. A map is traced from
+location telemetry, telemetry is never part of ingest because it is tens of millions of rows,
+and every earlier circuit had been fetched by hand at some point. The scheduled run had no way
+to notice a new venue, so every new circuit would have repeated this.
+
+**The rule, now in `run_pipeline.py`.** `maps_missing_telemetry()` finds circuits with a race
+that has already happened and not a single location row for any session, and fetches ONE
+session for each: qualifying first, then practice, then race, the same preference s05c uses
+when choosing a lap to trace. It runs after the gate passes and before the serving layers, and
+is never fatal. Success is judged by checking again afterwards, not by the step's exit code,
+because `run_telemetry` returns 0 even when a fetch fails.
+
+Two guards, both measured rather than assumed:
+
+- **Already raced.** On the day this was written Kuala Lumpur also had no data, because its
+  race is in December. Without the date filter it would have been queried twice a week until
+  then.
+- **Gives up.** A session answered empty more than `TELEMETRY_GRACE_DAYS` (7) after it ran is
+  skipped and the next preference tried. A circuit where every session is settled empty is
+  reported and not asked again.
+
+Verified live, where it picks exactly Madring qualifying (session 11365) in 0.6s, and on
+synthetic databases covering eight cases: a settled-empty qualifying falls back to practice, a
+session still inside the grace period or one that merely failed is retried, future, cancelled
+and already-mapped circuits are left alone, a sprint weekend prefers Qualifying over Sprint
+Qualifying, and an exhausted circuit is reported once.
+
+**Why the first real fetch ran for over an hour.** `s01_backfill.insert_rows` wrote with
+`executemany`, which DuckDB runs one row at a time:
+
+| method | rows per second | 1,000,000 rows |
+|---|---|---|
+| `executemany`, as it was | 141 | about 118 minutes |
+| one bulk INSERT from a DataFrame | 84,168 | about 12 seconds |
+
+The Madring qualifying fetch was stopped after 71 minutes. `s01_ingest` imports the same
+function, which is why that morning's scheduled run spent 313 seconds on 35,104 ordinary rows.
+Every run was paying this, not only telemetry.
+
+**The rewrite keeps stored text byte-identical.** Values are still converted to text in plain
+Python first, exactly as before; only the write became one statement. Letting pandas see the
+raw records would have inferred types, and a whole-number column with one gap would have stored
+2048 as "2048.0". Checked against a verbatim copy of the old code on 3,000 mixed rows (numbers
+with gaps, decimals, booleans, lists, quotes, accents): zero differences in either direction,
+every column still VARCHAR, 21.69s old against 0.178s new.
+
+**A second bug beside it.** `ensure_columns` read the existing columns and then did nothing, so
+the first new field OpenF1 sent would have failed every write to that table. Proven: the old
+code raised `BinderException` on a new field, the new code adds the column. Records are also
+read for every key they carry rather than only the first record's, so a field that first
+appears later in a response is no longer silently dropped.
+
+**A third bug, found when the fast re-fetch ran.** The rows wrote in under two minutes, and
+then `record()` failed with a duplicate-key error. It replaced a progress row with DELETE then
+INSERT in one transaction, and DuckDB 1.5.5 rejects re-inserting a key deleted in the same
+transaction once that key is saved to disk. Reproduced on a copy of bronze for an unrelated
+pair and on a brand-new database, with the index checked healthy (0 of 300 sampled keys
+disagreeing with a full scan, no duplicate keys), so it is engine behaviour and not damage
+from the stopped run. Why the same call succeeded earlier that day is not explained; that it
+now fails reproducibly is what decides it. It mattered beyond telemetry: `s01_ingest` records
+every retried pair through the same function, and a failure there leaves rows written but not
+recorded, to be fetched again and inserted as duplicates that the gate would then reject.
+
+It now UPDATEs an existing row and INSERTs a missing one, in one transaction. `INSERT OR
+REPLACE` passed the same tests but was rejected for the reason the old docstring gave: with the
+unique index dropped it refuses to run at all, while update-or-insert still records correctly
+and writes no duplicate.
+
+**The stopped run, and why stopping it was safe.** The old writes committed row by row, so
+stopping mid-car_data left 358,142 partial car_data rows for session 11365 beside a complete
+390,222 location rows (location is written in full before car_data starts). A re-fetch clears
+the session before writing, so the partial set was replaced rather than doubled. The new bulk
+write is a single statement and cannot leave a partial set at all, which also means the map
+rule can never mistake an interrupted fetch for a circuit that has data.
+
+**The re-fetch, with all three fixes.** Madring qualifying and race, both endpoints: 2,341,116
+rows in 9 minutes 10 seconds, against 71 minutes for part of qualifying alone before. What
+remains is the download itself, 23 paged calls per endpoint with a one-second pause, 105 to 169
+seconds each. Checked afterwards: every (driver, timestamp) appears exactly once in all four
+sets; qualifying location came back at exactly the 390,222 rows already saved before the stop,
+which proves clear-then-write replaced rather than added; qualifying car_data rose from the
+partial 358,142 to 385,154; all four pairs are recorded `ok`; and the map rule finds nothing
+left to fetch.
+
+**Outcome.** Published 2026-09-14 at about 11:17, in a 231 second run that logged `maps: no
+circuit missing position data`. Madring has an outline (400 points) and recorded race
+positions (67,213 after thinning), and 84 of 84 races now have a map. The outline is unpinned
+(`chosen fresh (not yet pinned): [153]`) and has no north rotation, both as expected.
+
+**What the new race revealed about s05d, open question K.** Adding Madring's race moved nothing
+in the tow and DRS figures, which prompted a check that the new writer had not stored empty
+values. It had not: speed, rpm, gear and throttle are complete, with the same ranges as sessions
+the old code wrote. What is empty is `drs`, in every 2026 session, including the four written
+by the old code, which is consistent with the 2026 regulations removing DRS. s05d filters
+`drs IS NOT NULL`, so its 2,750,280 samples are exactly the four 2023 races (700,340 + 667,480
++ 721,300 + 661,160), while it reports "races with telemetry: 7".
+
+**Still manual, on purpose.** A new circuit's outline is traced fresh on each run until it is
+pinned, and `--repick` re-chooses all 24 existing circuits, so it is not run casually. Its
+compass letters need `fetch_circuit_north.py`, which stays hand-run because it depends on
+somebody else's server for a constant. Neither affects whether a map appears.
+
+
 ## Open questions
 
 ### A. `caution_flag` under-detects Safety Car periods
@@ -2480,3 +2588,18 @@ a control" defence does not survive the fact that `pit_flag` is the term the tes
 reported on. The suspected mechanism was wrong too: it is not that suspended laps swing
 wildly, it is that they barely swing at all, so pooling them flattened the estimate rather
 than inflating it.
+
+### K. The DRS and tow figures count races that contribute nothing
+*Raised 2026-09-14 while verifying the Madring re-fetch. See #72.*
+
+`s05d_telemetry` counts a race as covered when it has any car_data, then keeps only rows where
+`drs` is not null. Every 2026 session has `drs` null in every row, consistent with the 2026
+regulations removing DRS, so Hungaroring 2026, Monte Carlo 2026 and Madring 2026 are counted and
+contribute zero samples. The 2,750,280 samples behind the tow (+19.8 km/h) and DRS (-4.825s per
+unit share) figures are exactly four 2023 races: Catalunya, Jeddah, Sakhir and Spa. The step
+prints "These figures cover 7 races, not 81. The panel must say so"; the honest number is 4,
+all from one season.
+
+Two things to decide. First, count only races that contribute usable samples. Second, whether
+a DRS effect measured on 2023 cars belongs on a dashboard about a sport that no longer has DRS.
+Deliberately not changed yet, because it bears on how the diagnostic layer is being rethought.

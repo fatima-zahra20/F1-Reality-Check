@@ -34,6 +34,10 @@ minority of the 495 sessions (car_data 38, location 83, as of 2026-08-31), so it
 cannot be a model feature or appear in a season-wide aggregate. Fetch it on
 demand with s01_backfill.py --telemetry.
 
+One exception lives in run_pipeline.py, not here: a circuit raced for the first
+time has no position data at all, and so no track map. The runner fetches ONE
+session's telemetry for exactly that case. See maps_missing_telemetry.
+
 Usage
 -----
     python pipeline\\s01_ingest.py                 # dry run — shows the plan

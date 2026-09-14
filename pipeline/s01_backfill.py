@@ -51,6 +51,7 @@ from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 
+import pandas as pd
 import requests
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -356,9 +357,20 @@ def fetch_session(endpoint: str, session_key: int, drivers: list[int]):
 # --- writing ---------------------------------------------------------------------
 
 def ensure_columns(con: duckdb.DuckDBPyConnection, table: str, cols) -> None:
+    """
+    Add any column the API has started sending that bronze does not have yet.
+
+    This used to read the existing columns and then stop, so it never added
+    anything. Harmless while OpenF1's fields stayed the same, and a failed write
+    on every run of that endpoint from the day they changed. Found 2026-09-14
+    while rewriting insert_rows below.
+    """
     existing = {r[0] for r in con.execute(
         "SELECT column_name FROM information_schema.columns "
         "WHERE table_name = ?", [table]).fetchall()}
+    for c in cols:
+        if c not in existing:
+            con.execute(f'ALTER TABLE "{table}" ADD COLUMN "{c}" TEXT')
 
 
 def insert_rows(con: duckdb.DuckDBPyConnection, table: str, rows) -> int:
@@ -372,7 +384,9 @@ def insert_rows(con: duckdb.DuckDBPyConnection, table: str, rows) -> int:
     if not rows:
         return 0
 
-    cols = list(rows[0].keys())
+    # Every key any record carries, in first-seen order. Reading only the first
+    # record's keys silently dropped a field that appeared later in a response.
+    cols = list(dict.fromkeys(k for row in rows for k in row))
     exists = con.execute(
         "SELECT table_name FROM information_schema.tables "
         "WHERE table_name = ?", [table]
@@ -386,14 +400,30 @@ def insert_rows(con: duckdb.DuckDBPyConnection, table: str, rows) -> int:
         ensure_columns(con, table, cols)
 
     col_names = ", ".join(f'"{c}"' for c in cols)
-    placeholders = ", ".join("?" for _ in cols)
-    data = [
-        tuple(str(row[c]) if row.get(c) is not None else None for c in cols)
-        for row in rows
-    ]
-    con.executemany(
-        f'INSERT INTO "{table}" ({col_names}) VALUES ({placeholders})', data
-    )
+
+    # Values become text HERE, in plain Python, before pandas sees them. Handing
+    # pandas the raw records would let it infer types: a column of whole numbers
+    # with one gap becomes float, and 2048 would be stored as "2048.0", which
+    # the silver build's integer casts were never written for. Converting first
+    # keeps every stored value byte-identical to the old path.
+    data = pd.DataFrame(
+        [[str(row[c]) if row.get(c) is not None else None for c in cols]
+         for row in rows],
+        columns=cols, dtype=object)
+
+    # ONE statement, not one per row. This used executemany, which DuckDB runs a
+    # row at a time: measured at 141 rows a second against 84,168 for a bulk
+    # insert of the same rows, about 600 times slower. That made one session of
+    # telemetry take tens of minutes, and it was most of the time the scheduled
+    # ingest spent on ordinary endpoints too, since s01_ingest imports this
+    # function. Found 2026-09-14.
+    select = ", ".join(f'CAST("{c}" AS VARCHAR)' for c in cols)
+    con.register("_insert_rows", data)
+    try:
+        con.execute(f'INSERT INTO "{table}" ({col_names}) '
+                    f'SELECT {select} FROM _insert_rows')
+    finally:
+        con.unregister("_insert_rows")
     con.commit()
     return len(rows)
 
@@ -429,33 +459,51 @@ def record(con, endpoint, session_key, n, status, http_status, note=None) -> Non
     """
     Replace this pair's progress row.
 
-    DELETE then INSERT rather than an upsert. DuckDB's ON CONFLICT would work,
-    but it binds the behaviour to exactly which constraint the table carries,
-    and this table has already lost its key once (see ensure_progress_key). Two
-    statements in a transaction cannot be surprised that way, and the table is
-    6,375 rows written a few dozen times a run, so the cost is nothing.
+    UPDATE the row when it exists, INSERT it when it does not, in one
+    transaction. It used to DELETE then INSERT, and that is broken on DuckDB
+    1.5.5: re-inserting a key deleted in the same transaction is rejected as a
+    duplicate once that key is saved to disk. Reproduced 2026-09-14 on bronze
+    and on a brand-new database, and it is what killed the Madring telemetry
+    fetch right after its rows were written. s01_ingest records every retried
+    pair through this function, so the scheduled run was exposed too, and a
+    failure there leaves rows written but unrecorded, to be fetched and
+    inserted again as duplicates.
+
+    Still not an upsert, for the reason the old version gave: ON CONFLICT binds
+    the behaviour to whichever constraint the table carries, and this table has
+    already lost its key once (see ensure_status_columns). Tested with the
+    unique index dropped: this still records correctly with no duplicate, where
+    INSERT OR REPLACE refuses to run at all.
 
     The timestamp is formatted rather than taken raw, so it keeps the exact
     'YYYY-MM-DD HH:MM:SS' shape SQLite's datetime('now') produced. Rows written
     before and after the migration have to stay comparable: build_session_plan
     compares fetched_at against a session's start time.
     """
+    key = [endpoint, str(session_key)]
+    stamp = "strftime(now(), '%Y-%m-%d %H:%M:%S')"
     con.execute("BEGIN TRANSACTION")
     try:
-        con.execute(
-            "DELETE FROM _ingestion_progress "
-            "WHERE endpoint = ? AND session_key = ?",
-            [endpoint, str(session_key)],
-        )
-        con.execute(
-            """
-            INSERT INTO _ingestion_progress
-                (endpoint, session_key, rows_inserted, fetched_at, status,
-                 http_status, note)
-            VALUES (?, ?, ?, strftime(now(), '%Y-%m-%d %H:%M:%S'), ?, ?, ?)
-            """,
-            [endpoint, str(session_key), n, status, http_status, note],
-        )
+        exists = con.execute(
+            "SELECT COUNT(*) FROM _ingestion_progress "
+            "WHERE endpoint = ? AND session_key = ?", key).fetchone()[0]
+        if exists:
+            con.execute(
+                f"UPDATE _ingestion_progress SET rows_inserted = ?, "
+                f"fetched_at = {stamp}, status = ?, http_status = ?, note = ? "
+                "WHERE endpoint = ? AND session_key = ?",
+                [n, status, http_status, note] + key,
+            )
+        else:
+            con.execute(
+                f"""
+                INSERT INTO _ingestion_progress
+                    (endpoint, session_key, rows_inserted, fetched_at, status,
+                     http_status, note)
+                VALUES (?, ?, ?, {stamp}, ?, ?, ?)
+                """,
+                key + [n, status, http_status, note],
+            )
         con.execute("COMMIT")
     except Exception:
         con.execute("ROLLBACK")

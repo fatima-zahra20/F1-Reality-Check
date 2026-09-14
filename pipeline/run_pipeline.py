@@ -7,6 +7,7 @@ Order
     s02_build_silver  rebuild silver from bronze   (skipped if nothing new)
     s02b_caution_flags rebuild derived flag tables (skipped if nothing new)
     s03_verify        invariant gate               (always runs)
+    s01_backfill      position data for a circuit with no map   (gate passed)
     s07_build_gold    gold layer, the source for the two below it
     s04_descriptive   descriptive serving layer    (only if the gate passed)
     s05_diagnostic    diagnostic serving layer     (only if the gate passed)
@@ -66,7 +67,7 @@ import re
 import subprocess
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import duckdb
@@ -78,7 +79,8 @@ PIPELINE_DIR = Path(__file__).resolve().parent
 PYTHON = sys.executable
 
 # Bronze tables whose silver counterparts must be rebuilt when new data arrives.
-# Telemetry is deliberately absent — never fetched by the scheduled run.
+# Telemetry is deliberately absent: it has no silver table, and the scheduled run
+# fetches it only for a circuit that has no map at all (maps_missing_telemetry).
 REBUILD_TABLES = [
     "meetings", "sessions", "drivers",
     "laps", "stints", "pit", "position", "intervals", "overtakes",
@@ -158,6 +160,136 @@ def missing_derived() -> list[str]:
     finally:
         con.close()
     return [t for t in expected if t not in present]
+
+
+# How long OpenF1 is given to publish a session's position data before an empty
+# answer is believed. It normally arrives within a day of the session. The margin
+# means a slow week is retried rather than written off, while a session that
+# genuinely has none stops being asked about twice a week forever.
+TELEMETRY_GRACE_DAYS = 7
+
+
+def maps_missing_telemetry() -> tuple[list[int], list[str]]:
+    """
+    One session per circuit to fetch position data for, so every raced circuit
+    gets a track map.
+
+    Found 2026-09-14. Madring was raced for the first time on 13 September and
+    shipped with "No track map for this circuit", because a map is traced from
+    location telemetry, telemetry is never part of ingest, and every earlier
+    circuit had been fetched BY HAND at some point. Nothing in the scheduled run
+    would ever have fixed it, and the next new venue would have repeated it.
+
+    A circuit qualifies when it has a race that has ALREADY HAPPENED and not a
+    single location row for any of its sessions. Both halves matter:
+
+      "Already happened" keeps out circuits that are only on the calendar. On
+      the day this was written Kuala Lumpur had no data either, because its
+      race was months away. Without the date filter it would have been queried
+      twice a week until December.
+
+      "Not a single row" means a circuit that already has a map is never
+      touched, so this cannot grow bronze for any circuit that already works.
+
+    Qualifying first, then practice, then the race: the same preference s05c
+    uses when choosing which lap to trace, because a qualifying lap is flat out
+    on the racing line. ONE session per circuit, because one is all a map needs,
+    and a whole weekend would be several times the download for nothing.
+
+    A session whose position data came back empty is skipped once that answer
+    is TELEMETRY_GRACE_DAYS past the session, and the next preference is tried.
+    When every session at a circuit has been answered empty past the grace
+    period, the circuit is reported once per run and not queried: OpenF1 does
+    not have it.
+
+    Returns (session_keys, notes for the log). Read-only. The fetch itself is
+    s01_backfill.py --telemetry, run as its own step so it is logged like one.
+    """
+    if not (DB_PATH.exists() and BRONZE_DB_PATH.exists()):
+        return [], []
+
+    now = datetime.now(timezone.utc)
+    con = duckdb.connect(str(BRONZE_DB_PATH), read_only=True)
+    try:
+        con.execute(f"ATTACH '{DB_PATH.as_posix()}' AS silver (READ_ONLY)")
+        tables = {r[0] for r in con.execute(
+            "SELECT table_name FROM information_schema.tables "
+            "WHERE table_schema = 'main'").fetchall()}
+
+        # Either table can be absent on a fresh bronze, and a missing table
+        # means "nothing recorded", not an error worth stopping the run for.
+        loc_source = ("SELECT DISTINCT CAST(session_key AS INT) AS session_key "
+                      "FROM location") if "location" in tables else \
+                     "SELECT CAST(NULL AS INT) AS session_key WHERE FALSE"
+        progress_source = (
+            "SELECT endpoint, session_key, status, fetched_at "
+            "FROM _ingestion_progress WHERE endpoint = 'location'"
+        ) if "_ingestion_progress" in tables else (
+            "SELECT CAST(NULL AS VARCHAR) AS endpoint, "
+            "CAST(NULL AS VARCHAR) AS session_key, "
+            "CAST(NULL AS VARCHAR) AS status, "
+            "CAST(NULL AS VARCHAR) AS fetched_at WHERE FALSE")
+
+        # date_start is ISO text with a +00:00 offset throughout silver, so a
+        # string comparison against an ISO timestamp in UTC orders correctly.
+        rows = con.execute(f"""
+            WITH loc AS ({loc_source}),
+            progress AS ({progress_source}),
+            bare AS (
+                SELECT s.circuit_key
+                FROM silver.silver_sessions s
+                LEFT JOIN loc ON loc.session_key = s.session_key
+                GROUP BY s.circuit_key
+                HAVING COUNT(loc.session_key) = 0
+                   AND MAX(CASE WHEN s.session_name = 'Race'
+                                 AND s.is_cancelled = 0
+                                 AND s.date_start < ? THEN 1 ELSE 0 END) = 1
+            )
+            SELECT s.circuit_key, s.circuit_short_name, s.session_key,
+                   s.session_name, s.date_start, pr.status, pr.fetched_at
+            FROM silver.silver_sessions s
+            JOIN bare b ON b.circuit_key = s.circuit_key
+            LEFT JOIN progress pr
+                   ON pr.session_key = CAST(s.session_key AS VARCHAR)
+            WHERE s.is_cancelled = 0 AND s.date_start < ?
+            ORDER BY s.circuit_key,
+                     CASE s.session_type WHEN 'Qualifying' THEN 0
+                                         WHEN 'Practice'   THEN 1
+                                         WHEN 'Race'       THEN 2
+                                         ELSE 3 END,
+                     CASE s.session_name WHEN 'Qualifying' THEN 0 ELSE 1 END,
+                     s.date_start DESC
+        """, [now.isoformat(), now.isoformat()]).fetchall()
+    finally:
+        con.close()
+
+    chosen: dict[int, tuple[int, str, str]] = {}
+    exhausted: dict[int, str] = {}
+    for circuit_key, name, session_key, session_name, date_start, status, \
+            fetched_at in rows:
+        if circuit_key in chosen:
+            continue
+        if status == "empty" and fetched_at:
+            started = datetime.fromisoformat(date_start)
+            # fetched_at is 'YYYY-MM-DD HH:MM:SS' with no zone. Treating it as
+            # UTC can be a few hours out, which cannot matter against a margin
+            # measured in days.
+            answered = datetime.strptime(fetched_at, "%Y-%m-%d %H:%M:%S") \
+                .replace(tzinfo=timezone.utc)
+            if answered - started >= timedelta(days=TELEMETRY_GRACE_DAYS):
+                exhausted.setdefault(circuit_key, name)
+                continue
+        chosen[circuit_key] = (int(session_key), name, session_name)
+
+    notes = []
+    for session_key, name, session_name in (chosen[k] for k in sorted(chosen)):
+        notes.append(f"\nNo position data for {name}, so it has no track map. "
+                     f"Fetching {session_name} (session {session_key}).")
+    for circuit_key in sorted(set(exhausted) - set(chosen)):
+        notes.append(f"\n{exhausted[circuit_key]} has no track map, and OpenF1 "
+                     f"answered empty for every session more than "
+                     f"{TELEMETRY_GRACE_DAYS} days after it ran. Not asking again.")
+    return [chosen[k][0] for k in sorted(chosen)], notes
 
 
 def stale_tables() -> list[str]:
@@ -300,6 +432,8 @@ def main() -> int:
             runner.flush()
             return 1
 
+    map_status = "not checked"
+
     # --- 4. verify -------------------------------------------------------------
     code, out = runner.run_step("verify", "s03_verify.py")
     gate_passed = code == 0
@@ -314,12 +448,52 @@ def main() -> int:
 
     if not args.execute:
         runner.log("\nServing layers skipped (dry run).")
+        missing_maps, map_notes = maps_missing_telemetry()
+        for note in map_notes:
+            runner.log(note)
+        map_status = (f"would fetch session(s) {missing_maps}" if missing_maps
+                      else "no circuit missing position data")
     elif not gate_passed:
         runner.log("\nServing layers SKIPPED — the verification gate reported FAIL.")
         runner.log("Building them now would publish data the gate has already")
         runner.log("rejected, presented as a finished dashboard.")
     else:
         serving_status = "built"
+
+        # POSITION DATA FOR A CIRCUIT WITH NO MAP. Telemetry stays out of
+        # ingest, because it is tens of millions of rows. But a circuit raced
+        # for the first time has none, and the map is traced from it, so every
+        # new venue used to ship with "No track map for this circuit" until
+        # somebody fetched it by hand. See maps_missing_telemetry.
+        #
+        # Before the serving loop because s05c reads what this fetches. Never
+        # fatal: a failed fetch costs one circuit its map for one more run, which
+        # is far cheaper than costing the whole dashboard its refresh.
+        missing_maps, map_notes = maps_missing_telemetry()
+        for note in map_notes:
+            runner.log(note)
+        if not missing_maps:
+            map_status = "no circuit missing position data"
+        else:
+            runner.run_step("map_telemetry", "s01_backfill.py",
+                            ["--telemetry", "--sessions",
+                             *[str(k) for k in missing_maps], "--execute"])
+            # Judged by checking again, NOT by the exit code. run_telemetry
+            # returns 0 even when a fetch fails, because it records the failure
+            # and moves on, so a clean exit is no evidence of data arriving.
+            still, _ = maps_missing_telemetry()
+            got = [k for k in missing_maps if k not in still]
+            parts = []
+            if got:
+                parts.append(f"fetched for session(s) {got}")
+            if still:
+                parts.append(f"STILL MISSING for session(s) {still}, "
+                             "retried next run")
+                runner.log(f"\nPosition data still missing for session(s) "
+                           f"{still}. Those circuits have no map this run; the "
+                           "next run tries again.")
+            map_status = "; ".join(parts)
+
         # GOLD RUNS FIRST, AND THAT ORDER IS LOAD-BEARING.
         #
         # s05_diagnostic reads gold, so a run that rebuilt silver and skipped
@@ -402,6 +576,7 @@ def main() -> int:
     runner.log(f"rebuild:  {'yes' if should_rebuild else 'skipped'}")
     runner.log(f"gate:     {'PASS' if gate_passed else 'FAIL'}")
     runner.log(f"serving:  {serving_status}")
+    runner.log(f"maps:     {map_status}")
     runner.log(f"publish:  {publish_status}")
     runner.log(f"log:      {runner.log_path}")
     runner.log("=" * 74)
