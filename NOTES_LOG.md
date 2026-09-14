@@ -2234,9 +2234,62 @@ by the old code, which is consistent with the 2026 regulations removing DRS. s05
 + 721,300 + 661,160), while it reports "races with telemetry: 7".
 
 **Still manual, on purpose.** A new circuit's outline is traced fresh on each run until it is
-pinned, and `--repick` re-chooses all 24 existing circuits, so it is not run casually. Its
-compass letters need `fetch_circuit_north.py`, which stays hand-run because it depends on
-somebody else's server for a constant. Neither affects whether a map appears.
+pinned, and `--repick` re-chooses all 24 existing circuits, so it is not run casually. It does
+not affect whether a map appears. Compass letters were listed here as manual too; that changed
+the same day, see #73.
+
+
+### 73. A new circuit gets verified compass letters automatically
+
+*2026-09-14. Madring had its map and a dial with no N, E, S or W.*
+
+**Why the dial was blank.** North comes from MultiViewer's `rotation`, stored in
+`circuit_north.json` by a hand-run script, and Madring had never been fetched. The blank dial
+was the page working as designed: a circuit with no rotation draws no letters, because a wrong
+compass is worse than none.
+
+**Why the script could not simply be run.** Its docstring described three checks, and the one
+that matters, MultiViewer's shape sitting in the same coordinate frame as this project's
+outline, had been done once by hand and was not in the code. Run for a new circuit it would
+have written whatever came back, and `--execute` rewrote all 24 entries unchecked. For Madring
+there was nothing to fetch anyway: MultiViewer answered 404 at `circuits/153/2026`, without a
+year, and for 2025, while answering 2026 requests for Monza and Monte Carlo normally. It has no
+record of the circuit.
+
+**The check, as code.** `verify_against_outline` resamples both shapes evenly along the track,
+centres and scales them, finds the best-fitting rotation at every starting point in both
+directions of travel, and repeats with MultiViewer's shape mirrored. Calibrated on the 24
+circuits the hand check had accepted, every one of whose rotations was confirmed unchanged at
+the source that day:
+
+| measure | on the 24 | accepted when |
+|---|---|---|
+| turn needed to line up | at most 0.41 deg | at most 3 deg |
+| remaining misfit | at most 0.0195 | at most 0.06 |
+| mirrored fit, times worse | at least 11.4x | at least 5x |
+| MultiViewer size against ours | 9.98x to 10.01x | 9.5x to 10.5x |
+
+The scale is telling on its own: MultiViewer's coordinates are ten times this project's on
+every circuit, which is what the same frame in different units looks like. 3 degrees is the
+bound the hand check used; the other limits leave two to three times the worst value measured.
+
+**Three modes.** `--missing-only` asks only about circuits with a traced outline and no
+rotation, adds an entry only if it verifies, and never touches existing ones. `--verify-known`
+re-checks every stored rotation and writes nothing. The full refresh now refuses to write if any
+circuit fails.
+
+**In the weekly run.** After the map step and never fatal, rerunning s05c only when a rotation
+was added, so the letters appear in that same run rather than the next. Summary line
+`compass:`. Until MultiViewer adds Madring that is one request per run, answered 404.
+
+**Tested** against the real script offline, with network calls replaced by the responses
+already downloaded: all 24 verify; Catalunya removed from a copy of the file is re-added as 303
+with the other 23 entries unchanged; a mirrored and a 20-degree-turned Catalunya are both
+rejected with the file untouched; Madring's 404 is reported as missing with exit 0; a dry run
+adds nothing; the real file was never written. Live, `--missing-only` reported Madring not
+available (HTTP 404) and exited 0. Inside a full pipeline run (without publishing) the step
+took 3.5s after the map step, the gate passed, 84 of 84 races kept their maps, and the summary
+read `compass: still no verified rotation for circuit(s) ['153'], retried next run`.
 
 
 ## Open questions

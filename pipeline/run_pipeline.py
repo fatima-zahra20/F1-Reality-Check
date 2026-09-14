@@ -14,6 +14,8 @@ Order
     s05b_prescriptive lap-factor and counterfactual models  (gate passed)
     s05c_racemap      circuit geometry                      (gate passed)
     s05d_telemetry    tow and DRS effects                   (gate passed)
+    fetch_circuit_north  compass for a circuit with a map and no rotation
+                         (gate passed; reruns s05c only if one was added)
     s06_publish       push data to the dashboard   (only with --publish)
 
 Skipping matters: most weeks bring no new data, and rebuilding 2.1M interval
@@ -433,6 +435,7 @@ def main() -> int:
             return 1
 
     map_status = "not checked"
+    north_status = "not checked"
 
     # --- 4. verify -------------------------------------------------------------
     code, out = runner.run_step("verify", "s03_verify.py")
@@ -542,6 +545,42 @@ def main() -> int:
                     runner.log("Gold is the source for the diagnostic layer, so "
                                "the rest would read a stale copy. Stopping here.")
                     break
+        # COMPASS FOR A CIRCUIT WITH A MAP AND NO ROTATION. After the map, because
+        # verification compares MultiViewer's track shape with the outline s05c
+        # has just written. A rotation already stored is never fetched again, so
+        # this asks nothing about the circuits that work; it exists because
+        # Madring got its map and a compass with no letters.
+        #
+        # Never fatal, for the same reason as the map fetch above: an unreachable
+        # server or an unverified rotation costs one dial its letters for one
+        # more run. s05c reruns ONLY when a rotation was actually added, since
+        # map_coverage carries north_rotation and would otherwise lag a run.
+        if "racemap" in serving_failed:
+            north_status = "skipped, the map step failed"
+        else:
+            rc, out = runner.run_step("north", "fetch_circuit_north.py",
+                                      ["--missing-only", "--execute"])
+            added = re.search(r"north added:\s*\[([^\]]*)\]", out or "")
+            missing = re.search(r"north missing:\s*\[([^\]]*)\]", out or "")
+            added = [k.strip() for k in added.group(1).split(",") if k.strip()] \
+                if added else []
+            missing = [k.strip() for k in missing.group(1).split(",") if k.strip()] \
+                if missing else []
+            if rc != 0:
+                north_status = "check FAILED, compass unchanged; retried next run"
+            elif added:
+                north_status = f"added a verified rotation for circuit(s) {added}"
+                rc2, _ = runner.run_step("racemap", "s05c_racemap.py")
+                if rc2 != 0:
+                    runner.log("\nMap rebuild after adding a rotation FAILED.")
+                    serving_failed.append("racemap")
+                    north_status += "; map rebuild FAILED"
+            elif missing:
+                north_status = (f"still no verified rotation for circuit(s) "
+                                f"{missing}, retried next run")
+            else:
+                north_status = "every mapped circuit has a rotation"
+
         if serving_failed:
             serving_status = f"FAILED: {', '.join(serving_failed)}"
 
@@ -577,6 +616,7 @@ def main() -> int:
     runner.log(f"gate:     {'PASS' if gate_passed else 'FAIL'}")
     runner.log(f"serving:  {serving_status}")
     runner.log(f"maps:     {map_status}")
+    runner.log(f"compass:  {north_status}")
     runner.log(f"publish:  {publish_status}")
     runner.log(f"log:      {runner.log_path}")
     runner.log("=" * 74)
