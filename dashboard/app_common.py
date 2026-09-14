@@ -22,6 +22,30 @@ import pandas as pd
 import requests
 import streamlit as st
 
+# --- numexpr, disabled on purpose ---------------------------------------------
+# NOT a performance setting. The same correctness fix as pipeline/config.py, and
+# the reasoning is written out in full there and in NOTES_LOG #68: pandas hands
+# elementwise operations to numexpr above 1,000,000 elements, and numexpr 2.14.1
+# on four threads intermittently returns a WRONG ANSWER for an integer
+# comparison at that size. Measured at 16 wrong in 32,400 comparisons with it
+# on, 0 in 32,400 with it off, and off was marginally faster.
+#
+# THE PIPELINE FIX DOES NOT REACH HERE. The dashboard does not import
+# pipeline/config.py and never has, so config's setting protects the pipeline
+# only. This line is the dashboard's own copy, not a duplicate of a shared one.
+#
+# Nothing in the bundle is over the threshold today, the largest table being
+# map_measured_xy at 372,356 rows, so this is precautionary rather than a fix to
+# a visible bug. That is the point: the same bug ran silently in the pipeline for
+# two years, and "no table is big enough yet" is a fact about today's data rather
+# than a guarantee about next season's.
+#
+# Here rather than in streamlit_app.py because every page imports app_common,
+# and the option is read when an operation runs rather than at import, so it
+# only has to be set before the first comparison rather than before pandas
+# loads.
+pd.set_option("compute.use_numexpr", False)
+
 REPO = "fatima-zahra20/F1-Reality-Check"
 
 # Must name the asset pipeline/s06_publish.py uploads (its ASSET_NAME). Nothing

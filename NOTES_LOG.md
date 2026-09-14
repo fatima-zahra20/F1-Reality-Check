@@ -1959,9 +1959,17 @@ fallback path runs the same broken comparison.
 
 **The fix** is one line in `config.py`, which every pipeline module imports, so no step
 can be fixed and later forgotten. Exposure is anything over a million rows: s05c's 4.5M
-positions and s05d's 2.75M `car_data` samples. The dashboard is not exposed today, its
-largest bundle table being `map_measured_xy` at 372,356 rows, but that is a fact about
-today's data rather than a guarantee.
+positions and s05d's 2.75M `car_data` samples.
+
+**The dashboard needed its own copy, added 2026-09-14.** It does not import
+`pipeline/config.py` and never has, so the line above protected the pipeline only. Nothing
+in the bundle crosses the threshold today, the largest table being `map_measured_xy` at
+372,356 rows, so this was precautionary rather than a fix to a visible bug. That is the
+point: this same bug ran silently in the pipeline for two years, and "no table is big
+enough yet" is a fact about today's data rather than a guarantee about next season's. It
+sits in `dashboard/app_common.py`, which every page imports. Verified by importing a
+dashboard module and reading the effective flag, not just the option, then confirming a
+1.5M-row comparison agrees with numpy.
 
 **Acceptance.** The original entry asked for four or more runs and one distinct geometry
 hash. Six runs gave `e1f9f6673475540f` every time, 24 circuits, 9,600 rows, and **24 of 24
