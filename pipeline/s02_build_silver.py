@@ -444,25 +444,25 @@ SELECT
     CAST(session_key   AS INTEGER),
     CAST(driver_number AS INTEGER),
     CAST(meeting_key   AS INTEGER),
-    CAST("position"    AS INTEGER),
-    CAST(number_of_laps AS INTEGER),
+    TRY_CAST("position" AS INTEGER),          -- 'RT' etc. -> NULL instead of crashing
+    TRY_CAST(number_of_laps AS INTEGER),
     CASE dnf WHEN 'True' THEN 1 WHEN 'False' THEN 0 END,
     CASE dns WHEN 'True' THEN 1 WHEN 'False' THEN 0 END,
     CASE dsq WHEN 'True' THEN 1 WHEN 'False' THEN 0 END,
-    CASE WHEN duration LIKE '[%' THEN NULL ELSE CAST(duration AS DOUBLE) END,
+    CASE WHEN duration LIKE '[%' THEN NULL ELSE TRY_CAST(duration AS DOUBLE) END,
     CASE WHEN duration LIKE '[%' THEN duration ELSE NULL END,
     CASE
         WHEN gap_to_leader LIKE '[%' THEN NULL
         WHEN gap_to_leader LIKE '%LAP%' THEN NULL
-        ELSE CAST(gap_to_leader AS DOUBLE)
+        ELSE TRY_CAST(gap_to_leader AS DOUBLE)
     END,
     CASE
         WHEN gap_to_leader LIKE '%LAP%'
-        THEN CAST(REPLACE(REPLACE(REPLACE(gap_to_leader, '+', ''), ' LAPS', ''), ' LAP', '') AS INTEGER)
+        THEN TRY_CAST(REPLACE(REPLACE(REPLACE(gap_to_leader, '+', ''), ' LAPS', ''), ' LAP', '') AS INTEGER)
         ELSE NULL
     END,
     CASE WHEN gap_to_leader LIKE '[%' THEN gap_to_leader ELSE NULL END,
-    CAST(points AS DOUBLE)
+    TRY_CAST(points AS DOUBLE)
 FROM bronze.session_result
 """]
 
